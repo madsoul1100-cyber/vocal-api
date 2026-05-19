@@ -1,0 +1,108 @@
+import bcrypt from 'bcryptjs'
+import jwt from 'jsonwebtoken'
+import { createSupabaseServiceClient } from '@/lib/supabase.js'
+
+const BCRYPT_ROUNDS = 12
+const JWT_SECRET = process.env.JWT_SECRET ?? ''
+const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN ?? '7d'
+
+export interface JwtPayload {
+  sub: string
+  orgId: string
+  role: string
+}
+
+export async function hashPassword(plain: string): Promise<string> {
+  return bcrypt.hash(plain, BCRYPT_ROUNDS)
+}
+
+export async function verifyPassword(plain: string, hash: string): Promise<boolean> {
+  return bcrypt.compare(plain, hash)
+}
+
+export function signAccessToken(payload: JwtPayload): string {
+  if (!JWT_SECRET || JWT_SECRET.length < 32) {
+    throw new Error('JWT_SECRET must be set (min 32 characters)')
+  }
+  return jwt.sign(payload, JWT_SECRET, {
+    expiresIn: JWT_EXPIRES_IN as jwt.SignOptions['expiresIn'],
+  })
+}
+
+export function verifyAccessToken(token: string): JwtPayload | null {
+  if (!JWT_SECRET) return null
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET) as JwtPayload
+    if (!decoded?.sub) return null
+    return decoded
+  } catch {
+    return null
+  }
+}
+
+export async function loginWithEmailPassword(email: string, password: string) {
+  const supabase = createSupabaseServiceClient()
+  const normalized = email.trim().toLowerCase()
+
+  const { data: user, error } = await supabase
+    .from('users')
+    .select('*, roles(*), organizations(name)')
+    .eq('email', normalized)
+    .maybeSingle()
+
+  if (error || !user) {
+    return { ok: false as const, error: 'Invalid email or password', status: 401 }
+  }
+
+  if (!user.active) {
+    return {
+      ok: false as const,
+      error: 'Account pending activation',
+      code: 'PENDING_ACTIVATION',
+      status: 403,
+    }
+  }
+
+  const hash = user.password_hash as string | null
+  if (!hash) {
+    return {
+      ok: false as const,
+      error: 'Password not set for this account. Ask an admin to run npm run seed:passwords.',
+      status: 403,
+    }
+  }
+
+  const valid = await verifyPassword(password, hash)
+  if (!valid) {
+    return { ok: false as const, error: 'Invalid email or password', status: 401 }
+  }
+
+  const roleName = (user.roles as { name: string } | null)?.name ?? ''
+  const token = signAccessToken({
+    sub: user.id,
+    orgId: user.organization_id,
+    role: roleName,
+  })
+
+  await supabase
+    .from('users')
+    .update({ last_login_at: new Date().toISOString() })
+    .eq('id', user.id)
+
+  return { ok: true as const, token, user }
+}
+
+export function formatUserResponse(user: Record<string, unknown>) {
+  const roles = user.roles as { name: string; display_name: string } | null
+  const org = user.organizations as { name: string } | null
+  return {
+    id: user.id,
+    full_name: user.full_name,
+    email: user.email,
+    phone: user.phone,
+    organization_id: user.organization_id,
+    organization_name: org?.name ?? null,
+    role: roles?.name ?? null,
+    role_display_name: roles?.display_name ?? null,
+  }
+}
