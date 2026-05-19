@@ -16,7 +16,7 @@ export interface JobRunRow {
 }
 
 export interface ExpireJobResult {
-  ok: boolean
+  ok: true
   ran_at: string
   expired: number
   reoffered: number
