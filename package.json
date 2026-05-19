@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc",
+    "build": "tsc && tsc-alias -p tsconfig.json",
     "start": "node dist/index.js",
     "typecheck": "tsc --noEmit",
     "db:migrate": "tsx scripts/db-migrate.ts",
@@ -33,6 +33,7 @@
     "@types/multer": "^1.4.12",
     "@types/node": "^20",
     "@types/pg": "^8.11.10",
+    "tsc-alias": "^1.8.17",
     "tsx": "^4.19.2",
     "typescript": "^5"
   }
