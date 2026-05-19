@@ -4,10 +4,10 @@ node_modules/
 # Build
 dist/
 
-# Environment
-.env
-.env.*
-!.env.example
+# # Environment
+# .env
+# .env.*
+# !.env.example
 
 # Logs
 logs/
