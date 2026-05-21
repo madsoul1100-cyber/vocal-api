@@ -1,4 +1,5 @@
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
+import { stripTicketAiMirrorFields } from '@/services/ticketQueries.js'
 import type { AiTicketSuggestion } from '@/types/database.js'
 
 export const AI_SUGGESTION_ALLOWED_ROLES = ['super_admin', 'central_support']
@@ -164,5 +165,8 @@ export async function confirmAiSuggestion(
     return { ok: true as const, ticket: null }
   }
 
-  return { ok: true as const, ticket: refreshed }
+  return {
+    ok: true as const,
+    ticket: stripTicketAiMirrorFields(refreshed as Record<string, unknown>),
+  }
 }

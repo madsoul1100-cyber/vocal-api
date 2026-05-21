@@ -63,7 +63,7 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /v2/tickets/:id` | Ticket detail |
+| `GET /v2/tickets/:id` | Ticket detail (excludes `ai_suggestions_confirmed` / `ai_confirmed_*`; use ai-suggestion for AI state) |
 | `GET /v2/tickets/:id/ai-suggestion` | Pending AI suggestion (`super_admin` / `central_support` only; latest completed, unconfirmed, or `null`) |
 | `POST /v2/tickets/confirm-ai` | Apply AI suggestion to empty ticket fields; body `{ ticket_id, suggestion_id }`; same roles only |
 

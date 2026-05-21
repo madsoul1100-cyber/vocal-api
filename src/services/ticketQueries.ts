@@ -21,6 +21,21 @@ export const TICKET_LIST_SELECT = `
   issue_categories!tickets_category_id_fkey(id, name)
 ` as const
 
+/** Duplicates ai_ticket_suggestions confirm state — omitted from v2 ticket JSON reads. */
+const TICKET_AI_MIRROR_KEYS = [
+  'ai_suggestions_confirmed',
+  'ai_confirmed_by',
+  'ai_confirmed_at',
+] as const
+
+export function stripTicketAiMirrorFields<T extends Record<string, unknown>>(ticket: T) {
+  const out = { ...ticket }
+  for (const key of TICKET_AI_MIRROR_KEYS) {
+    delete out[key]
+  }
+  return out
+}
+
 export interface TicketFilters {
   stage?: TicketStage
   severity?: Severity

@@ -6,6 +6,7 @@ import {
   listTicketsV2,
   parseTicketsV2ListQuery,
   ticketsV2FiltersEcho,
+  stripTicketAiMirrorFields,
 } from '@/services/ticketQueries.js'
 import { acceptTicket, rejectTicket, updateTicketStatus } from '@/services/ticketActionsService.js'
 import {
@@ -157,7 +158,7 @@ router.get('/:id', requireClerkAuth, async (req, res) => {
     return
   }
 
-  res.json({ ticket: data })
+  res.json({ ticket: stripTicketAiMirrorFields(data as Record<string, unknown>) })
 })
 
 export default router
