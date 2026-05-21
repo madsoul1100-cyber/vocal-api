@@ -29,13 +29,13 @@ Business logic stays in `src/services/` — both versions call the same services
 
 | Query param | Description |
 |-------------|-------------|
-| `page` | Page number (default `1`) |
-| `limit` or `page_size` | Page size (default `20`, max `100`) |
+| `limit` | Page size (default `20`, max `100`) |
+| `offset` | Rows to skip (default `0`) |
 | `keyword` or `search` | Search name, org, role, email, phone |
 | `category` | Filter by `directory_contact_tags` where `tag_type=category` (partial match) |
 | `status` | `verified`, `unverified`, `outdated`, or `all` |
 
-Response includes `pagination` (`page`, `limit`, `total`, `totalPages`, `hasNextPage`, `hasPreviousPage`), `filters`, and each contact has a `categories` array.
+Response includes `pagination` (`limit`, `offset`, `total`, `hasNextPage`, `hasPreviousPage`), `filters`, and each contact has a `categories` array.
 
 | Endpoint | Description |
 |----------|-------------|

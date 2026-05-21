@@ -161,12 +161,11 @@ function sanitizeDirectoryCategory(raw: string): string {
 }
 
 export function parseDirectoryV2ListQuery(query: Record<string, unknown>): DirectoryListV2Options {
-  const page = Math.max(1, parseInt(String(query.page ?? '1'), 10) || 1)
   let limit =
-    parseInt(String(query.limit ?? query.page_size ?? DIRECTORY_V2_DEFAULT_LIMIT), 10) ||
+    parseInt(String(query.limit ?? DIRECTORY_V2_DEFAULT_LIMIT), 10) ||
     DIRECTORY_V2_DEFAULT_LIMIT
   limit = Math.min(DIRECTORY_V2_MAX_LIMIT, Math.max(1, limit))
-  const offset = (page - 1) * limit
+  const offset = Math.max(0, parseInt(String(query.offset ?? '0'), 10) || 0)
 
   const keywordRaw =
     (typeof query.keyword === 'string' && query.keyword) ||
@@ -181,7 +180,6 @@ export function parseDirectoryV2ListQuery(query: Record<string, unknown>): Direc
     typeof query.status === 'string' && query.status.trim() ? query.status.trim() : undefined
 
   return {
-    page,
     limit,
     offset,
     keyword: keyword || undefined,
@@ -191,18 +189,16 @@ export function parseDirectoryV2ListQuery(query: Record<string, unknown>): Direc
 }
 
 function buildDirectoryV2Pagination(
-  page: number,
+  offset: number,
   limit: number,
   total: number,
 ): DirectoryListV2Result['pagination'] {
-  const totalPages = total === 0 ? 0 : Math.ceil(total / limit)
   return {
-    page,
     limit,
+    offset,
     total,
-    totalPages,
-    hasNextPage: page < totalPages,
-    hasPreviousPage: page > 1 && totalPages > 0,
+    hasNextPage: offset + limit < total,
+    hasPreviousPage: offset > 0,
   }
 }
 
@@ -334,7 +330,7 @@ async function listDirectoryContactsV2Pg(
   const contacts = await attachContactCategories(res.rows)
   return {
     contacts,
-    pagination: buildDirectoryV2Pagination(opts.page, opts.limit, total),
+    pagination: buildDirectoryV2Pagination(opts.offset, opts.limit, total),
   }
 }
 
@@ -392,7 +388,7 @@ async function listDirectoryContactsV2Supabase(
 
   return {
     contacts,
-    pagination: buildDirectoryV2Pagination(opts.page, opts.limit, total),
+    pagination: buildDirectoryV2Pagination(opts.offset, opts.limit, total),
   }
 }
 

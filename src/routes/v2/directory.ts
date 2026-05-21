@@ -35,6 +35,8 @@ router.get('/', requireClerkAuth, async (req, res) => {
         keyword: listOpts.keyword ?? null,
         category: listOpts.category ?? null,
         status: listOpts.status ?? null,
+        limit: listOpts.limit,
+        offset: listOpts.offset,
       },
     })
   } catch (err) {
