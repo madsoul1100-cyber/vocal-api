@@ -5,6 +5,7 @@ import { clerkMiddleware } from '@clerk/express'
 import { getClerkAuthorizedParties, isAllowedCorsOrigin } from '@/lib/corsOrigins.js'
 import { isDevAuthBypassEnabled } from '@/lib/devAuth.js'
 import webhooksRouter from '@/routes/webhooks/index.js'
+import whatsappRouter from '@/routes/webhooks/whatsapp.js'
 import v1Router from '@/routes/v1/index.js'
 import v2Router from '@/routes/v2/index.js'
 import { errorHandler } from '@/middleware/errorHandler.js'
@@ -29,6 +30,7 @@ app.use(
   }),
 )
 
+app.use('/webhooks/whatsapp', whatsappRouter)
 app.use('/webhooks', express.json(), webhooksRouter)
 
 app.get('/health', (_req, res) => {

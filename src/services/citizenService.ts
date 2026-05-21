@@ -67,6 +67,56 @@ export async function upsertCitizenFromTelegram(
   return { citizenId: citizen.id, isNew: true }
 }
 
+export async function upsertCitizenFromWhatsApp(
+  organizationId: string,
+  phoneE164: string,
+  displayName?: string,
+): Promise<UpsertCitizenResult> {
+  const supabase = createSupabaseServiceClient()
+  const channelUserId = phoneE164.startsWith('+') ? phoneE164 : `+${phoneE164.replace(/\D/g, '')}`
+
+  const { data: existing } = await supabase
+    .from('citizen_channel_identities')
+    .select('citizen_id')
+    .eq('channel', 'whatsapp')
+    .eq('channel_user_id', channelUserId)
+    .single()
+
+  if (existing) {
+    await supabase
+      .from('citizen_channel_identities')
+      .update({ last_seen_at: new Date().toISOString() })
+      .eq('channel', 'whatsapp')
+      .eq('channel_user_id', channelUserId)
+
+    return { citizenId: existing.citizen_id, isNew: false }
+  }
+
+  const { data: citizen, error: citizenError } = await supabase
+    .from('citizens')
+    .insert({
+      organization_id: organizationId,
+      display_name: displayName ?? null,
+      is_anonymous: false,
+    })
+    .select('id')
+    .single()
+
+  if (citizenError || !citizen) {
+    throw new Error('Failed to create citizen: ' + citizenError?.message)
+  }
+
+  await supabase.from('citizen_channel_identities').insert({
+    citizen_id: citizen.id,
+    channel: 'whatsapp',
+    channel_user_id: channelUserId,
+    username: null,
+    phone: channelUserId,
+  })
+
+  return { citizenId: citizen.id, isNew: true }
+}
+
 export async function getOrCreateConversation(
   organizationId: string,
   channel: 'telegram' | 'whatsapp' | 'web',

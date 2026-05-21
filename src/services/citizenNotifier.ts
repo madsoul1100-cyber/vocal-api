@@ -1,7 +1,6 @@
 /**
  * Citizen notifier — pushes status updates back to the citizen on the
- * channel they filed from. Currently Telegram only; WhatsApp + web are
- * placeholders for Phase 2.
+ * channel they filed from (Telegram or WhatsApp).
  *
  * Fire-and-forget: callers should NOT await this (it's already internally
  * non-throwing), but awaiting is fine — this function never throws.
@@ -15,6 +14,8 @@
 
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
 import { sendTelegramMessage, citizenStageLabel } from './telegramService'
+import { sendWhatsAppMessage } from './whatsappService'
+import type { Channel } from '@/types/database.js'
 import { SUB_STATUS_LABELS, type TicketStage, type TicketSubStatus } from '@/types/database.js'
 
 type EventKey =
@@ -87,8 +88,13 @@ function pickKeyFromSubStatus(sub: TicketSubStatus, stage: TicketStage): EventKe
   return 'stage_generic'
 }
 
+/** Plain text for WhatsApp (strip Telegram Markdown backticks). */
+function formatBodyForWhatsApp(body: string): string {
+  return body.replace(/`/g, '').replace(/\*/g, '')
+}
+
 /**
- * Main entry point. Resolves the citizen's Telegram chat_id for this ticket,
+ * Main entry point. Resolves the citizen's channel identity for this ticket,
  * renders the right template, sends it, and writes a lean outbound row to
  * channel_messages (template-key only, not the rendered text).
  *
@@ -108,21 +114,39 @@ export async function notifyCitizenOfTicketUpdate(args: {
 
     const { data: ticket } = await supabase
       .from('tickets')
-      .select('id, organization_id, ticket_number, citizen_id')
+      .select('id, organization_id, ticket_number, citizen_id, source_channel')
       .eq('id', args.ticketId)
       .single()
     if (!ticket?.citizen_id) return { sent: false, reason: 'no_citizen' }
 
-    // Resolve a Telegram chat id from the citizen's channel identities.
-    const { data: identity } = await supabase
+    const preferredChannel = (ticket.source_channel as Channel) || 'telegram'
+    let channel: Channel = preferredChannel
+    if (preferredChannel !== 'telegram' && preferredChannel !== 'whatsapp') {
+      channel = 'telegram'
+    }
+
+    let { data: identity } = await supabase
       .from('citizen_channel_identities')
       .select('channel, channel_user_id')
       .eq('citizen_id', ticket.citizen_id)
-      .eq('channel', 'telegram')
+      .eq('channel', channel)
       .order('last_seen_at', { ascending: false })
       .limit(1)
       .maybeSingle()
-    if (!identity) return { sent: false, reason: 'no_telegram_identity' }
+
+    if (!identity) {
+      const { data: fallback } = await supabase
+        .from('citizen_channel_identities')
+        .select('channel, channel_user_id')
+        .eq('citizen_id', ticket.citizen_id)
+        .in('channel', ['telegram', 'whatsapp'])
+        .order('last_seen_at', { ascending: false })
+        .limit(1)
+        .maybeSingle()
+      identity = fallback
+    }
+    if (!identity) return { sent: false, reason: 'no_channel_identity' }
+    channel = identity.channel as Channel
 
     // Skip no-op (same sub_status).
     if (args.prevSubStatus && args.prevSubStatus === args.newSubStatus && !args.key) {
@@ -152,15 +176,17 @@ export async function notifyCitizenOfTicketUpdate(args: {
       workerName,
     })
 
-    await sendTelegramMessage(identity.channel_user_id, body)
+    if (channel === 'whatsapp') {
+      await sendWhatsAppMessage(identity.channel_user_id, formatBodyForWhatsApp(body))
+    } else {
+      await sendTelegramMessage(identity.channel_user_id, body)
+    }
 
-    // Lean outbound record: template key + variables only, not full text.
-    // Find the latest open conversation for this citizen to associate with.
     const { data: conv } = await supabase
       .from('channel_conversations')
       .select('id')
       .eq('organization_id', ticket.organization_id)
-      .eq('channel', 'telegram')
+      .eq('channel', channel)
       .eq('channel_user_id', identity.channel_user_id)
       .order('last_activity_at', { ascending: false })
       .limit(1)
@@ -170,7 +196,7 @@ export async function notifyCitizenOfTicketUpdate(args: {
       await supabase.from('channel_messages').insert({
         conversation_id: conv.id,
         organization_id: ticket.organization_id,
-        channel: 'telegram',
+        channel,
         direction: 'outbound',
         message_type: 'system',
         raw_text: null, // intentional — see comment at top
