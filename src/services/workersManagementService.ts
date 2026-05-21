@@ -375,21 +375,27 @@ async function listWorkersV2Pg(
   }
 }
 
+function workersV2SupabaseSelect(opts: WorkersListV2Options): string {
+  const rolesEmbed = opts.role
+    ? 'roles!inner(name, display_name)'
+    : 'roles(name, display_name)'
+  const parts = [
+    'id, full_name, phone, email, active, last_login_at, created_at',
+    rolesEmbed,
+  ]
+  if (opts.territoryId) parts.push('user_territories!inner(territory_id)')
+  return parts.join(', ')
+}
+
 async function listWorkersV2Supabase(
   orgId: string,
   opts: WorkersListV2Options,
 ): Promise<Pick<WorkersListV2Result, 'workers' | 'pagination' | 'pending' | 'pending_pagination'>> {
   const supabase = createSupabaseServiceClient()
 
-  let select =
-    'id, full_name, phone, email, active, last_login_at, created_at, roles(name, display_name)'
-  if (opts.territoryId) {
-    select += ', user_territories!inner(territory_id)'
-  }
-
   let query = supabase
     .from('users')
-    .select(select, { count: 'exact' })
+    .select(workersV2SupabaseSelect(opts), { count: 'exact' })
     .eq('organization_id', orgId)
 
   if (opts.active === true) query = query.eq('active', true)
