@@ -27,6 +27,7 @@ import {
   ticketHasAttachments,
   ticketHasNotes,
 } from '@/services/ticketAttachmentService.js'
+import { listTicketStageHistory } from '@/services/ticketStageHistoryService.js'
 
 const router = Router()
 const upload = multer({
@@ -258,20 +259,29 @@ router.get('/:id', requireClerkAuth, async (req, res) => {
     user.roles?.name,
   )
   const ticketId = String(req.params.id)
-  const [has_pending_ai_suggestion, has_attachments, has_notes] = await Promise.all([
-    Promise.resolve(shouldFetchAiSuggestion(user.roles?.name, row.needs_triage === true)),
-    ticketHasAttachments(ticketId),
-    ticketHasNotes(ticketId),
-  ])
+  const [has_pending_ai_suggestion, has_attachments, has_notes, statusHistoryRes] =
+    await Promise.all([
+      Promise.resolve(shouldFetchAiSuggestion(user.roles?.name, row.needs_triage === true)),
+      ticketHasAttachments(ticketId),
+      ticketHasNotes(ticketId),
+      listTicketStageHistory(ticketId, user.organization_id),
+    ])
   const can_preview_attachments = canPreviewAttachmentMedia(
     user.roles?.name,
     row.citizen_identity_revealed_at as string | null,
   )
 
+  if ('error' in statusHistoryRes) {
+    console.error('[GET /v2/tickets/:id] status_history', statusHistoryRes.error)
+    res.status(500).json({ error: statusHistoryRes.error })
+    return
+  }
+
   res.json({
     ticket: {
       ...ticket,
       citizen_identity,
+      status_history: statusHistoryRes,
       has_pending_ai_suggestion,
       has_attachments,
       has_notes,
