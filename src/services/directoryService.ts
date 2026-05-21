@@ -120,6 +120,294 @@ async function listDirectoryContactsSupabase(
   return { contacts: (data ?? []) as DirectoryContact[], count: count ?? 0 }
 }
 
+// --- v2 list (pagination, keyword, category) ---
+
+export const DIRECTORY_V2_DEFAULT_LIMIT = 20
+export const DIRECTORY_V2_MAX_LIMIT = 100
+
+export interface DirectoryListV2Options {
+  page: number
+  limit: number
+  offset: number
+  keyword?: string
+  category?: string
+  status?: string
+}
+
+export interface DirectoryContactV2 extends DirectoryContact {
+  categories: string[]
+}
+
+export interface DirectoryListV2Result {
+  contacts: DirectoryContactV2[]
+  pagination: {
+    page: number
+    limit: number
+    total: number
+    totalPages: number
+    hasNextPage: boolean
+    hasPreviousPage: boolean
+  }
+}
+
+function sanitizeDirectoryKeyword(raw: string): string {
+  return raw
+    .replace(/[,()."'\\]/g, ' ')
+    .replace(/[%_]/g, '')
+    .trim()
+    .slice(0, 100)
+}
+
+function sanitizeDirectoryCategory(raw: string): string {
+  return raw.trim().slice(0, 120)
+}
+
+export function parseDirectoryV2ListQuery(query: Record<string, unknown>): DirectoryListV2Options {
+  const page = Math.max(1, parseInt(String(query.page ?? '1'), 10) || 1)
+  let limit =
+    parseInt(String(query.limit ?? query.page_size ?? DIRECTORY_V2_DEFAULT_LIMIT), 10) ||
+    DIRECTORY_V2_DEFAULT_LIMIT
+  limit = Math.min(DIRECTORY_V2_MAX_LIMIT, Math.max(1, limit))
+  const offset = (page - 1) * limit
+
+  const keywordRaw =
+    (typeof query.keyword === 'string' && query.keyword) ||
+    (typeof query.search === 'string' && query.search) ||
+    undefined
+  const keyword = keywordRaw ? sanitizeDirectoryKeyword(keywordRaw) : undefined
+
+  const categoryRaw = typeof query.category === 'string' ? query.category : undefined
+  const category = categoryRaw ? sanitizeDirectoryCategory(categoryRaw) : undefined
+
+  const status =
+    typeof query.status === 'string' && query.status.trim() ? query.status.trim() : undefined
+
+  return {
+    page,
+    limit,
+    offset,
+    keyword: keyword || undefined,
+    category: category || undefined,
+    status,
+  }
+}
+
+function buildDirectoryV2Pagination(
+  page: number,
+  limit: number,
+  total: number,
+): DirectoryListV2Result['pagination'] {
+  const totalPages = total === 0 ? 0 : Math.ceil(total / limit)
+  return {
+    page,
+    limit,
+    total,
+    totalPages,
+    hasNextPage: page < totalPages,
+    hasPreviousPage: page > 1 && totalPages > 0,
+  }
+}
+
+async function attachContactCategories(
+  contacts: DirectoryContact[],
+): Promise<DirectoryContactV2[]> {
+  if (!contacts.length) return []
+
+  const ids = contacts.map((c) => c.id)
+
+  if (isPostgresMode()) {
+    const tagRes = await dbQuery<{ contact_id: string; tag_value: string }>(
+      `SELECT contact_id, tag_value
+       FROM directory_contact_tags
+       WHERE tag_type = 'category' AND contact_id = ANY($1::uuid[])
+       ORDER BY tag_value ASC`,
+      [ids],
+    )
+    const byContact = new Map<string, string[]>()
+    for (const row of tagRes.rows) {
+      const list = byContact.get(row.contact_id) ?? []
+      list.push(row.tag_value)
+      byContact.set(row.contact_id, list)
+    }
+    return contacts.map((c) => ({
+      ...c,
+      categories: byContact.get(c.id) ?? [],
+    }))
+  }
+
+  const supabase = createSupabaseServiceClient()
+  const { data: tags } = await supabase
+    .from('directory_contact_tags')
+    .select('contact_id, tag_value')
+    .eq('tag_type', 'category')
+    .in('contact_id', ids)
+
+  const byContact = new Map<string, string[]>()
+  for (const row of tags ?? []) {
+    const list = byContact.get(row.contact_id as string) ?? []
+    list.push(row.tag_value as string)
+    byContact.set(row.contact_id as string, list)
+  }
+  return contacts.map((c) => ({
+    ...c,
+    categories: byContact.get(c.id) ?? [],
+  }))
+}
+
+function appendDirectoryV2Filters(
+  where: string,
+  params: unknown[],
+  paramIndex: { i: number },
+  opts: Pick<DirectoryListV2Options, 'status' | 'keyword' | 'category'>,
+  tableAlias = 'directory_contacts',
+): string {
+  let clause = where
+
+  if (opts.status && opts.status !== 'all') {
+    clause += ` AND ${tableAlias}.verification_status = $${paramIndex.i++}`
+    params.push(opts.status)
+  }
+
+  if (opts.keyword) {
+    const pattern = `%${opts.keyword}%`
+    clause += ` AND (
+      ${tableAlias}.contact_name ILIKE $${paramIndex.i}
+      OR ${tableAlias}.organization_name ILIKE $${paramIndex.i}
+      OR ${tableAlias}.role_designation ILIKE $${paramIndex.i}
+      OR ${tableAlias}.email ILIKE $${paramIndex.i}
+      OR ${tableAlias}.phone ILIKE $${paramIndex.i}
+      OR ${tableAlias}.phone_alternate ILIKE $${paramIndex.i}
+    )`
+    params.push(pattern)
+    paramIndex.i++
+  }
+
+  if (opts.category) {
+    const pattern = `%${opts.category.replace(/[%_]/g, '')}%`
+    clause += ` AND EXISTS (
+      SELECT 1 FROM directory_contact_tags dct
+      WHERE dct.contact_id = ${tableAlias}.id
+        AND dct.tag_type = 'category'
+        AND dct.tag_value ILIKE $${paramIndex.i++}
+    )`
+    params.push(pattern)
+  }
+
+  return clause
+}
+
+async function listDirectoryContactsV2Pg(
+  orgId: string,
+  opts: DirectoryListV2Options,
+): Promise<DirectoryListV2Result> {
+  const params: unknown[] = [orgId]
+  const paramIndex = { i: 2 }
+  let where = appendDirectoryV2Filters(
+    'directory_contacts.organization_id = $1 AND directory_contacts.active = true',
+    params,
+    paramIndex,
+    opts,
+  )
+
+  const countRes = await dbQuery<{ c: string }>(
+    `SELECT COUNT(*)::text AS c FROM directory_contacts WHERE ${where}`,
+    params,
+  )
+  const total = Number(countRes.rows[0]?.c ?? 0)
+
+  const listParams = [...params, opts.limit, opts.offset]
+  const limitParam = paramIndex.i++
+  const offsetParam = paramIndex.i++
+
+  const res = await dbQuery<DirectoryContact>(
+    `SELECT directory_contacts.id, directory_contacts.contact_name,
+            directory_contacts.organization_name, directory_contacts.role_designation,
+            directory_contacts.phone, directory_contacts.phone_alternate,
+            directory_contacts.email, directory_contacts.availability_notes,
+            directory_contacts.internal_notes, directory_contacts.verification_status,
+            directory_contacts.active
+     FROM directory_contacts
+     WHERE ${where}
+     ORDER BY directory_contacts.contact_name ASC
+     LIMIT $${limitParam} OFFSET $${offsetParam}`,
+    listParams,
+  )
+
+  const contacts = await attachContactCategories(res.rows)
+  return {
+    contacts,
+    pagination: buildDirectoryV2Pagination(opts.page, opts.limit, total),
+  }
+}
+
+async function listDirectoryContactsV2Supabase(
+  orgId: string,
+  opts: DirectoryListV2Options,
+): Promise<DirectoryListV2Result> {
+  const supabase = createSupabaseServiceClient()
+  const selectBase =
+    'id, contact_name, organization_name, role_designation, phone, phone_alternate, email, availability_notes, internal_notes, verification_status, active'
+
+  let select = selectBase
+  if (opts.category) {
+    select = `${selectBase}, directory_contact_tags!inner(tag_type, tag_value)`
+  }
+
+  let query = supabase
+    .from('directory_contacts')
+    .select(select, { count: 'exact' })
+    .eq('organization_id', orgId)
+    .eq('active', true)
+    .order('contact_name', { ascending: true })
+    .range(opts.offset, opts.offset + opts.limit - 1)
+
+  if (opts.status && opts.status !== 'all') {
+    query = query.eq('verification_status', opts.status)
+  }
+
+  if (opts.category) {
+    const safe = opts.category.replace(/[%_]/g, '\\$&')
+    query = query
+      .eq('directory_contact_tags.tag_type', 'category')
+      .ilike('directory_contact_tags.tag_value', `%${safe}%`)
+  }
+
+  if (opts.keyword) {
+    const safe = opts.keyword.replace(/[%_]/g, '\\$&')
+    query = query.or(
+      `contact_name.ilike.%${safe}%,organization_name.ilike.%${safe}%,role_designation.ilike.%${safe}%,email.ilike.%${safe}%,phone.ilike.%${safe}%,phone_alternate.ilike.%${safe}%`,
+    )
+  }
+
+  const { data, count, error } = await query
+  if (error) {
+    throw new Error(error.message)
+  }
+
+  const rows = ((data ?? []) as unknown as Array<Record<string, unknown>>).map((record) => {
+    const { directory_contact_tags: _tags, ...rest } = record
+    return rest as unknown as DirectoryContact
+  })
+
+  const contacts = await attachContactCategories(rows)
+  const total = count ?? 0
+
+  return {
+    contacts,
+    pagination: buildDirectoryV2Pagination(opts.page, opts.limit, total),
+  }
+}
+
+export async function listDirectoryContactsV2(
+  orgId: string,
+  opts: DirectoryListV2Options,
+): Promise<DirectoryListV2Result> {
+  if (isPostgresMode()) {
+    return listDirectoryContactsV2Pg(orgId, opts)
+  }
+  return listDirectoryContactsV2Supabase(orgId, opts)
+}
+
 export async function createDirectoryContact(
   user: { id: string; organization_id: string; roles?: { name: string } | null },
   body: Record<string, unknown>,

@@ -23,6 +23,20 @@ API runs at **http://localhost:3001**
 
 Business logic stays in `src/services/` — both versions call the same services until you fork behavior.
 
+### v2 directory (paginated)
+
+`GET /v2/directory` — v1 unchanged; v2 adds pagination and filters.
+
+| Query param | Description |
+|-------------|-------------|
+| `page` | Page number (default `1`) |
+| `limit` or `page_size` | Page size (default `20`, max `100`) |
+| `keyword` or `search` | Search name, org, role, email, phone |
+| `category` | Filter by `directory_contact_tags` where `tag_type=category` (partial match) |
+| `status` | `verified`, `unverified`, `outdated`, or `all` |
+
+Response includes `pagination` (`page`, `limit`, `total`, `totalPages`, `hasNextPage`, `hasPreviousPage`), `filters`, and each contact has a `categories` array.
+
 | Endpoint | Description |
 |----------|-------------|
 | `GET /health` | Health check (`auth: clerk`) |

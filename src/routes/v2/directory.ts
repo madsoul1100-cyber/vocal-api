@@ -4,7 +4,8 @@ import {
   archiveDirectoryContact,
   canWriteDirectory,
   createDirectoryContact,
-  listDirectoryContacts,
+  listDirectoryContactsV2,
+  parseDirectoryV2ListQuery,
   updateDirectoryContact,
 } from '@/services/directoryService.js'
 
@@ -16,17 +17,30 @@ type VocalUser = {
   roles?: { name: string } | null
 }
 
+/** v2: paginated list with keyword, category, and status filters */
 router.get('/', requireClerkAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
-  const search = typeof req.query.search === 'string' ? req.query.search : undefined
-  const status = typeof req.query.status === 'string' ? req.query.status : undefined
+  const listOpts = parseDirectoryV2ListQuery(req.query as Record<string, unknown>)
 
-  const { contacts, count } = await listDirectoryContacts(user.organization_id, { search, status })
-  res.json({
-    contacts,
-    count,
-    canWrite: canWriteDirectory(user.roles?.name),
-  })
+  try {
+    const { contacts, pagination } = await listDirectoryContactsV2(
+      user.organization_id,
+      listOpts,
+    )
+    res.json({
+      contacts,
+      pagination,
+      canWrite: canWriteDirectory(user.roles?.name),
+      filters: {
+        keyword: listOpts.keyword ?? null,
+        category: listOpts.category ?? null,
+        status: listOpts.status ?? null,
+      },
+    })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Directory list failed'
+    res.status(500).json({ error: message })
+  }
 })
 
 router.post('/', requireClerkAuth, async (req, res) => {
