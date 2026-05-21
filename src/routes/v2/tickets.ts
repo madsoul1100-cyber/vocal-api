@@ -9,6 +9,7 @@ import {
   ticketsV2FiltersEcho,
   stripTicketAiMirrorFields,
   nestTicketClassification,
+  nestTicketSla,
 } from '@/services/ticketQueries.js'
 import { acceptTicket, rejectTicket, updateTicketStatus } from '@/services/ticketActionsService.js'
 import {
@@ -248,7 +249,10 @@ router.get('/:id', requireClerkAuth, async (req, res) => {
   }
 
   const row = data as Record<string, unknown>
-  const ticket = nestTicketClassification(stripTicketAiMirrorFields(row), row)
+  const ticket = nestTicketSla(
+    nestTicketClassification(stripTicketAiMirrorFields(row), row),
+    row,
+  )
   const citizen_identity = await loadCitizenIdentityForTicket(
     {
       citizen_id: row.citizen_id as string | null,

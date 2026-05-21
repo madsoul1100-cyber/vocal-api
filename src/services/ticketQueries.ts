@@ -129,6 +129,38 @@ export function nestTicketClassification<T extends Record<string, unknown>>(
   return out
 }
 
+export interface TicketSlaBlock {
+  first_contact_due_at: string | null
+  resolution_due_at: string | null
+  breached_flag: boolean
+}
+
+const SLA_ROOT_KEYS = [
+  'sla_first_contact_due_at',
+  'sla_resolution_due_at',
+  'sla_breached_flag',
+] as const
+
+export function buildTicketSla(row: Record<string, unknown>): TicketSlaBlock {
+  return {
+    first_contact_due_at: (row.sla_first_contact_due_at as string | null) ?? null,
+    resolution_due_at: (row.sla_resolution_due_at as string | null) ?? null,
+    breached_flag: row.sla_breached_flag === true,
+  }
+}
+
+export function nestTicketSla<T extends Record<string, unknown>>(
+  ticket: T,
+  sourceRow: Record<string, unknown>,
+): T & { sla: TicketSlaBlock } {
+  const out = { ...ticket } as T & { sla: TicketSlaBlock }
+  for (const key of SLA_ROOT_KEYS) {
+    delete (out as Record<string, unknown>)[key]
+  }
+  out.sla = buildTicketSla(sourceRow)
+  return out
+}
+
 export interface TicketFilters {
   stage?: TicketStage
   severity?: Severity
