@@ -28,6 +28,9 @@ import crypto from 'node:crypto'
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? ''
 const TELEGRAM_API_BASE  = 'https://api.telegram.org'
+const TWILIO_ACCOUNT_SID = process.env.TWILIO_ACCOUNT_SID ?? ''
+const TWILIO_AUTH_TOKEN  = process.env.TWILIO_AUTH_TOKEN ?? ''
+const TWILIO_DOWNLOAD_TIMEOUT_MS = 20_000
 
 export const BUCKET_NAME = 'ticket-attachments'
 
@@ -257,6 +260,77 @@ export async function downloadFromTelegramAndStore(args: {
   }
 }
 
+export async function downloadFromTwilioAndStore(args: {
+  media_url: string
+  org_id: string
+  ticket_id: string
+  mime_hint?: string | null
+  message_sid?: string
+}): Promise<StoredAttachment | null> {
+  const log = (msg: string, extra?: Record<string, unknown>) => {
+    console.error(`[attachmentService:twilio] ${msg}`, JSON.stringify({
+      ticket_id: args.ticket_id,
+      message_sid: args.message_sid,
+      ...(extra ?? {}),
+    }))
+  }
+
+  if (!TWILIO_ACCOUNT_SID || !TWILIO_AUTH_TOKEN) {
+    log('FAIL: TWILIO_ACCOUNT_SID or TWILIO_AUTH_TOKEN missing')
+    return null
+  }
+
+  try {
+    const auth = Buffer.from(`${TWILIO_ACCOUNT_SID}:${TWILIO_AUTH_TOKEN}`).toString('base64')
+    const ctrl = new AbortController()
+    const timeout = setTimeout(() => ctrl.abort(), TWILIO_DOWNLOAD_TIMEOUT_MS)
+    const fileResp = await fetch(args.media_url, {
+      headers: { Authorization: `Basic ${auth}` },
+      signal: ctrl.signal,
+    })
+    clearTimeout(timeout)
+
+    if (!fileResp.ok) {
+      log('FAIL: Twilio media HTTP error', { status: fileResp.status })
+      return null
+    }
+
+    const buffer = Buffer.from(await fileResp.arrayBuffer())
+    const headerCt = fileResp.headers.get('content-type')
+    const resolved = inferMime({
+      hint: args.mime_hint ?? (headerCt && headerCt !== 'application/octet-stream' ? headerCt : null),
+      telegramFilePath: null,
+      bytes: buffer,
+    })
+    if (!resolved) {
+      log('FAIL: could not infer MIME', { hint: args.mime_hint, headerCt })
+      return null
+    }
+
+    const supabase = createSupabaseServiceClient()
+    const storagePath = buildPath({ org_id: args.org_id, ticket_id: args.ticket_id, mime: resolved })
+    const { error: upErr } = await supabase.storage
+      .from(BUCKET_NAME)
+      .upload(storagePath, buffer, { contentType: resolved, upsert: false })
+    if (upErr) {
+      log('FAIL: Supabase upload', { error: upErr.message })
+      return null
+    }
+
+    log('OK: stored', { path: storagePath, size: buffer.length })
+    return {
+      storage_path: storagePath,
+      mime_type: resolved,
+      size_bytes: buffer.length,
+      attachment_type: attachmentTypeFromMime(resolved),
+      telegram_file_id: args.message_sid ?? '',
+    }
+  } catch (err) {
+    log('FAIL: exception', { error: err instanceof Error ? err.message : String(err) })
+    return null
+  }
+}
+
 /**
  * Worker-initiated upload — receives bytes already in memory (from the
  * dashboard's add-note form) and writes them to the bucket. Used by
@@ -312,7 +386,7 @@ export async function uploadWorkerAttachment(args: {
  */
 export async function signedUrlFor(storagePath: string | null | undefined): Promise<string | null> {
   if (!storagePath) return null
-  if (storagePath.startsWith('telegram:')) return null
+  if (storagePath.startsWith('telegram:') || storagePath.startsWith('twilio:')) return null
 
   try {
     const supabase = createSupabaseServiceClient()
