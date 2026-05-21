@@ -63,16 +63,424 @@ export interface PendingActivationRow {
   territories: { name: string } | null
 }
 
+// --- v2 list (pagination, sort, filters) ---
+
+export const WORKERS_V2_DEFAULT_LIMIT = 20
+export const WORKERS_V2_MAX_LIMIT = 100
+export const WORKERS_V2_PENDING_DEFAULT_LIMIT = 20
+export const WORKERS_V2_PENDING_MAX_LIMIT = 50
+
+export type WorkersV2SortField = 'full_name' | 'created_at' | 'last_login_at'
+
+export interface WorkersListV2Options {
+  limit: number
+  offset: number
+  sort: WorkersV2SortField
+  order: 'asc' | 'desc'
+  active?: boolean
+  keyword?: string
+  role?: string
+  roleId?: string
+  territoryId?: string
+  includePending: boolean
+  pendingLimit: number
+  pendingOffset: number
+}
+
+export interface WorkersListV2Pagination {
+  limit: number
+  offset: number
+  total: number
+  hasNextPage: boolean
+  hasPreviousPage: boolean
+}
+
+export interface WorkersOrgSummary {
+  active: number
+  inactive: number
+  total: number
+}
+
+export interface WorkersListV2Result {
+  workers: WorkerRow[]
+  pagination: WorkersListV2Pagination
+  pending: PendingActivationRow[]
+  pending_pagination: WorkersListV2Pagination
+  summary: WorkersOrgSummary
+  territories: TerritoryOption[]
+  roles: RoleOption[]
+}
+
+function sanitizeWorkersKeyword(raw: string): string {
+  return raw
+    .replace(/[,()."'\\]/g, ' ')
+    .replace(/[%_]/g, '')
+    .trim()
+    .slice(0, 100)
+}
+
+function parseBooleanQuery(value: unknown): boolean | undefined {
+  if (value === 'true' || value === true || value === '1') return true
+  if (value === 'false' || value === false || value === '0') return false
+  return undefined
+}
+
+function parseWorkersSort(raw: unknown): WorkersV2SortField {
+  const s = typeof raw === 'string' ? raw.trim().toLowerCase() : ''
+  if (s === 'created' || s === 'created_at') return 'created_at'
+  if (s === 'last_login' || s === 'last_login_at') return 'last_login_at'
+  return 'full_name'
+}
+
+function parseWorkersOrder(raw: unknown): 'asc' | 'desc' {
+  return typeof raw === 'string' && raw.trim().toLowerCase() === 'asc' ? 'asc' : 'desc'
+}
+
+function parseIncludePending(raw: unknown): boolean {
+  if (raw === 'false' || raw === false || raw === '0') return false
+  return true
+}
+
+export function parseWorkersV2ListQuery(query: Record<string, unknown>): WorkersListV2Options {
+  let limit =
+    parseInt(String(query.limit ?? WORKERS_V2_DEFAULT_LIMIT), 10) || WORKERS_V2_DEFAULT_LIMIT
+  limit = Math.min(WORKERS_V2_MAX_LIMIT, Math.max(1, limit))
+  const offset = Math.max(0, parseInt(String(query.offset ?? '0'), 10) || 0)
+
+  let pendingLimit =
+    parseInt(String(query.pending_limit ?? WORKERS_V2_PENDING_DEFAULT_LIMIT), 10) ||
+    WORKERS_V2_PENDING_DEFAULT_LIMIT
+  pendingLimit = Math.min(WORKERS_V2_PENDING_MAX_LIMIT, Math.max(1, pendingLimit))
+  const pendingOffset = Math.max(0, parseInt(String(query.pending_offset ?? '0'), 10) || 0)
+
+  const keywordRaw =
+    (typeof query.keyword === 'string' && query.keyword) ||
+    (typeof query.search === 'string' && query.search) ||
+    undefined
+  const keyword = keywordRaw ? sanitizeWorkersKeyword(keywordRaw) : undefined
+
+  const role =
+    typeof query.role === 'string' && query.role.trim() ? query.role.trim().toLowerCase() : undefined
+  const roleId =
+    typeof query.role_id === 'string' && query.role_id.trim() ? query.role_id.trim() : undefined
+  const territoryId =
+    typeof query.territory_id === 'string' && query.territory_id.trim()
+      ? query.territory_id.trim()
+      : undefined
+
+  return {
+    limit,
+    offset,
+    sort: parseWorkersSort(query.sort),
+    order: parseWorkersOrder(query.order),
+    active: parseBooleanQuery(query.active),
+    keyword: keyword || undefined,
+    role,
+    roleId,
+    territoryId,
+    includePending: parseIncludePending(query.include_pending),
+    pendingLimit,
+    pendingOffset,
+  }
+}
+
+export function workersV2FiltersEcho(opts: WorkersListV2Options) {
+  return {
+    limit: opts.limit,
+    offset: opts.offset,
+    sort: opts.sort,
+    order: opts.order,
+    active: opts.active ?? null,
+    keyword: opts.keyword ?? null,
+    role: opts.role ?? null,
+    role_id: opts.roleId ?? null,
+    territory_id: opts.territoryId ?? null,
+    include_pending: opts.includePending,
+    pending_limit: opts.pendingLimit,
+    pending_offset: opts.pendingOffset,
+  }
+}
+
+function buildWorkersV2Pagination(
+  offset: number,
+  limit: number,
+  total: number,
+): WorkersListV2Pagination {
+  return {
+    limit,
+    offset,
+    total,
+    hasNextPage: offset + limit < total,
+    hasPreviousPage: offset > 0,
+  }
+}
+
+function workersV2OrderSql(sort: WorkersV2SortField, order: 'asc' | 'desc'): string {
+  const dir = order === 'asc' ? 'ASC' : 'DESC'
+  if (sort === 'last_login_at') {
+    return `u.last_login_at ${dir} NULLS LAST, u.full_name ASC`
+  }
+  if (sort === 'created_at') {
+    return `u.created_at ${dir}, u.full_name ASC`
+  }
+  return `u.full_name ${dir}`
+}
+
+function appendWorkersV2Filters(
+  where: string,
+  params: unknown[],
+  paramIndex: { i: number },
+  opts: WorkersListV2Options,
+): string {
+  let clause = where
+
+  if (opts.active === true) {
+    clause += ` AND u.active = true`
+  } else if (opts.active === false) {
+    clause += ` AND u.active = false`
+  }
+  if (opts.roleId) {
+    clause += ` AND u.role_id = $${paramIndex.i++}`
+    params.push(opts.roleId)
+  } else if (opts.role) {
+    clause += ` AND r.name = $${paramIndex.i++}`
+    params.push(opts.role)
+  }
+  if (opts.territoryId) {
+    clause += ` AND EXISTS (
+      SELECT 1 FROM user_territories ut
+      WHERE ut.user_id = u.id AND ut.territory_id = $${paramIndex.i++}
+    )`
+    params.push(opts.territoryId)
+  }
+  if (opts.keyword) {
+    const pattern = `%${opts.keyword}%`
+    clause += ` AND (
+      u.full_name ILIKE $${paramIndex.i}
+      OR u.email ILIKE $${paramIndex.i}
+      OR COALESCE(u.phone, '') ILIKE $${paramIndex.i}
+    )`
+    params.push(pattern)
+    paramIndex.i++
+  }
+
+  return clause
+}
+
+async function getWorkersOrgSummaryPg(orgId: string): Promise<WorkersOrgSummary> {
+  const res = await dbQuery<{ active: string; inactive: string }>(
+    `SELECT
+       COUNT(*) FILTER (WHERE active = true)::text AS active,
+       COUNT(*) FILTER (WHERE active = false)::text AS inactive
+     FROM users WHERE organization_id = $1`,
+    [orgId],
+  )
+  const active = Number(res.rows[0]?.active ?? 0)
+  const inactive = Number(res.rows[0]?.inactive ?? 0)
+  return { active, inactive, total: active + inactive }
+}
+
+async function getWorkersOrgSummarySupabase(orgId: string): Promise<WorkersOrgSummary> {
+  const supabase = createSupabaseServiceClient()
+  const [activeRes, inactiveRes] = await Promise.all([
+    supabase
+      .from('users')
+      .select('id', { count: 'exact', head: true })
+      .eq('organization_id', orgId)
+      .eq('active', true),
+    supabase
+      .from('users')
+      .select('id', { count: 'exact', head: true })
+      .eq('organization_id', orgId)
+      .eq('active', false),
+  ])
+  const active = activeRes.count ?? 0
+  const inactive = inactiveRes.count ?? 0
+  return { active, inactive, total: active + inactive }
+}
+
+async function listWorkersV2Pg(
+  orgId: string,
+  opts: WorkersListV2Options,
+): Promise<Pick<WorkersListV2Result, 'workers' | 'pagination' | 'pending' | 'pending_pagination'>> {
+  const params: unknown[] = [orgId]
+  const paramIndex = { i: 2 }
+  const where = appendWorkersV2Filters('u.organization_id = $1', params, paramIndex, opts)
+
+  const countRes = await dbQuery<{ c: string }>(
+    `SELECT COUNT(*)::text AS c
+     FROM users u
+     INNER JOIN roles r ON r.id = u.role_id
+     WHERE ${where}`,
+    params,
+  )
+  const total = Number(countRes.rows[0]?.c ?? 0)
+
+  const listParams = [...params, opts.limit, opts.offset]
+  const limitParam = paramIndex.i++
+  const offsetParam = paramIndex.i++
+  const orderSql = workersV2OrderSql(opts.sort, opts.order)
+
+  const workersRes = await dbQuery<WorkerRow>(
+    `SELECT u.id, u.full_name, u.phone, u.email, u.active, u.last_login_at, u.created_at,
+            jsonb_build_object('name', r.name, 'display_name', r.display_name) AS roles
+     FROM users u
+     INNER JOIN roles r ON r.id = u.role_id
+     WHERE ${where}
+     ORDER BY ${orderSql}
+     LIMIT $${limitParam} OFFSET $${offsetParam}`,
+    listParams,
+  )
+
+  let pending: PendingActivationRow[] = []
+  let pendingTotal = 0
+  if (opts.includePending) {
+    const pendingCountRes = await dbQuery<{ c: string }>(
+      `SELECT COUNT(*)::text AS c FROM worker_activation_requests
+       WHERE organization_id = $1 AND status = 'pending'`,
+      [orgId],
+    )
+    pendingTotal = Number(pendingCountRes.rows[0]?.c ?? 0)
+
+    const pendingRes = await dbQuery<PendingActivationRow>(
+      `SELECT war.id, war.full_name, war.phone, war.email, war.status, war.created_at,
+              CASE WHEN t.id IS NULL THEN NULL
+                   ELSE jsonb_build_object('name', t.name)
+              END AS territories
+       FROM worker_activation_requests war
+       LEFT JOIN territories t ON t.id = war.territory_id
+       WHERE war.organization_id = $1 AND war.status = 'pending'
+       ORDER BY war.created_at DESC
+       LIMIT $2 OFFSET $3`,
+      [orgId, opts.pendingLimit, opts.pendingOffset],
+    )
+    pending = pendingRes.rows
+  }
+
+  return {
+    workers: workersRes.rows,
+    pagination: buildWorkersV2Pagination(opts.offset, opts.limit, total),
+    pending,
+    pending_pagination: buildWorkersV2Pagination(
+      opts.pendingOffset,
+      opts.pendingLimit,
+      pendingTotal,
+    ),
+  }
+}
+
+async function listWorkersV2Supabase(
+  orgId: string,
+  opts: WorkersListV2Options,
+): Promise<Pick<WorkersListV2Result, 'workers' | 'pagination' | 'pending' | 'pending_pagination'>> {
+  const supabase = createSupabaseServiceClient()
+
+  let select =
+    'id, full_name, phone, email, active, last_login_at, created_at, roles(name, display_name)'
+  if (opts.territoryId) {
+    select += ', user_territories!inner(territory_id)'
+  }
+
+  let query = supabase
+    .from('users')
+    .select(select, { count: 'exact' })
+    .eq('organization_id', orgId)
+
+  if (opts.active === true) query = query.eq('active', true)
+  else if (opts.active === false) query = query.eq('active', false)
+  if (opts.roleId) query = query.eq('role_id', opts.roleId)
+  if (opts.role) query = query.eq('roles.name', opts.role)
+  if (opts.territoryId) query = query.eq('user_territories.territory_id', opts.territoryId)
+  if (opts.keyword) {
+    const safe = opts.keyword.replace(/[%_]/g, '\\$&')
+    query = query.or(
+      `full_name.ilike.%${safe}%,email.ilike.%${safe}%,phone.ilike.%${safe}%`,
+    )
+  }
+
+  const ascending = opts.order === 'asc'
+  if (opts.sort === 'created_at') {
+    query = query.order('created_at', { ascending }).order('full_name', { ascending: true })
+  } else if (opts.sort === 'last_login_at') {
+    query = query
+      .order('last_login_at', { ascending, nullsFirst: false })
+      .order('full_name', { ascending: true })
+  } else {
+    query = query.order('full_name', { ascending })
+  }
+
+  query = query.range(opts.offset, opts.offset + opts.limit - 1)
+
+  const { data, error, count } = await query
+  if (error) throw new Error(error.message)
+
+  let pending: PendingActivationRow[] = []
+  let pendingTotal = 0
+  if (opts.includePending) {
+    const pendingQuery = supabase
+      .from('worker_activation_requests')
+      .select('id, full_name, phone, email, status, created_at, territories(name)', {
+        count: 'exact',
+      })
+      .eq('organization_id', orgId)
+      .eq('status', 'pending')
+      .order('created_at', { ascending: false })
+      .range(opts.pendingOffset, opts.pendingOffset + opts.pendingLimit - 1)
+
+    const pendingRes = await pendingQuery
+    if (pendingRes.error) throw new Error(pendingRes.error.message)
+    pending = (pendingRes.data ?? []) as unknown as PendingActivationRow[]
+    pendingTotal = pendingRes.count ?? 0
+  }
+
+  return {
+    workers: (data ?? []) as unknown as WorkerRow[],
+    pagination: buildWorkersV2Pagination(opts.offset, opts.limit, count ?? 0),
+    pending,
+    pending_pagination: buildWorkersV2Pagination(
+      opts.pendingOffset,
+      opts.pendingLimit,
+      pendingTotal,
+    ),
+  }
+}
+
+export async function listWorkersV2(
+  orgId: string,
+  opts: WorkersListV2Options,
+): Promise<WorkersListV2Result> {
+  const [listPart, summary, territories, roles] = await Promise.all([
+    isPostgresMode() ? listWorkersV2Pg(orgId, opts) : listWorkersV2Supabase(orgId, opts),
+    isPostgresMode() ? getWorkersOrgSummaryPg(orgId) : getWorkersOrgSummarySupabase(orgId),
+    listTerritories(orgId),
+    listRoles(),
+  ])
+
+  return { ...listPart, summary, territories, roles }
+}
+
+/** @deprecated Use listWorkersV2 — kept for v1 compat (first 200 workers, 50 pending). */
 export async function getWorkersPageData(orgId: string): Promise<{
   workers: WorkerRow[]
   pending: PendingActivationRow[]
   territories: TerritoryOption[]
   roles: RoleOption[]
 }> {
-  if (isPostgresMode()) {
-    return getWorkersPageDataPg(orgId)
+  const result = await listWorkersV2(orgId, {
+    limit: 200,
+    offset: 0,
+    sort: 'full_name',
+    order: 'asc',
+    includePending: true,
+    pendingLimit: 50,
+    pendingOffset: 0,
+  })
+  return {
+    workers: result.workers,
+    pending: result.pending,
+    territories: result.territories,
+    roles: result.roles,
   }
-  return getWorkersPageDataSupabase(orgId)
 }
 
 async function listTerritories(orgId: string): Promise<TerritoryOption[]> {
@@ -90,63 +498,6 @@ async function listTerritories(orgId: string): Promise<TerritoryOption[]> {
     .eq('organization_id', orgId)
     .order('name', { ascending: true })
   return (data ?? []) as TerritoryOption[]
-}
-
-async function getWorkersPageDataPg(orgId: string) {
-  const workersRes = await dbQuery<WorkerRow>(
-    `SELECT u.id, u.full_name, u.phone, u.email, u.active, u.last_login_at, u.created_at,
-            jsonb_build_object('name', r.name, 'display_name', r.display_name) AS roles
-     FROM users u
-     INNER JOIN roles r ON r.id = u.role_id
-     WHERE u.organization_id = $1
-     ORDER BY u.full_name ASC
-     LIMIT 200`,
-    [orgId],
-  )
-
-  const pendingRes = await dbQuery<PendingActivationRow>(
-    `SELECT war.id, war.full_name, war.phone, war.email, war.status, war.created_at,
-            CASE WHEN t.id IS NULL THEN NULL
-                 ELSE jsonb_build_object('name', t.name)
-            END AS territories
-     FROM worker_activation_requests war
-     LEFT JOIN territories t ON t.id = war.territory_id
-     WHERE war.organization_id = $1 AND war.status = 'pending'
-     ORDER BY war.created_at DESC
-     LIMIT 50`,
-    [orgId],
-  )
-
-  const [territories, roles] = await Promise.all([listTerritories(orgId), listRoles()])
-  return { workers: workersRes.rows, pending: pendingRes.rows, territories, roles }
-}
-
-async function getWorkersPageDataSupabase(orgId: string) {
-  const supabase = createSupabaseServiceClient()
-  const [workersRes, pendingRes, territories, roles] = await Promise.all([
-    supabase
-      .from('users')
-      .select('id, full_name, phone, email, active, last_login_at, created_at, roles(name, display_name)')
-      .eq('organization_id', orgId)
-      .order('full_name', { ascending: true })
-      .limit(200),
-    supabase
-      .from('worker_activation_requests')
-      .select('id, full_name, phone, email, status, created_at, territories(name)')
-      .eq('organization_id', orgId)
-      .eq('status', 'pending')
-      .order('created_at', { ascending: false })
-      .limit(50),
-    listTerritories(orgId),
-    listRoles(),
-  ])
-
-  return {
-    workers: (workersRes.data ?? []) as unknown as WorkerRow[],
-    pending: (pendingRes.data ?? []) as unknown as PendingActivationRow[],
-    territories,
-    roles,
-  }
 }
 
 function parseMetadata(raw: unknown): Record<string, unknown> | null | { error: string } {

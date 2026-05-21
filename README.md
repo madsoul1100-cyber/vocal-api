@@ -69,6 +69,33 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 | `GET /v2/tickets/:id/ai-suggestion` | Pending AI suggestion (`super_admin` / `central_support` only; latest completed, unconfirmed, or `null`) |
 | `POST /v2/tickets/confirm-ai` | Apply AI suggestion to empty ticket fields; body `{ ticket_id, suggestion_id }`; same roles only |
 
+### v2 workers (paginated)
+
+`GET /v2/workers` — `super_admin`, `central_support`, `district_leader` only. v1 unchanged (returns first 200 workers + 50 pending).
+
+| Query param | Description |
+|-------------|-------------|
+| `limit` | Page size (default `20`, max `100`) |
+| `offset` | Rows to skip (default `0`) |
+| `sort` | `name` (default), `created`, or `last_login` |
+| `order` | `asc` or `desc` (default `asc` for name, `desc` for dates) |
+| `active` | `true` / `false` — filter by account active flag |
+| `keyword` or `search` | Search `full_name`, `email`, `phone` |
+| `role` | Filter by `roles.name` (e.g. `ground_worker`) |
+| `role_id` | Filter by role UUID |
+| `territory_id` | Users linked via `user_territories` |
+| `include_pending` | `false` to omit pending activation rows (default `true`) |
+| `pending_limit` | Pending table page size (default `20`, max `50`) |
+| `pending_offset` | Pending rows to skip |
+
+Response: `workers`, `pagination`, `pending`, `pending_pagination`, `summary` (`active` / `inactive` / `total` for org), `territories`, `roles`, echoed `filters`.
+
+| Endpoint | Description |
+|----------|-------------|
+| `POST /v2/workers` | Create org user (+ optional Clerk account) |
+| `POST /v2/workers/activation/:id` | Approve or reject pending activation (`{ action, note? }`) |
+| `POST /v2/workers/repair-clerk` | Fix stuck Clerk sign-in (`{ email }`) |
+
 AI suggestions are created asynchronously when a citizen files via Telegram (`telegramFlow` → OpenRouter → `ai_ticket_suggestions`). Clients should use these v2 endpoints rather than querying `ai_ticket_suggestions` directly.
 
 Backfill for an existing ticket (requires `OPENROUTER_API_KEY` in `.env.local`):
