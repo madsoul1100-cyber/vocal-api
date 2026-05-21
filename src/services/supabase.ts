@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js'
+import ws from 'ws'
 import { isPostgresMode } from '@/lib/db.js'
 import { createPostgresServiceClient } from '@/lib/postgresCompat/builder.js'
 
@@ -32,5 +33,6 @@ export function createSupabaseServiceClient(): SupabaseClient {
 
   return createClient(url, key, {
     auth: { autoRefreshToken: false, persistSession: false },
+    realtime: { transport: ws as any },
   })
 }
