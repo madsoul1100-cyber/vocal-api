@@ -42,6 +42,16 @@ Uses `@clerk/express` — same Clerk app as the monolith. Resolves `users.clerk_
 
 `GET /health` returns `"auth": "dev-bypass"` when this mode is active.
 
+### CORS (Flutter web / vocal-web)
+
+In development, any `http://localhost:<port>` and `http://127.0.0.1:<port>` origin is allowed (e.g. Flutter `flutter run -d chrome`).
+
+Defaults also include `http://localhost:5173`, `3000`, and `8080`. Add more in `.env.local`:
+
+```bash
+CORS_ORIGINS=http://localhost:8080,http://localhost:54321
+```
+
 ## Telegram webhook (local)
 
 Use a tunnel (cloudflared / ngrok) pointing to port 3001:

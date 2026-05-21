@@ -2,6 +2,7 @@ import express from 'express'
 import cors from 'cors'
 import helmet from 'helmet'
 import { clerkMiddleware } from '@clerk/express'
+import { getClerkAuthorizedParties, isAllowedCorsOrigin } from '@/lib/corsOrigins.js'
 import { isDevAuthBypassEnabled } from '@/lib/devAuth.js'
 import webhooksRouter from '@/routes/webhooks/index.js'
 import v1Router from '@/routes/v1/index.js'
@@ -12,9 +13,17 @@ const app = express()
 app.use(helmet())
 app.use(
   cors({
-    origin: process.env.CORS_ORIGINS?.split(',').map((s) => s.trim()) ?? [
-      'http://localhost:5173',
-    ],
+    origin(origin, callback) {
+      if (!origin) {
+        callback(null, true)
+        return
+      }
+      if (isAllowedCorsOrigin(origin)) {
+        callback(null, origin)
+        return
+      }
+      callback(new Error(`CORS: origin not allowed: ${origin}`))
+    },
     credentials: true,
   }),
 )
@@ -32,11 +41,7 @@ app.get('/health', (_req, res) => {
 
 app.use(express.json({ limit: '10mb' }))
 
-const authorizedParties = [
-  'http://localhost:5173',
-  'http://localhost:3000',
-  ...(process.env.CORS_ORIGINS?.split(',').map((s) => s.trim()) ?? []),
-].filter(Boolean)
+const authorizedParties = getClerkAuthorizedParties()
 
 if (isDevAuthBypassEnabled()) {
   app.use('/v1', v1Router)
