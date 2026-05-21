@@ -41,7 +41,7 @@ Uses `@clerk/express` — same Clerk app as the monolith. Resolves `users.clerk_
 
 ### Local dev without Clerk (`npm run dev`)
 
-`npm run dev` sets `NODE_ENV=development`, which **bypasses Clerk** on all `/v1/*` routes. Requests work without a Bearer token; the API impersonates a user from the DB (`DEV_USER_ID`, else first `super_admin` in `ORG_ID`, else any active user).
+`npm run dev` sets `NODE_ENV=development`, which **bypasses Clerk** on all `/v1/*` and `/v2/*` routes. Requests work without a Bearer token; the API impersonates a user from the DB (`DEV_USER_ID`, else first `super_admin` in `ORG_ID`, else any active user).
 
 - Disable: `DEV_BYPASS_AUTH=false` in `.env.local`
 - Force on (e.g. `npm start`): `DEV_BYPASS_AUTH=true` (never in production)
