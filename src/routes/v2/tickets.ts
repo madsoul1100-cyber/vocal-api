@@ -15,6 +15,7 @@ import {
   getPendingAiSuggestion,
   shouldFetchAiSuggestion,
 } from '@/services/aiSuggestionService.js'
+import { loadCitizenIdentityForTicket } from '@/services/ticketCitizenIdentity.js'
 
 const router = Router()
 
@@ -159,13 +160,25 @@ router.get('/:id', requireClerkAuth, async (req, res) => {
     return
   }
 
-  const ticket = stripTicketAiMirrorFields(data as Record<string, unknown>)
-  const hasPendingAiSuggestion = shouldFetchAiSuggestion(
+  const row = data as Record<string, unknown>
+  const ticket = stripTicketAiMirrorFields(row)
+  const citizen_identity = await loadCitizenIdentityForTicket(
+    {
+      citizen_id: row.citizen_id as string | null,
+      anonymous_flag: row.anonymous_flag === true,
+      source_channel: String(row.source_channel ?? ''),
+      citizen_identity_revealed_at: row.citizen_identity_revealed_at as string | null,
+    },
     user.roles?.name,
-    data.needs_triage === true,
+  )
+  const has_pending_ai_suggestion = shouldFetchAiSuggestion(
+    user.roles?.name,
+    row.needs_triage === true,
   )
 
-  res.json({ ticket: { ...ticket, has_pending_ai_suggestion: hasPendingAiSuggestion } })
+  res.json({
+    ticket: { ...ticket, citizen_identity, has_pending_ai_suggestion },
+  })
 })
 
 export default router

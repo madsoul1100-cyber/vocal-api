@@ -1,5 +1,6 @@
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
 import { stripTicketAiMirrorFields } from '@/services/ticketQueries.js'
+import { loadCitizenIdentityForTicket } from '@/services/ticketCitizenIdentity.js'
 import type { AiTicketSuggestion } from '@/types/database.js'
 
 export const AI_SUGGESTION_ALLOWED_ROLES = ['super_admin', 'central_support']
@@ -190,8 +191,23 @@ export async function confirmAiSuggestion(
     return { ok: true as const, ticket: null }
   }
 
+  const row = refreshed as Record<string, unknown>
+  const citizen_identity = await loadCitizenIdentityForTicket(
+    {
+      citizen_id: row.citizen_id as string | null,
+      anonymous_flag: row.anonymous_flag === true,
+      source_channel: String(row.source_channel ?? ''),
+      citizen_identity_revealed_at: row.citizen_identity_revealed_at as string | null,
+    },
+    user.roles?.name,
+  )
+
   return {
     ok: true as const,
-    ticket: stripTicketAiMirrorFields(refreshed as Record<string, unknown>),
+    ticket: {
+      ...stripTicketAiMirrorFields(row),
+      citizen_identity,
+      has_pending_ai_suggestion: shouldFetchAiSuggestion(user.roles?.name, row.needs_triage === true),
+    },
   }
 }

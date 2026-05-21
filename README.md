@@ -63,7 +63,7 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /v2/tickets/:id` | Ticket detail; includes `has_pending_ai_suggestion` (`true` only for central support / super admin while `needs_triage` is true — skip `GET .../ai-suggestion` when `false`) |
+| `GET /v2/tickets/:id` | Ticket detail; includes `citizen_identity` (PII when role allows) and `has_pending_ai_suggestion` (`true` only for central support / super admin while `needs_triage` is true — skip `GET .../ai-suggestion` when `false`) |
 | `GET /v2/tickets/:id/ai-suggestion` | Pending AI suggestion (`super_admin` / `central_support` only; latest completed, unconfirmed, or `null`) |
 | `POST /v2/tickets/confirm-ai` | Apply AI suggestion to empty ticket fields; body `{ ticket_id, suggestion_id }`; same roles only |
 
