@@ -16,6 +16,7 @@ import {
   shouldFetchAiSuggestion,
 } from '@/services/aiSuggestionService.js'
 import { loadCitizenIdentityForTicket } from '@/services/ticketCitizenIdentity.js'
+import { listTicketAttachments } from '@/services/ticketAttachmentService.js'
 
 const router = Router()
 
@@ -101,6 +102,22 @@ router.post('/status', requireClerkAuth, async (req, res) => {
     return
   }
   res.json({ ok: true })
+})
+
+/** Ticket media/files with signed preview URLs (1h TTL). */
+router.get('/:id/attachments', requireClerkAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> })
+    .vocalUser
+  const ticketId = String(req.params.id)
+
+  const result = await listTicketAttachments(ticketId, user.organization_id)
+  if ('error' in result) {
+    const status = result.error === 'Ticket not found' ? 404 : 500
+    res.status(status).json({ error: result.error })
+    return
+  }
+
+  res.json({ attachments: result })
 })
 
 /** Pending AI triage suggestion; central_support / super_admin only */
