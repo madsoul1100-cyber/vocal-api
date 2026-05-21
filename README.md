@@ -37,6 +37,30 @@ Business logic stays in `src/services/` — both versions call the same services
 
 Response includes `pagination` (`limit`, `offset`, `total`, `hasNextPage`, `hasPreviousPage`), `filters`, and each contact has a `categories` array.
 
+### v2 tickets (paginated)
+
+`GET /v2/tickets` — v1 unchanged; v2 adds pagination, sort, and SLA filters.
+
+| Query param | Description |
+|-------------|-------------|
+| `limit` | Page size (default `20`, max `100`) |
+| `offset` | Rows to skip (default `0`) |
+| `sort` | `created` (default), `updated`, or `accepted` |
+| `order` | `asc` or `desc` (default `desc`) |
+| `keyword` or `search` | Search title, issue text, ticket number |
+| `stage` | `to_do`, `in_progress`, `on_hold`, `closed` |
+| `severity` | `critical`, `high`, `medium`, `low` |
+| `needs_triage` | `true` / `false` |
+| `has_location` | `true` / `false` |
+| `critical` | `true` / `false` |
+| `owner_id` | Filter by owner user UUID |
+| `sla_breached` | `true` / `false` — `sla_breached_flag` |
+| `sla_first_contact_overdue` | `true` — first-contact due passed, not contacted |
+| `sla_resolution_overdue` | `true` — resolution due passed, not closed |
+| `sla_at_risk` | `true` — SLA due within 24h, not breached, still open |
+
+Response includes `pagination` and echoed `filters` (same shape as v2 directory).
+
 | Endpoint | Description |
 |----------|-------------|
 | `GET /health` | Health check (`auth: clerk`) |

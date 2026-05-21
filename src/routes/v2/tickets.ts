@@ -2,40 +2,33 @@ import { Router } from 'express'
 import { requireClerkAuth } from '@/middleware/clerkAuth.js'
 import { getCurrentVocalUser } from '@/lib/auth.js'
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
-import { queryTickets } from '@/services/ticketQueries.js'
+import {
+  listTicketsV2,
+  parseTicketsV2ListQuery,
+  ticketsV2FiltersEcho,
+} from '@/services/ticketQueries.js'
 import { acceptTicket, rejectTicket, updateTicketStatus } from '@/services/ticketActionsService.js'
 
 const router = Router()
 
-function sanitizeSearch(raw: string): string {
-  return raw.replace(/[,()."'%_\\]/g, '').slice(0, 100)
-}
-
+/** v2: paginated list with sort, filters (incl. SLA), and keyword search */
 router.get('/', requireClerkAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> })
     .vocalUser
 
-  const supabase = createSupabaseServiceClient()
-  const search = typeof req.query.search === 'string' ? sanitizeSearch(req.query.search) : undefined
+  const listOpts = parseTicketsV2ListQuery(req.query as Record<string, unknown>)
 
-  const { data, error, count } = await queryTickets(supabase, user.organization_id, {
-    stage: req.query.stage as any,
-    severity: req.query.severity as any,
-    needsTriage: req.query.needs_triage === 'true',
-    slaBreached: req.query.sla_breached === 'true',
-    hasLocation: req.query.has_location === 'true',
-    ownerId: typeof req.query.owner_id === 'string' ? req.query.owner_id : undefined,
-    search,
-    limit: req.query.limit ? Number(req.query.limit) : 50,
-    offset: req.query.offset ? Number(req.query.offset) : 0,
-  })
-
-  if (error) {
-    res.status(500).json({ error: error.message })
-    return
+  try {
+    const { tickets, pagination } = await listTicketsV2(user.organization_id, listOpts)
+    res.json({
+      tickets,
+      pagination,
+      filters: ticketsV2FiltersEcho(listOpts),
+    })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Ticket list failed'
+    res.status(500).json({ error: message })
   }
-
-  res.json({ tickets: data ?? [], count: count ?? 0 })
 })
 
 router.post('/accept', requireClerkAuth, async (req, res) => {
@@ -104,7 +97,7 @@ router.get('/:id', requireClerkAuth, async (req, res) => {
     .single()
 
   if (error) {
-    console.error('[GET /v1/tickets/:id]', error)
+    console.error('[GET /v2/tickets/:id]', error)
     res.status(error.code === 'PGRST116' ? 404 : 500).json({ error: error.message })
     return
   }
