@@ -1,6 +1,6 @@
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
 import { isPostgresMode, dbQuery } from '@/lib/db.js'
-import { createClerkUser, deleteClerkUser, findClerkUserIdByEmail } from '@/lib/clerkAdmin.js'
+import { hashPassword } from '@/services/authService.js'
 
 export const WORKERS_PAGE_ROLES = ['super_admin', 'central_support', 'district_leader']
 const AUTO_APPROVE_ROLES = ['super_admin', 'central_support']
@@ -570,7 +570,6 @@ export async function createOrgUser(
         ? null
         : null
 
-  let clerk_user_id = clean(body.clerk_user_id, 120)
   const active = body.active === true || body.active === 'true' || body.active === 'on'
   const territory_id =
     typeof body.territory_id === 'string' && body.territory_id.trim()
@@ -602,43 +601,23 @@ export async function createOrgUser(
     }
   }
 
-  let clerkCreatedNew = false
-
-  if (!clerk_user_id) {
-    if (!email) {
-      return { ok: false as const, status: 400, error: 'email is required for sign-in' }
-    }
-    if (!password) {
-      return {
-        ok: false as const,
-        status: 400,
-        error: 'password is required (min 8 characters) to create Clerk account',
-      }
-    }
-
-    const existingClerkId = await findClerkUserIdByEmail(email)
-    try {
-      clerk_user_id = await createClerkUser({
-        email,
-        password,
-        fullName: full_name,
-      })
-      clerkCreatedNew = !existingClerkId
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : 'Clerk user creation failed'
-      return { ok: false as const, status: 502, error: `Clerk: ${msg}` }
+  if (!email) {
+    return { ok: false as const, status: 400, error: 'email is required for sign-in' }
+  }
+  if (!password) {
+    return {
+      ok: false as const,
+      status: 400,
+      error: 'password is required (min 8 characters)',
     }
   }
 
-  if (clerk_user_id) {
-    const { data: existingClerk } = await supabase
-      .from('users')
-      .select('id')
-      .eq('clerk_user_id', clerk_user_id)
-      .maybeSingle()
-    if (existingClerk) {
-      return { ok: false as const, status: 409, error: 'clerk_user_id already linked to a user' }
-    }
+  let password_hash: string
+  try {
+    password_hash = await hashPassword(password)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Password hashing failed'
+    return { ok: false as const, status: 500, error: msg }
   }
 
   if (phone) {
@@ -672,7 +651,7 @@ export async function createOrgUser(
     email,
     role_id,
     active,
-    clerk_user_id,
+    password_hash,
     metadata_json: metadata,
     updated_at: now,
   }
@@ -685,9 +664,6 @@ export async function createOrgUser(
   const { data, error } = await supabase.from('users').insert(insert).select('id').single()
 
   if (error || !data) {
-    if (clerkCreatedNew && clerk_user_id) {
-      await deleteClerkUser(clerk_user_id)
-    }
     return { ok: false as const, status: 500, error: error?.message ?? 'Insert failed' }
   }
 
@@ -920,6 +896,25 @@ export async function updateOrgUser(
     auditChanges.metadata_json = metadata
   }
 
+  if ('password' in body) {
+    const pwd =
+      typeof body.password === 'string' && body.password.length >= 8 ? body.password : null
+    if (!pwd) {
+      return {
+        ok: false as const,
+        status: 400,
+        error: 'password must be at least 8 characters',
+      }
+    }
+    try {
+      updates.password_hash = await hashPassword(pwd)
+      auditChanges.password_reset = true
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Password hashing failed'
+      return { ok: false as const, status: 500, error: msg }
+    }
+  }
+
   const territoryInBody = 'territory_id' in body
   let territoryId: string | null | undefined
   if (territoryInBody) {
@@ -981,7 +976,7 @@ export async function updateOrgUser(
   return { ok: true as const, worker: refreshed }
 }
 
-/** Soft-deactivate staff (sets active=false; does not remove Clerk or DB row). */
+/** Soft-deactivate staff (sets active=false; does not delete the users row). */
 export async function deactivateOrgUser(
   actor: { id: string; organization_id: string; roles?: { name: string } | null },
   userId: string,

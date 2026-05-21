@@ -15,7 +15,7 @@ export function isDevAuthBypassEnabled(): boolean {
 }
 
 /**
- * Impersonate a staff user for local API calls (no Clerk token).
+ * Impersonate a staff user for local API calls (no JWT).
  * Prefer DEV_USER_ID; else first super_admin in ORG_ID; else any active user in org.
  */
 export async function getDevBypassVocalUser() {

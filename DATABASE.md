@@ -11,7 +11,7 @@ DATABASE_URL=postgresql://postgres:YOUR_PASSWORD@database-1.crk26mqsmlsa.eu-nort
 DATABASE_SSL=true
 ```
 
-Also keep Clerk keys (`CLERK_SECRET_KEY`, `CLERK_PUBLISHABLE_KEY`) and `ORG_ID`.
+Also set `JWT_SECRET` (min 32 characters) and `ORG_ID`.
 
 ## 2. Run schema migrations
 
@@ -37,16 +37,16 @@ psql "$DATABASE_URL" -f vocal_backup.sql
 
 Or export/import single tables with `pg_dump -t users -t tickets ...`.
 
-## 4. Seed test users (Clerk)
+## 4. Seed test users and passwords
 
-Staff users are still created via Clerk + monolith seed:
+Staff users from monolith seed; set login passwords for vocal-api:
 
 ```bash
 cd ../vocal-app
 npm run seed:test-users
 ```
 
-That writes `users.clerk_user_id` rows in Postgres.
+Then run `npm run seed:passwords` in vocal-api (`DATABASE_URL` in `.env.local`, migration `007_user_password_auth.sql`).
 
 ## 5. Attachments
 
@@ -60,6 +60,6 @@ For production, plan S3 (or keep Supabase Storage only for files).
 
 ## Notes
 
-- **Clerk auth** is unchanged — only the database host changed.
+- **JWT auth** uses `users.password_hash` — only the database host changed.
 - **Next.js monolith** (`vocal-app`) still uses Supabase client by default; migrate it separately if needed.
 - Fix typos in passwords (`passowrd` → `password`) if connection fails.

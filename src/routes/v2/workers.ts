@@ -1,6 +1,5 @@
 import { Router } from 'express'
-import { requireClerkAuth } from '@/middleware/clerkAuth.js'
-import { repairClerkAccountByEmail } from '@/lib/clerkAdmin.js'
+import { requireAuth } from '@/middleware/requireAuth.js'
 import {
   canAccessWorkersPage,
   createOrgUser,
@@ -22,7 +21,7 @@ type VocalUser = {
 }
 
 /** v2: paginated staff list + pending activations; filters, sort, org summary counts */
-router.get('/', requireClerkAuth, async (req, res) => {
+router.get('/', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
   if (!canAccessWorkersPage(user.roles?.name)) {
     res.status(403).json({ error: 'Insufficient role' })
@@ -49,7 +48,7 @@ router.get('/', requireClerkAuth, async (req, res) => {
   }
 })
 
-router.post('/', requireClerkAuth, async (req, res) => {
+router.post('/', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
   const result = await createOrgUser(user, req.body ?? {})
   if (!result.ok) {
@@ -59,27 +58,7 @@ router.post('/', requireClerkAuth, async (req, res) => {
   res.json({ ok: true, id: result.id })
 })
 
-/** Fix Clerk account stuck on /sign-in/factor-one (verify email + clear MFA). */
-router.post('/repair-clerk', requireClerkAuth, async (req, res) => {
-  const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
-  if (!canAccessWorkersPage(user.roles?.name)) {
-    res.status(403).json({ error: 'Insufficient role' })
-    return
-  }
-  const email = typeof req.body?.email === 'string' ? req.body.email.trim().toLowerCase() : ''
-  if (!email) {
-    res.status(400).json({ error: 'email is required' })
-    return
-  }
-  const clerkUserId = await repairClerkAccountByEmail(email)
-  if (!clerkUserId) {
-    res.status(404).json({ error: 'No Clerk user found for this email' })
-    return
-  }
-  res.json({ ok: true, clerk_user_id: clerkUserId })
-})
-
-router.post('/activation/:id', requireClerkAuth, async (req, res) => {
+router.post('/activation/:id', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
   const result = await processActivationRequest(user, String(req.params.id), req.body ?? {})
   if (!result.ok) {
@@ -89,7 +68,7 @@ router.post('/activation/:id', requireClerkAuth, async (req, res) => {
   res.json({ ok: true })
 })
 
-router.get('/:id', requireClerkAuth, async (req, res) => {
+router.get('/:id', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
   const result = await getOrgUserById(user, String(req.params.id))
   if (!result.ok) {
@@ -99,7 +78,7 @@ router.get('/:id', requireClerkAuth, async (req, res) => {
   res.json({ worker: result.worker })
 })
 
-router.patch('/:id', requireClerkAuth, async (req, res) => {
+router.patch('/:id', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
   const result = await updateOrgUser(user, String(req.params.id), req.body ?? {})
   if (!result.ok) {
@@ -109,8 +88,8 @@ router.patch('/:id', requireClerkAuth, async (req, res) => {
   res.json({ ok: true, worker: result.worker })
 })
 
-/** Soft-deactivate (active=false). Does not delete Clerk or the users row. */
-router.delete('/:id', requireClerkAuth, async (req, res) => {
+/** Soft-deactivate (active=false). Does not delete the users row. */
+router.delete('/:id', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
   const result = await deactivateOrgUser(user, String(req.params.id))
   if (!result.ok) {

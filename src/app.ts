@@ -1,9 +1,8 @@
 import express from 'express'
 import cors from 'cors'
 import helmet from 'helmet'
-import { clerkMiddleware } from '@clerk/express'
 import { describeDatabaseBackend } from '@/lib/db.js'
-import { getClerkAuthorizedParties, isAllowedCorsOrigin } from '@/lib/corsOrigins.js'
+import { isAllowedCorsOrigin } from '@/lib/corsOrigins.js'
 import { isDevAuthBypassEnabled } from '@/lib/devAuth.js'
 import webhooksRouter from '@/routes/webhooks/index.js'
 import whatsappRouter from '@/routes/webhooks/whatsapp.js'
@@ -38,7 +37,7 @@ app.get('/health', (_req, res) => {
   res.json({
     ok: true,
     service: 'vocal-api',
-    auth: 'clerk',
+    auth: isDevAuthBypassEnabled() ? 'dev-bypass' : 'jwt',
     database: describeDatabaseBackend(),
     timestamp: new Date().toISOString(),
   })
@@ -46,22 +45,8 @@ app.get('/health', (_req, res) => {
 
 app.use(express.json({ limit: '10mb' }))
 
-const authorizedParties = getClerkAuthorizedParties()
-const clerkApiMiddleware = clerkMiddleware({
-  enableHandshake: false,
-  authorizedParties,
-})
-
-function mountApiVersion(prefix: string, router: express.Router) {
-  if (isDevAuthBypassEnabled()) {
-    app.use(prefix, router)
-  } else {
-    app.use(prefix, clerkApiMiddleware, router)
-  }
-}
-
-mountApiVersion('/v1', v1Router)
-mountApiVersion('/v2', v2Router)
+app.use('/v1', v1Router)
+app.use('/v2', v2Router)
 
 app.use(errorHandler)
 

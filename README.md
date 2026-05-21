@@ -7,7 +7,7 @@ Express backend for My Leader. Migrated from the Next.js monolith (`vocal-app`).
 ```bash
 cd vocal-api
 cp .env.example .env.local
-# Fill DATABASE_URL (PostgreSQL/RDS), CLERK_SECRET_KEY, CLERK_PUBLISHABLE_KEY, ORG_ID
+# Fill DATABASE_URL (PostgreSQL/RDS), JWT_SECRET, ORG_ID
 # See DATABASE.md for RDS setup and migrations
 
 npm install
@@ -93,14 +93,13 @@ Response: `workers`, `pagination`, `pending`, `pending_pagination`, `summary` (`
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /v2/workers/:id` | Staff detail (`role_id`, `territories`, Clerk id) |
-| `POST /v2/workers` | Create org user (+ optional Clerk account) |
-| `PATCH /v2/workers/:id` | Update staff (`full_name`, `phone`, `email`, `role_id`, `active`, `territory_id`, `metadata_json`) |
-| `DELETE /v2/workers/:id` | Soft-deactivate (`active=false`; row and Clerk account kept) |
+| `GET /v2/workers/:id` | Staff detail (`role_id`, `territories`) |
+| `POST /v2/workers` | Create org user (email + password stored as bcrypt hash) |
+| `PATCH /v2/workers/:id` | Update staff (`full_name`, `phone`, `email`, `role_id`, `active`, `territory_id`, `metadata_json`, `password`) |
+| `DELETE /v2/workers/:id` | Soft-deactivate (`active=false`) |
 | `POST /v2/workers/activation/:id` | Approve or reject pending activation (`{ action, note? }`) |
-| `POST /v2/workers/repair-clerk` | Fix stuck Clerk sign-in (`{ email }`) |
 
-`POST /v2/workers` body (create): `full_name`, `role_id`, `email`, `password` (min 8, for new Clerk user), optional `phone`, `active`, `territory_id`, `clerk_user_id`, `metadata_json`.
+`POST /v2/workers` body (create): `full_name`, `role_id`, `email`, `password` (min 8), optional `phone`, `active`, `territory_id`, `metadata_json`.
 
 AI suggestions are created asynchronously when a citizen files via Telegram (`telegramFlow` → OpenRouter → `ai_ticket_suggestions`). Clients should use these v2 endpoints rather than querying `ai_ticket_suggestions` directly.
 
@@ -113,8 +112,9 @@ npm run generate:ai-suggestion -- <ticket-uuid> --force   # if a pending row alr
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /health` | Health check (`auth: clerk`) |
-| `GET /v1/auth/me` | Current user (Clerk Bearer token) |
+| `GET /health` | Health check (`auth: jwt`) |
+| `POST /v1/auth/login` | Email + password → JWT (`{ token, user }`) |
+| `GET /v1/auth/me` | Current user (Bearer JWT) |
 | `GET /v1/me` | Same as `/v1/auth/me` (compat) |
 | `GET /v1/tickets` | Ticket list |
 | `GET /v1/tickets/:id` | Ticket detail |
@@ -123,13 +123,19 @@ npm run generate:ai-suggestion -- <ticket-uuid> --force   # if a pending row alr
 
 ## Auth
 
-Uses `@clerk/express` — same Clerk app as the monolith. Resolves `users.clerk_user_id` for staff profiles.
+JWT issued by `POST /v1/auth/login` (email + `users.password_hash`). Protected routes require `Authorization: Bearer <token>`.
 
-`POST /v1/auth/login` (JWT/password) is **not** used in the Clerk setup.
+Set `JWT_SECRET` (min 32 characters) and `DATABASE_URL` in `.env.local`. Apply migration `007_user_password_auth.sql`, then seed passwords:
 
-### Local dev without Clerk (`npm run dev`)
+```bash
+npm run seed:passwords
+```
 
-`npm run dev` sets `NODE_ENV=development`, which **bypasses Clerk** on all `/v1/*` and `/v2/*` routes. Requests work without a Bearer token; the API impersonates a user from the DB (`DEV_USER_ID`, else first `super_admin` in `ORG_ID`, else any active user).
+Default test password: `Vocal!Test2026` (see `scripts/seed-passwords.ts`).
+
+### Local dev without JWT (`npm run dev`)
+
+`npm run dev` sets `NODE_ENV=development`, which enables **dev auth bypass** only when a request has **no** `Authorization: Bearer` header. With a JWT, the signed-in user is used. Without a token, the API impersonates a user from the DB (`DEV_USER_ID`, else first `super_admin` in `ORG_ID`, else any active user).
 
 - Disable: `DEV_BYPASS_AUTH=false` in `.env.local`
 - Force on (e.g. `npm start`): `DEV_BYPASS_AUTH=true` (never in production)

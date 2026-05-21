@@ -1,20 +1,31 @@
 import type { Request } from 'express'
-import { getAuth } from '@clerk/express'
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
+import { verifyAccessToken } from '@/services/authService.js'
+
+const USER_SELECT = '*, roles(*), organizations(name)'
+
+export function getBearerToken(req: Request): string | null {
+  const header = req.headers.authorization
+  if (!header?.startsWith('Bearer ')) return null
+  const token = header.slice(7).trim()
+  return token || null
+}
 
 /**
- * Resolve Clerk session → internal Vocal users row (active only).
- * Same lookup as the Next.js monolith getCurrentVocalUser().
+ * Resolve JWT Bearer token → internal Vocal users row (active only).
  */
 export async function getCurrentVocalUser(req: Request) {
-  const { userId } = getAuth(req)
-  if (!userId) return null
+  const token = getBearerToken(req)
+  if (!token) return null
+
+  const payload = verifyAccessToken(token)
+  if (!payload?.sub) return null
 
   const supabase = createSupabaseServiceClient()
   const { data, error } = await supabase
     .from('users')
-    .select('*, roles(*), organizations(name)')
-    .eq('clerk_user_id', userId)
+    .select(USER_SELECT)
+    .eq('id', payload.sub)
     .eq('active', true)
     .single()
 

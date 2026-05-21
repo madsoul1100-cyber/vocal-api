@@ -15,7 +15,6 @@
     "generate:ai-suggestion": "tsx scripts/generate-ai-suggestion.ts"
   },
   "dependencies": {
-    "@clerk/express": "^1.7.76",
     "@supabase/supabase-js": "^2.103.2",
     "bcryptjs": "^2.4.3",
     "cors": "^2.8.5",

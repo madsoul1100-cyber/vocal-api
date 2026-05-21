@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { requireClerkAuth } from '@/middleware/clerkAuth.js'
+import { requireAuth } from '@/middleware/requireAuth.js'
 import { getCurrentVocalUser } from '@/lib/auth.js'
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
 import { queryTickets } from '@/services/ticketQueries.js'
@@ -11,7 +11,7 @@ function sanitizeSearch(raw: string): string {
   return raw.replace(/[,()."'%_\\]/g, '').slice(0, 100)
 }
 
-router.get('/', requireClerkAuth, async (req, res) => {
+router.get('/', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> })
     .vocalUser
 
@@ -38,7 +38,7 @@ router.get('/', requireClerkAuth, async (req, res) => {
   res.json({ tickets: data ?? [], count: count ?? 0 })
 })
 
-router.post('/accept', requireClerkAuth, async (req, res) => {
+router.post('/accept', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> }).vocalUser
   const ticketId = req.body?.ticket_id as string | undefined
   if (!ticketId) {
@@ -53,7 +53,7 @@ router.post('/accept', requireClerkAuth, async (req, res) => {
   res.json({ ok: true })
 })
 
-router.post('/reject', requireClerkAuth, async (req, res) => {
+router.post('/reject', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> }).vocalUser
   const ticketId = req.body?.ticket_id as string | undefined
   const reason = req.body?.reason as string | undefined
@@ -69,7 +69,7 @@ router.post('/reject', requireClerkAuth, async (req, res) => {
   res.json({ ok: true, reoffered: result.reoffered ?? null })
 })
 
-router.post('/status', requireClerkAuth, async (req, res) => {
+router.post('/status', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> }).vocalUser
   const ticketId = req.body?.ticket_id as string | undefined
   const subStatus = req.body?.sub_status as string | undefined
@@ -85,7 +85,7 @@ router.post('/status', requireClerkAuth, async (req, res) => {
   res.json({ ok: true })
 })
 
-router.get('/:id', requireClerkAuth, async (req, res) => {
+router.get('/:id', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> })
     .vocalUser
 

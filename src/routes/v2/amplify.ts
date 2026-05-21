@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { requireClerkAuth } from '@/middleware/clerkAuth.js'
+import { requireAuth } from '@/middleware/requireAuth.js'
 import type { AmplifyPlatform, AmplifyTone } from '@/services/amplifyService.js'
 import {
   canAccessAmplify,
@@ -17,7 +17,7 @@ type VocalUser = {
   roles?: { name: string } | null
 }
 
-function requireAmplifyRole(req: Parameters<typeof requireClerkAuth>[0], res: import('express').Response): VocalUser | null {
+function requireAmplifyRole(req: Parameters<typeof requireAuth>[0], res: import('express').Response): VocalUser | null {
   const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
   if (!canAccessAmplify(user.roles?.name)) {
     res.status(403).json({ error: 'Insufficient role' })
@@ -26,7 +26,7 @@ function requireAmplifyRole(req: Parameters<typeof requireClerkAuth>[0], res: im
   return user
 }
 
-router.get('/', requireClerkAuth, async (req, res) => {
+router.get('/', requireAuth, async (req, res) => {
   const user = requireAmplifyRole(req, res)
   if (!user) return
 
@@ -34,7 +34,7 @@ router.get('/', requireClerkAuth, async (req, res) => {
   res.json({ sessions, count })
 })
 
-router.post('/sessions', requireClerkAuth, async (req, res) => {
+router.post('/sessions', requireAuth, async (req, res) => {
   const user = requireAmplifyRole(req, res)
   if (!user) return
 
@@ -52,7 +52,7 @@ router.post('/sessions', requireClerkAuth, async (req, res) => {
   res.json({ ok: true, id: result.id, reused: result.reused })
 })
 
-router.get('/sessions/:id', requireClerkAuth, async (req, res) => {
+router.get('/sessions/:id', requireAuth, async (req, res) => {
   const user = requireAmplifyRole(req, res)
   if (!user) return
 
@@ -65,7 +65,7 @@ router.get('/sessions/:id', requireClerkAuth, async (req, res) => {
   res.json(session)
 })
 
-router.post('/sessions/:id/generate', requireClerkAuth, async (req, res) => {
+router.post('/sessions/:id/generate', requireAuth, async (req, res) => {
   const user = requireAmplifyRole(req, res)
   if (!user) return
 

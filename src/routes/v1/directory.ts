@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { requireClerkAuth } from '@/middleware/clerkAuth.js'
+import { requireAuth } from '@/middleware/requireAuth.js'
 import {
   archiveDirectoryContact,
   canWriteDirectory,
@@ -16,7 +16,7 @@ type VocalUser = {
   roles?: { name: string } | null
 }
 
-router.get('/', requireClerkAuth, async (req, res) => {
+router.get('/', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
   const search = typeof req.query.search === 'string' ? req.query.search : undefined
   const status = typeof req.query.status === 'string' ? req.query.status : undefined
@@ -29,7 +29,7 @@ router.get('/', requireClerkAuth, async (req, res) => {
   })
 })
 
-router.post('/', requireClerkAuth, async (req, res) => {
+router.post('/', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
   const result = await createDirectoryContact(user, req.body ?? {})
   if (!result.ok) {
@@ -39,7 +39,7 @@ router.post('/', requireClerkAuth, async (req, res) => {
   res.json({ ok: true, id: result.id })
 })
 
-router.patch('/:id', requireClerkAuth, async (req, res) => {
+router.patch('/:id', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
   const id = String(req.params.id)
   const result = await updateDirectoryContact(user, id, req.body ?? {})
@@ -50,7 +50,7 @@ router.patch('/:id', requireClerkAuth, async (req, res) => {
   res.json({ ok: true })
 })
 
-router.delete('/:id', requireClerkAuth, async (req, res) => {
+router.delete('/:id', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
   const id = String(req.params.id)
   const result = await archiveDirectoryContact(user, id)
