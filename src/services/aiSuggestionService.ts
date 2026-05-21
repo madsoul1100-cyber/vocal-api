@@ -19,6 +19,21 @@ export async function getPendingAiSuggestion(
   ticketId: string,
 ): Promise<AiTicketSuggestion | null> {
   const supabase = createSupabaseServiceClient()
+
+  const { data: ticket, error: ticketErr } = await supabase
+    .from('tickets')
+    .select('needs_triage')
+    .eq('id', ticketId)
+    .maybeSingle()
+
+  if (ticketErr) {
+    console.error('[getPendingAiSuggestion] ticket lookup', ticketErr)
+    return null
+  }
+  if (!ticket?.needs_triage) {
+    return null
+  }
+
   const { data, error } = await supabase
     .from('ai_ticket_suggestions')
     .select('*')
@@ -120,6 +135,7 @@ export async function confirmAiSuggestion(
     return { ok: false as const, status: 500, error: updateErr.message }
   }
 
+  // Confirm chosen row and any other pending rows (e.g. from --force backfills).
   const { error: confirmErr } = await supabase
     .from('ai_ticket_suggestions')
     .update({
@@ -127,7 +143,8 @@ export async function confirmAiSuggestion(
       confirmed_by: user.id,
       confirmed_at: now,
     })
-    .eq('id', suggestionId)
+    .eq('ticket_id', ticketId)
+    .eq('confirmed', false)
 
   if (confirmErr) {
     console.error('[confirmAiSuggestion] suggestion update', confirmErr)

@@ -57,8 +57,18 @@ async function main() {
     .maybeSingle()
 
   if (existing && !force) {
-    console.log(`Pending suggestion already exists (${existing.id}). Use --force to add another row.`)
+    console.log(`Pending suggestion already exists (${existing.id}). Use --force to replace it.`)
     process.exit(0)
+  }
+
+  if (force && existing) {
+    const now = new Date().toISOString()
+    await supabase
+      .from('ai_ticket_suggestions')
+      .update({ confirmed: true, confirmed_at: now })
+      .eq('ticket_id', ticketId)
+      .eq('confirmed', false)
+    console.log('Superseded previous pending suggestion(s).')
   }
 
   console.log(`Generating AI suggestions for ${ticket.ticket_number} (${ticketId})…`)
