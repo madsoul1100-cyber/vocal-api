@@ -14,6 +14,14 @@ export function canAccessAiSuggestions(role: string | null | undefined): boolean
   return !!role && AI_SUGGESTION_ALLOWED_ROLES.includes(role)
 }
 
+/** When true, client should call GET /v2/tickets/:id/ai-suggestion (privileged + still in triage). */
+export function shouldFetchAiSuggestion(
+  role: string | null | undefined,
+  needsTriage: boolean,
+): boolean {
+  return canAccessAiSuggestions(role) && needsTriage
+}
+
 /** Latest completed, unconfirmed suggestion for a ticket (same filter as monolith ticket page). */
 export async function getPendingAiSuggestion(
   ticketId: string,

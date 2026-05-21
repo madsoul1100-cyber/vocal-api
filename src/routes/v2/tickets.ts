@@ -13,6 +13,7 @@ import {
   canAccessAiSuggestions,
   confirmAiSuggestion,
   getPendingAiSuggestion,
+  shouldFetchAiSuggestion,
 } from '@/services/aiSuggestionService.js'
 
 const router = Router()
@@ -158,7 +159,13 @@ router.get('/:id', requireClerkAuth, async (req, res) => {
     return
   }
 
-  res.json({ ticket: stripTicketAiMirrorFields(data as Record<string, unknown>) })
+  const ticket = stripTicketAiMirrorFields(data as Record<string, unknown>)
+  const hasPendingAiSuggestion = shouldFetchAiSuggestion(
+    user.roles?.name,
+    data.needs_triage === true,
+  )
+
+  res.json({ ticket: { ...ticket, has_pending_ai_suggestion: hasPendingAiSuggestion } })
 })
 
 export default router
