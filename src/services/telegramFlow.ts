@@ -435,7 +435,10 @@ async function fileTicket(ctx: FlowContext) {
   // Kick off AI enrichment (fire-and-forget).
   if (draft.issue_text) {
     generateTicketSuggestions(draft.issue_text).then(async (s) => {
-      if (s.error) return
+      if (s.error) {
+        console.warn(`[telegramFlow] AI suggestions skipped for ticket ${result.ticketId}: ${s.error}`)
+        return
+      }
       await ctx.supabase.from('ai_ticket_suggestions').insert({
         ticket_id: result.ticketId,
         model_used: process.env.OPENROUTER_MODEL ?? 'unknown',

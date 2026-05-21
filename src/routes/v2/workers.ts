@@ -6,9 +6,11 @@ import {
   createOrgUser,
   deactivateOrgUser,
   getOrgUserById,
-  getWorkersPageData,
+  listWorkersV2,
+  parseWorkersV2ListQuery,
   processActivationRequest,
   updateOrgUser,
+  workersV2FiltersEcho,
 } from '@/services/workersManagementService.js'
 
 const router = Router()
@@ -19,6 +21,7 @@ type VocalUser = {
   roles?: { name: string } | null
 }
 
+/** v2: paginated staff list + pending activations; filters, sort, org summary counts */
 router.get('/', requireClerkAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
   if (!canAccessWorkersPage(user.roles?.name)) {
@@ -26,17 +29,24 @@ router.get('/', requireClerkAuth, async (req, res) => {
     return
   }
 
-  const { workers, pending, territories, roles } = await getWorkersPageData(user.organization_id)
-  const activeCount = workers.filter((w) => w.active).length
+  const listOpts = parseWorkersV2ListQuery(req.query as Record<string, unknown>)
 
-  res.json({
-    workers,
-    pending,
-    territories,
-    roles,
-    activeCount,
-    inactiveCount: workers.length - activeCount,
-  })
+  try {
+    const result = await listWorkersV2(user.organization_id, listOpts)
+    res.json({
+      workers: result.workers,
+      pagination: result.pagination,
+      pending: result.pending,
+      pending_pagination: result.pending_pagination,
+      summary: result.summary,
+      territories: result.territories,
+      roles: result.roles,
+      filters: workersV2FiltersEcho(listOpts),
+    })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Workers list failed'
+    res.status(500).json({ error: message })
+  }
 })
 
 router.post('/', requireClerkAuth, async (req, res) => {
@@ -99,6 +109,7 @@ router.patch('/:id', requireClerkAuth, async (req, res) => {
   res.json({ ok: true, worker: result.worker })
 })
 
+/** Soft-deactivate (active=false). Does not delete Clerk or the users row. */
 router.delete('/:id', requireClerkAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
   const result = await deactivateOrgUser(user, String(req.params.id))
