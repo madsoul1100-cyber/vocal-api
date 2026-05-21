@@ -63,6 +63,7 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 
 | Endpoint | Description |
 |----------|-------------|
+| `GET /v2/dashboard` | Insight dashboard stats (`super_admin`, `central_support`, `state_leader` only). Others get `403` with optional `redirect` (`ground_worker` → `/my-assignments`, `district_leader` → `/tickets`). Response: `action_required`, `pipeline`, `operational_health`, `recent_tickets`, `meta`. |
 | `GET /v2/tickets/:id` | Ticket detail; `classification`, `sla`, `citizen_identity`, `status_history`; `has_notes_or_attachments` → skip `GET .../attachments` when `false` |
 | `GET /v2/tickets/:id/attachments` | Paginated `notes` + `attachments` (same `limit`/`offset` each); `preview_url` when `can_preview_media` |
 | `POST /v2/tickets/:id/attachments` | Multipart: optional `content`, optional `file` (at least one); optional `note_type`; creates note and/or attachment |
