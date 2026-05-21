@@ -1,4 +1,5 @@
 import { Router } from 'express'
+import multer from 'multer'
 import { requireClerkAuth } from '@/middleware/clerkAuth.js'
 import { getCurrentVocalUser } from '@/lib/auth.js'
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
@@ -16,9 +17,20 @@ import {
   shouldFetchAiSuggestion,
 } from '@/services/aiSuggestionService.js'
 import { loadCitizenIdentityForTicket } from '@/services/ticketCitizenIdentity.js'
-import { listTicketAttachments } from '@/services/ticketAttachmentService.js'
+import {
+  canPreviewAttachmentMedia,
+  canUploadTicketAttachments,
+  createTicketAttachment,
+  listTicketAttachments,
+  parseAttachmentsListQuery,
+  ticketHasAttachments,
+} from '@/services/ticketAttachmentService.js'
 
 const router = Router()
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024 },
+})
 
 /** v2: paginated list with sort, filters (incl. SLA), and keyword search */
 router.get('/', requireClerkAuth, async (req, res) => {
@@ -104,20 +116,62 @@ router.post('/status', requireClerkAuth, async (req, res) => {
   res.json({ ok: true })
 })
 
+/** Upload attachment after ticket creation; super_admin / central_support only. */
+router.post('/:id/attachments', requireClerkAuth, upload.single('file'), async (req, res) => {
+  const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> })
+    .vocalUser
+
+  if (!canUploadTicketAttachments(user.roles?.name)) {
+    res.status(403).json({ error: 'Forbidden — central support or super admin only' })
+    return
+  }
+
+  const file = req.file
+  if (!file) {
+    res.status(400).json({ error: 'file required (multipart field name: file)' })
+    return
+  }
+
+  const ticketId = String(req.params.id)
+  const result = await createTicketAttachment(ticketId, user.organization_id, user.id, {
+    buffer: file.buffer,
+    originalname: file.originalname,
+    mimetype: file.mimetype,
+  })
+
+  if ('error' in result) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+
+  res.status(201).json({ attachment: result.attachment })
+})
+
 /** Ticket media/files with signed preview URLs (1h TTL). */
 router.get('/:id/attachments', requireClerkAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> })
     .vocalUser
   const ticketId = String(req.params.id)
 
-  const result = await listTicketAttachments(ticketId, user.organization_id)
+  const listOpts = parseAttachmentsListQuery(req.query as Record<string, unknown>)
+  const result = await listTicketAttachments(
+    ticketId,
+    user.organization_id,
+    listOpts,
+    user.roles?.name,
+  )
   if ('error' in result) {
     const status = result.error === 'Ticket not found' ? 404 : 500
     res.status(status).json({ error: result.error })
     return
   }
 
-  res.json({ attachments: result })
+  res.json({
+    attachments: result.attachments,
+    pagination: result.pagination,
+    can_preview_media: result.can_preview_media,
+    filters: { limit: listOpts.limit, offset: listOpts.offset },
+  })
 })
 
 /** Pending AI triage suggestion; central_support / super_admin only */
@@ -188,13 +242,24 @@ router.get('/:id', requireClerkAuth, async (req, res) => {
     },
     user.roles?.name,
   )
-  const has_pending_ai_suggestion = shouldFetchAiSuggestion(
+  const ticketId = String(req.params.id)
+  const [has_pending_ai_suggestion, has_attachments] = await Promise.all([
+    Promise.resolve(shouldFetchAiSuggestion(user.roles?.name, row.needs_triage === true)),
+    ticketHasAttachments(ticketId),
+  ])
+  const can_preview_attachments = canPreviewAttachmentMedia(
     user.roles?.name,
-    row.needs_triage === true,
+    row.citizen_identity_revealed_at as string | null,
   )
 
   res.json({
-    ticket: { ...ticket, citizen_identity, has_pending_ai_suggestion },
+    ticket: {
+      ...ticket,
+      citizen_identity,
+      has_pending_ai_suggestion,
+      has_attachments,
+      can_preview_attachments,
+    },
   })
 })
 
