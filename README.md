@@ -63,7 +63,7 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /v2/tickets/:id` | Ticket detail; `has_notes_or_attachments` → skip `GET .../attachments` when `false` |
+| `GET /v2/tickets/:id` | Ticket detail; `classification` block (category, sub_status, territory, location, department, source); `has_notes_or_attachments` → skip `GET .../attachments` when `false` |
 | `GET /v2/tickets/:id/attachments` | Paginated `notes` + `attachments` (same `limit`/`offset` each); `preview_url` when `can_preview_media` |
 | `POST /v2/tickets/:id/attachments` | Multipart: optional `content`, optional `file` (at least one); optional `note_type`; creates note and/or attachment |
 | `GET /v2/tickets/:id/ai-suggestion` | Pending AI suggestion (`super_admin` / `central_support` only; latest completed, unconfirmed, or `null`) |

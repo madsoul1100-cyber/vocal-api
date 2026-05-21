@@ -9,7 +9,8 @@ import type { SupabaseClient } from '@supabase/supabase-js'
 import { isPostgresMode, dbQuery } from '@/lib/db.js'
 import { SQL_TICKET_LIST } from '@/lib/postgresCompat/embedSql.js'
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
-import type { TicketStage, Severity } from '@/types/database.js'
+import type { TicketStage, Severity, TicketSubStatus } from '@/types/database.js'
+import { SUB_STATUS_LABELS } from '@/types/database.js'
 
 export const TICKET_LIST_SELECT = `
   id, ticket_number, title, original_issue_text, stage, sub_status, severity,
@@ -33,6 +34,98 @@ export function stripTicketAiMirrorFields<T extends Record<string, unknown>>(tic
   for (const key of TICKET_AI_MIRROR_KEYS) {
     delete out[key]
   }
+  return out
+}
+
+export interface TicketCategoryRef {
+  id: string
+  name: string
+}
+
+export interface TicketClassificationBlock {
+  category: TicketCategoryRef | null
+  subcategory: TicketCategoryRef | null
+  sub_status: string
+  sub_status_label: string
+  territory: TicketCategoryRef | null
+  location: {
+    text: string | null
+    latitude: number | null
+    longitude: number | null
+    map_link: string | null
+  }
+  department: string | null
+  /** Display label, e.g. "Telegram" */
+  source: string
+  source_channel: string
+}
+
+const CLASSIFICATION_ROOT_KEYS = [
+  'category',
+  'subcategory',
+  'territories',
+  'category_id',
+  'subcategory_id',
+  'territory_id',
+  'sub_status',
+  'location_text',
+  'latitude',
+  'longitude',
+  'map_link',
+  'address_text',
+  'department',
+  'source_channel',
+] as const
+
+function refFromEmbed(raw: unknown): TicketCategoryRef | null {
+  if (!raw || typeof raw !== 'object') return null
+  const o = raw as { id?: string; name?: string }
+  if (!o.id) return null
+  return { id: o.id, name: o.name ?? '' }
+}
+
+function formatSourceChannel(channel: string): string {
+  if (!channel) return ''
+  return channel.charAt(0).toUpperCase() + channel.slice(1).replace(/_/g, ' ')
+}
+
+/** UI "Classification" section — built from ticket detail row before keys are lifted off the root. */
+export function buildTicketClassification(row: Record<string, unknown>): TicketClassificationBlock {
+  const subStatus = String(row.sub_status ?? '')
+  const sourceChannel = String(row.source_channel ?? '')
+  const label =
+    subStatus in SUB_STATUS_LABELS
+      ? SUB_STATUS_LABELS[subStatus as TicketSubStatus]
+      : subStatus
+
+  return {
+    category: refFromEmbed(row.category),
+    subcategory: refFromEmbed(row.subcategory),
+    sub_status: subStatus,
+    sub_status_label: label,
+    territory: refFromEmbed(row.territories),
+    location: {
+      text: (row.location_text as string | null) ?? null,
+      latitude: (row.latitude as number | null) ?? null,
+      longitude: (row.longitude as number | null) ?? null,
+      map_link: (row.map_link as string | null) ?? null,
+    },
+    department: (row.department as string | null) ?? null,
+    source: formatSourceChannel(sourceChannel),
+    source_channel: sourceChannel,
+  }
+}
+
+/** Nest classification fields and remove them from the ticket root (v2 detail only). */
+export function nestTicketClassification<T extends Record<string, unknown>>(
+  ticket: T,
+  sourceRow: Record<string, unknown>,
+): T & { classification: TicketClassificationBlock } {
+  const out = { ...ticket } as T & { classification: TicketClassificationBlock }
+  for (const key of CLASSIFICATION_ROOT_KEYS) {
+    delete (out as Record<string, unknown>)[key]
+  }
+  out.classification = buildTicketClassification(sourceRow)
   return out
 }
 
