@@ -8,13 +8,13 @@
  * Uses the ticket's original_issue_text as input.
  */
 import dotenv from 'dotenv'
-import { createSupabaseServiceClient } from '../src/lib/supabase.js'
-import { generateTicketSuggestions } from '../src/services/aiService.js'
 
 dotenv.config()
 dotenv.config({ path: '.env.local', override: true })
 
 async function main() {
+  const { createSupabaseServiceClient } = await import('../src/lib/supabase.js')
+  const { generateTicketSuggestions } = await import('../src/services/aiService.js')
   const args = process.argv.slice(2).filter((a) => a !== '--')
   const force = args.includes('--force')
   const ticketId = args.find((a) => !a.startsWith('--'))
