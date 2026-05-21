@@ -126,7 +126,6 @@ export const DIRECTORY_V2_DEFAULT_LIMIT = 20
 export const DIRECTORY_V2_MAX_LIMIT = 100
 
 export interface DirectoryListV2Options {
-  page: number
   limit: number
   offset: number
   keyword?: string
@@ -141,10 +140,9 @@ export interface DirectoryContactV2 extends DirectoryContact {
 export interface DirectoryListV2Result {
   contacts: DirectoryContactV2[]
   pagination: {
-    page: number
     limit: number
+    offset: number
     total: number
-    totalPages: number
     hasNextPage: boolean
     hasPreviousPage: boolean
   }
