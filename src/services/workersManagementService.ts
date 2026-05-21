@@ -132,8 +132,13 @@ function parseWorkersSort(raw: unknown): WorkersV2SortField {
   return 'full_name'
 }
 
-function parseWorkersOrder(raw: unknown): 'asc' | 'desc' {
-  return typeof raw === 'string' && raw.trim().toLowerCase() === 'asc' ? 'asc' : 'desc'
+function parseWorkersOrder(raw: unknown, sort: WorkersV2SortField): 'asc' | 'desc' {
+  if (typeof raw === 'string') {
+    const o = raw.trim().toLowerCase()
+    if (o === 'asc') return 'asc'
+    if (o === 'desc') return 'desc'
+  }
+  return sort === 'full_name' ? 'asc' : 'desc'
 }
 
 function parseIncludePending(raw: unknown): boolean {
@@ -168,11 +173,12 @@ export function parseWorkersV2ListQuery(query: Record<string, unknown>): Workers
       ? query.territory_id.trim()
       : undefined
 
+  const sort = parseWorkersSort(query.sort)
   return {
     limit,
     offset,
-    sort: parseWorkersSort(query.sort),
-    order: parseWorkersOrder(query.order),
+    sort,
+    order: parseWorkersOrder(query.order, sort),
     active: parseBooleanQuery(query.active),
     keyword: keyword || undefined,
     role,
