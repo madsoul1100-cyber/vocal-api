@@ -52,7 +52,7 @@ export async function confirmAiSuggestion(
   const { data: ticket, error: ticketErr } = await supabase
     .from('tickets')
     .select(
-      'id, organization_id, title, summary, severity, department, category_id, subcategory_id, needs_triage',
+      'id, organization_id, title, normalized_summary, severity, department, category_id, subcategory_id, needs_triage',
     )
     .eq('id', ticketId)
     .eq('organization_id', user.organization_id)
@@ -88,8 +88,8 @@ export async function confirmAiSuggestion(
   if (!ticket.title && suggestion.suggested_title) {
     patch.title = suggestion.suggested_title
   }
-  if (!ticket.summary && suggestion.suggested_summary) {
-    patch.summary = suggestion.suggested_summary
+  if (!ticket.normalized_summary && suggestion.suggested_summary) {
+    patch.normalized_summary = suggestion.suggested_summary
   }
   if (!ticket.severity && suggestion.suggested_severity) {
     patch.severity = suggestion.suggested_severity
