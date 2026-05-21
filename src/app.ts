@@ -2,6 +2,7 @@ import express from 'express'
 import cors from 'cors'
 import helmet from 'helmet'
 import { clerkMiddleware } from '@clerk/express'
+import { isDevAuthBypassEnabled } from '@/lib/devAuth.js'
 import webhooksRouter from '@/routes/webhooks/index.js'
 import v1Router from '@/routes/v1/index.js'
 import { errorHandler } from '@/middleware/errorHandler.js'
@@ -24,7 +25,7 @@ app.get('/health', (_req, res) => {
   res.json({
     ok: true,
     service: 'vocal-api',
-    auth: 'clerk',
+    auth: isDevAuthBypassEnabled() ? 'dev-bypass' : 'clerk',
     timestamp: new Date().toISOString(),
   })
 })
@@ -37,15 +38,19 @@ const authorizedParties = [
   ...(process.env.CORS_ORIGINS?.split(',').map((s) => s.trim()) ?? []),
 ].filter(Boolean)
 
-app.use(
-  '/v1',
-  clerkMiddleware({
-    // API-only: do not run browser handshake on Bearer token requests
-    enableHandshake: false,
-    authorizedParties,
-  }),
-  v1Router,
-)
+if (isDevAuthBypassEnabled()) {
+  app.use('/v1', v1Router)
+} else {
+  app.use(
+    '/v1',
+    clerkMiddleware({
+      // API-only: do not run browser handshake on Bearer token requests
+      enableHandshake: false,
+      authorizedParties,
+    }),
+    v1Router,
+  )
+}
 
 app.use(errorHandler)
 

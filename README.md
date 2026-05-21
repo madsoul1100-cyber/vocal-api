@@ -32,6 +32,16 @@ Uses `@clerk/express` — same Clerk app as the monolith. Resolves `users.clerk_
 
 `POST /v1/auth/login` (JWT/password) is **not** used in the Clerk setup.
 
+### Local dev without Clerk (`npm run dev`)
+
+`npm run dev` sets `NODE_ENV=development`, which **bypasses Clerk** on all `/v1/*` routes. Requests work without a Bearer token; the API impersonates a user from the DB (`DEV_USER_ID`, else first `super_admin` in `ORG_ID`, else any active user).
+
+- Disable: `DEV_BYPASS_AUTH=false` in `.env.local`
+- Force on (e.g. `npm start`): `DEV_BYPASS_AUTH=true` (never in production)
+- Pick user: `DEV_USER_ID=<uuid>`
+
+`GET /health` returns `"auth": "dev-bypass"` when this mode is active.
+
 ## Telegram webhook (local)
 
 Use a tunnel (cloudflared / ngrok) pointing to port 3001:
