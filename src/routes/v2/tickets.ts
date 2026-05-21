@@ -8,6 +8,11 @@ import {
   ticketsV2FiltersEcho,
 } from '@/services/ticketQueries.js'
 import { acceptTicket, rejectTicket, updateTicketStatus } from '@/services/ticketActionsService.js'
+import {
+  canAccessAiSuggestions,
+  confirmAiSuggestion,
+  getPendingAiSuggestion,
+} from '@/services/aiSuggestionService.js'
 
 const router = Router()
 
@@ -62,6 +67,23 @@ router.post('/reject', requireClerkAuth, async (req, res) => {
   res.json({ ok: true, reoffered: result.reoffered ?? null })
 })
 
+/** Apply pending AI suggestion to empty ticket fields; central_support / super_admin only */
+router.post('/confirm-ai', requireClerkAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> }).vocalUser
+  const ticketId = req.body?.ticket_id as string | undefined
+  const suggestionId = req.body?.suggestion_id as string | undefined
+  if (!ticketId || !suggestionId) {
+    res.status(400).json({ error: 'ticket_id and suggestion_id required' })
+    return
+  }
+  const result = await confirmAiSuggestion(user as any, ticketId, suggestionId)
+  if (!result.ok) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+  res.json({ ok: true, ticket: result.ticket })
+})
+
 router.post('/status', requireClerkAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> }).vocalUser
   const ticketId = req.body?.ticket_id as string | undefined
@@ -76,6 +98,39 @@ router.post('/status', requireClerkAuth, async (req, res) => {
     return
   }
   res.json({ ok: true })
+})
+
+/** Pending AI triage suggestion; central_support / super_admin only */
+router.get('/:id/ai-suggestion', requireClerkAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> })
+    .vocalUser
+
+  if (!canAccessAiSuggestions(user.roles?.name)) {
+    res.status(403).json({ error: 'Forbidden — central support or super admin only' })
+    return
+  }
+
+  const ticketId = String(req.params.id)
+  const supabase = createSupabaseServiceClient()
+  const { data: ticket, error: ticketErr } = await supabase
+    .from('tickets')
+    .select('id')
+    .eq('id', ticketId)
+    .eq('organization_id', user.organization_id)
+    .maybeSingle()
+
+  if (ticketErr) {
+    console.error('[GET /v2/tickets/:id/ai-suggestion] ticket lookup', ticketErr)
+    res.status(500).json({ error: ticketErr.message })
+    return
+  }
+  if (!ticket) {
+    res.status(404).json({ error: 'Ticket not found' })
+    return
+  }
+
+  const aiSuggestion = await getPendingAiSuggestion(ticketId)
+  res.json({ aiSuggestion })
 })
 
 router.get('/:id', requireClerkAuth, async (req, res) => {

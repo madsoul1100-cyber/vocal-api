@@ -63,6 +63,14 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 
 | Endpoint | Description |
 |----------|-------------|
+| `GET /v2/tickets/:id` | Ticket detail |
+| `GET /v2/tickets/:id/ai-suggestion` | Pending AI suggestion (`super_admin` / `central_support` only; latest completed, unconfirmed, or `null`) |
+| `POST /v2/tickets/confirm-ai` | Apply AI suggestion to empty ticket fields; body `{ ticket_id, suggestion_id }`; same roles only |
+
+AI suggestions are created asynchronously when a citizen files via Telegram (`telegramFlow` → OpenRouter → `ai_ticket_suggestions`). Clients should use these v2 endpoints rather than querying `ai_ticket_suggestions` directly.
+
+| Endpoint | Description |
+|----------|-------------|
 | `GET /health` | Health check (`auth: clerk`) |
 | `GET /v1/auth/me` | Current user (Clerk Bearer token) |
 | `GET /v1/me` | Same as `/v1/auth/me` (compat) |
