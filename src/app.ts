@@ -2,6 +2,7 @@ import express from 'express'
 import cors from 'cors'
 import helmet from 'helmet'
 import { clerkMiddleware } from '@clerk/express'
+import { describeDatabaseBackend } from '@/lib/db.js'
 import webhooksRouter from '@/routes/webhooks/index.js'
 import whatsappRouter from '@/routes/webhooks/whatsapp.js'
 import v1Router from '@/routes/v1/index.js'
@@ -27,6 +28,7 @@ app.get('/health', (_req, res) => {
     ok: true,
     service: 'vocal-api',
     auth: 'clerk',
+    database: describeDatabaseBackend(),
     timestamp: new Date().toISOString(),
   })
 })
