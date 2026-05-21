@@ -10,6 +10,7 @@ import {
   stripTicketAiMirrorFields,
   nestTicketClassification,
   nestTicketSla,
+  stripTicketDetailDuplicates,
 } from '@/services/ticketQueries.js'
 import { acceptTicket, rejectTicket, updateTicketStatus } from '@/services/ticketActionsService.js'
 import {
@@ -259,6 +260,7 @@ router.get('/:id', requireClerkAuth, async (req, res) => {
       anonymous_flag: row.anonymous_flag === true,
       source_channel: String(row.source_channel ?? ''),
       citizen_identity_revealed_at: row.citizen_identity_revealed_at as string | null,
+      citizen_identity_revealed_by: row.citizen_identity_revealed_by as string | null,
     },
     user.roles?.name,
   )
@@ -282,16 +284,14 @@ router.get('/:id', requireClerkAuth, async (req, res) => {
   }
 
   res.json({
-    ticket: {
+    ticket: stripTicketDetailDuplicates({
       ...ticket,
       citizen_identity,
       status_history: statusHistoryRes,
       has_pending_ai_suggestion,
-      has_attachments,
-      has_notes,
       has_notes_or_attachments: has_attachments || has_notes,
       can_preview_attachments,
-    },
+    }),
   })
 })
 

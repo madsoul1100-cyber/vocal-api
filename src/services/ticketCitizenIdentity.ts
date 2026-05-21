@@ -3,7 +3,10 @@ import { createSupabaseServiceClient } from '@/lib/supabase.js'
 const PRIVILEGED_ROLES = ['super_admin', 'central_support']
 
 export interface CitizenIdentityBlock {
+  id: string
   revealed: boolean
+  revealed_at: string | null
+  revealed_by: string | null
   anonymous: boolean
   display_name: string | null
   username: string | null
@@ -16,6 +19,7 @@ type TicketCitizenFields = {
   anonymous_flag: boolean
   source_channel: string
   citizen_identity_revealed_at: string | null
+  citizen_identity_revealed_by?: string | null
 }
 
 function canViewCitizenPii(role: string | null | undefined, ticket: TicketCitizenFields): boolean {
@@ -34,7 +38,10 @@ export async function loadCitizenIdentityForTicket(
   const revealed = !!ticket.citizen_identity_revealed_at
   const anonymous = ticket.anonymous_flag
   const base: CitizenIdentityBlock = {
+    id: ticket.citizen_id,
     revealed,
+    revealed_at: ticket.citizen_identity_revealed_at,
+    revealed_by: ticket.citizen_identity_revealed_by ?? null,
     anonymous,
     display_name: null,
     username: null,
@@ -76,8 +83,7 @@ export async function loadCitizenIdentityForTicket(
   const channelRow = identities?.[0] ?? null
 
   return {
-    revealed,
-    anonymous,
+    ...base,
     display_name: citizen?.display_name ?? null,
     username: channelRow?.username ?? null,
     phone: channelRow?.phone ?? null,

@@ -4,7 +4,6 @@ import type { TicketStage, TicketSubStatus } from '@/types/database.js'
 
 export interface TicketStageHistoryItem {
   id: string
-  ticket_id: string
   from_stage: string | null
   to_stage: string
   from_stage_label: string | null
@@ -14,7 +13,6 @@ export interface TicketStageHistoryItem {
   from_sub_status_label: string | null
   to_sub_status_label: string
   changed_by: { id: string; full_name: string } | null
-  changed_by_name: string
   change_reason: string | null
   system_action: boolean
   created_at: string
@@ -76,7 +74,6 @@ export async function listTicketStageHistory(
 
     return {
       id: r.id as string,
-      ticket_id: r.ticket_id as string,
       from_stage: fromStage,
       to_stage: toStage,
       from_stage_label: stageLabel(fromStage),
@@ -89,7 +86,6 @@ export async function listTicketStageHistory(
         !systemAction && user?.id
           ? { id: user.id, full_name: user.full_name ?? '' }
           : null,
-      changed_by_name: systemAction ? 'System' : (user?.full_name ?? 'Unknown'),
       change_reason: (r.change_reason as string | null) ?? null,
       system_action: systemAction,
       created_at: r.created_at as string,

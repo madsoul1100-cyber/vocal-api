@@ -161,6 +161,24 @@ export function nestTicketSla<T extends Record<string, unknown>>(
   return out
 }
 
+/** Root keys duplicated by nested v2 blocks — removed from GET /v2/tickets/:id only. */
+const CITIZEN_DETAIL_ROOT_KEYS = [
+  'citizen_id',
+  'anonymous_flag',
+  'citizen_identity_revealed_at',
+  'citizen_identity_revealed_by',
+] as const
+
+const OWNER_DETAIL_ROOT_KEYS = ['owner_user_id'] as const
+
+export function stripTicketDetailDuplicates<T extends Record<string, unknown>>(ticket: T): T {
+  const out = { ...ticket }
+  for (const key of [...CITIZEN_DETAIL_ROOT_KEYS, ...OWNER_DETAIL_ROOT_KEYS]) {
+    delete (out as Record<string, unknown>)[key]
+  }
+  return out
+}
+
 export interface TicketFilters {
   stage?: TicketStage
   severity?: Severity
