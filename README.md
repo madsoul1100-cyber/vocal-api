@@ -69,6 +69,13 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 
 AI suggestions are created asynchronously when a citizen files via Telegram (`telegramFlow` → OpenRouter → `ai_ticket_suggestions`). Clients should use these v2 endpoints rather than querying `ai_ticket_suggestions` directly.
 
+Backfill for an existing ticket (requires `OPENROUTER_API_KEY` in `.env.local`):
+
+```bash
+npm run generate:ai-suggestion -- <ticket-uuid>
+npm run generate:ai-suggestion -- <ticket-uuid> --force   # if a pending row already exists
+```
+
 | Endpoint | Description |
 |----------|-------------|
 | `GET /health` | Health check (`auth: clerk`) |
