@@ -12,6 +12,7 @@ app.listen(port, () => {
   } else {
     console.log(`  auth:     GET  http://localhost:${port}/v1/auth/me (Clerk Bearer token)`)
   }
+  console.log(`  api:      /v1/*  /v2/* (v2 copy of v1 — change responses in src/routes/v2/)`)
   console.log(`  health:   GET  http://localhost:${port}/health`)
   console.log(`  webhook: POST http://localhost:${port}/webhooks/telegram`)
   if (!process.env.CLERK_SECRET_KEY && !isDevAuthBypassEnabled()) {

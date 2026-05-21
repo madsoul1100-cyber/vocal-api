@@ -16,6 +16,13 @@ npm run dev
 
 API runs at **http://localhost:3001**
 
+| Version | Base path | Source |
+|---------|-----------|--------|
+| v1 | `/v1/*` | `src/routes/v1/` (stable for existing clients) |
+| v2 | `/v2/*` | `src/routes/v2/` (copy of v1; evolve response shapes here) |
+
+Business logic stays in `src/services/` — both versions call the same services until you fork behavior.
+
 | Endpoint | Description |
 |----------|-------------|
 | `GET /health` | Health check (`auth: clerk`) |

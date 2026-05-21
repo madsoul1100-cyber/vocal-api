@@ -6,6 +6,7 @@ import { getClerkAuthorizedParties, isAllowedCorsOrigin } from '@/lib/corsOrigin
 import { isDevAuthBypassEnabled } from '@/lib/devAuth.js'
 import webhooksRouter from '@/routes/webhooks/index.js'
 import v1Router from '@/routes/v1/index.js'
+import v2Router from '@/routes/v2/index.js'
 import { errorHandler } from '@/middleware/errorHandler.js'
 
 const app = express()
@@ -42,20 +43,21 @@ app.get('/health', (_req, res) => {
 app.use(express.json({ limit: '10mb' }))
 
 const authorizedParties = getClerkAuthorizedParties()
+const clerkApiMiddleware = clerkMiddleware({
+  enableHandshake: false,
+  authorizedParties,
+})
 
-if (isDevAuthBypassEnabled()) {
-  app.use('/v1', v1Router)
-} else {
-  app.use(
-    '/v1',
-    clerkMiddleware({
-      // API-only: do not run browser handshake on Bearer token requests
-      enableHandshake: false,
-      authorizedParties,
-    }),
-    v1Router,
-  )
+function mountApiVersion(prefix: string, router: express.Router) {
+  if (isDevAuthBypassEnabled()) {
+    app.use(prefix, router)
+  } else {
+    app.use(prefix, clerkApiMiddleware, router)
+  }
 }
+
+mountApiVersion('/v1', v1Router)
+mountApiVersion('/v2', v2Router)
 
 app.use(errorHandler)
 
