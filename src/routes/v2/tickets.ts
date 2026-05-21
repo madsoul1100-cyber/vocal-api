@@ -19,11 +19,12 @@ import {
 import { loadCitizenIdentityForTicket } from '@/services/ticketCitizenIdentity.js'
 import {
   canPreviewAttachmentMedia,
-  canUploadTicketAttachments,
-  createTicketAttachment,
-  listTicketAttachments,
+  canUploadTicketNotesOrAttachments,
+  createTicketNotesAndAttachments,
+  listTicketNotesAndAttachments,
   parseAttachmentsListQuery,
   ticketHasAttachments,
+  ticketHasNotes,
 } from '@/services/ticketAttachmentService.js'
 
 const router = Router()
@@ -116,45 +117,56 @@ router.post('/status', requireClerkAuth, async (req, res) => {
   res.json({ ok: true })
 })
 
-/** Upload attachment after ticket creation; super_admin / central_support only. */
-router.post('/:id/attachments', requireClerkAuth, upload.single('file'), async (req, res) => {
-  const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> })
-    .vocalUser
+/** Notes + attachments: list (GET) or create note and/or file (POST multipart). */
+router.post(
+  '/:id/attachments',
+  requireClerkAuth,
+  upload.fields([{ name: 'file', maxCount: 1 }]),
+  async (req, res) => {
+    const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> })
+      .vocalUser
 
-  if (!canUploadTicketAttachments(user.roles?.name)) {
-    res.status(403).json({ error: 'Forbidden — central support or super admin only' })
-    return
-  }
+    if (!canUploadTicketNotesOrAttachments(user.roles?.name)) {
+      res.status(403).json({ error: 'Forbidden' })
+      return
+    }
 
-  const file = req.file
-  if (!file) {
-    res.status(400).json({ error: 'file required (multipart field name: file)' })
-    return
-  }
+    const files = req.files as { file?: Express.Multer.File[] } | undefined
+    const file = files?.file?.[0]
+    const content =
+      typeof req.body?.content === 'string' ? req.body.content : undefined
 
-  const ticketId = String(req.params.id)
-  const result = await createTicketAttachment(ticketId, user.organization_id, user.id, {
-    buffer: file.buffer,
-    originalname: file.originalname,
-    mimetype: file.mimetype,
-  })
+    const ticketId = String(req.params.id)
+    const result = await createTicketNotesAndAttachments(
+      ticketId,
+      user.organization_id,
+      user.id,
+      {
+        content,
+        note_type: req.body?.note_type,
+        is_internal: req.body?.is_internal !== 'false' && req.body?.is_internal !== false,
+        file: file
+          ? { buffer: file.buffer, originalname: file.originalname, mimetype: file.mimetype }
+          : undefined,
+      },
+    )
 
-  if ('error' in result) {
-    res.status(result.status).json({ error: result.error })
-    return
-  }
+    if ('error' in result) {
+      res.status(result.status).json({ error: result.error })
+      return
+    }
 
-  res.status(201).json({ attachment: result.attachment })
-})
+    res.status(201).json({ note: result.note, attachment: result.attachment })
+  },
+)
 
-/** Ticket media/files with signed preview URLs (1h TTL). */
 router.get('/:id/attachments', requireClerkAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> })
     .vocalUser
   const ticketId = String(req.params.id)
 
   const listOpts = parseAttachmentsListQuery(req.query as Record<string, unknown>)
-  const result = await listTicketAttachments(
+  const result = await listTicketNotesAndAttachments(
     ticketId,
     user.organization_id,
     listOpts,
@@ -167,8 +179,10 @@ router.get('/:id/attachments', requireClerkAuth, async (req, res) => {
   }
 
   res.json({
+    notes: result.notes,
     attachments: result.attachments,
-    pagination: result.pagination,
+    notes_pagination: result.notes_pagination,
+    attachments_pagination: result.attachments_pagination,
     can_preview_media: result.can_preview_media,
     filters: { limit: listOpts.limit, offset: listOpts.offset },
   })
@@ -243,9 +257,10 @@ router.get('/:id', requireClerkAuth, async (req, res) => {
     user.roles?.name,
   )
   const ticketId = String(req.params.id)
-  const [has_pending_ai_suggestion, has_attachments] = await Promise.all([
+  const [has_pending_ai_suggestion, has_attachments, has_notes] = await Promise.all([
     Promise.resolve(shouldFetchAiSuggestion(user.roles?.name, row.needs_triage === true)),
     ticketHasAttachments(ticketId),
+    ticketHasNotes(ticketId),
   ])
   const can_preview_attachments = canPreviewAttachmentMedia(
     user.roles?.name,
@@ -258,6 +273,8 @@ router.get('/:id', requireClerkAuth, async (req, res) => {
       citizen_identity,
       has_pending_ai_suggestion,
       has_attachments,
+      has_notes,
+      has_notes_or_attachments: has_attachments || has_notes,
       can_preview_attachments,
     },
   })

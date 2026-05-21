@@ -63,9 +63,9 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 
 | Endpoint | Description |
 |----------|-------------|
-| `GET /v2/tickets/:id` | Ticket detail; includes `citizen_identity`, `has_pending_ai_suggestion`, `has_attachments` (skip sub-endpoints when flags are `false`) |
-| `GET /v2/tickets/:id/attachments` | Paginated `ticket_attachments`; `preview_url` when `can_preview_media` |
-| `POST /v2/tickets/:id/attachments` | Upload file (`multipart` field `file`); `super_admin` / `central_support` — for images added after filing |
+| `GET /v2/tickets/:id` | Ticket detail; `has_notes_or_attachments` → skip `GET .../attachments` when `false` |
+| `GET /v2/tickets/:id/attachments` | Paginated `notes` + `attachments` (same `limit`/`offset` each); `preview_url` when `can_preview_media` |
+| `POST /v2/tickets/:id/attachments` | Multipart: optional `content`, optional `file` (at least one); optional `note_type`; creates note and/or attachment |
 | `GET /v2/tickets/:id/ai-suggestion` | Pending AI suggestion (`super_admin` / `central_support` only; latest completed, unconfirmed, or `null`) |
 | `POST /v2/tickets/confirm-ai` | Apply AI suggestion to empty ticket fields; body `{ ticket_id, suggestion_id }`; same roles only |
 
