@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "db:migrate": "tsx scripts/db-migrate.ts",
     "db:check": "tsx scripts/db-check.ts",
-    "seed:passwords": "tsx scripts/seed-passwords.ts"
+    "seed:passwords": "tsx scripts/seed-passwords.ts",
+    "seed:directory-categories": "tsx scripts/seed-directory-categories.ts"
   },
   "dependencies": {
     "@clerk/express": "^1.7.76",
