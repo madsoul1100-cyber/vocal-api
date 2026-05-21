@@ -4,8 +4,11 @@ import { repairClerkAccountByEmail } from '@/lib/clerkAdmin.js'
 import {
   canAccessWorkersPage,
   createOrgUser,
+  deactivateOrgUser,
+  getOrgUserById,
   getWorkersPageData,
   processActivationRequest,
+  updateOrgUser,
 } from '@/services/workersManagementService.js'
 
 const router = Router()
@@ -74,6 +77,36 @@ router.post('/activation/:id', requireClerkAuth, async (req, res) => {
     return
   }
   res.json({ ok: true })
+})
+
+router.get('/:id', requireClerkAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
+  const result = await getOrgUserById(user, String(req.params.id))
+  if (!result.ok) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+  res.json({ worker: result.worker })
+})
+
+router.patch('/:id', requireClerkAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
+  const result = await updateOrgUser(user, String(req.params.id), req.body ?? {})
+  if (!result.ok) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+  res.json({ ok: true, worker: result.worker })
+})
+
+router.delete('/:id', requireClerkAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
+  const result = await deactivateOrgUser(user, String(req.params.id))
+  if (!result.ok) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+  res.json({ ok: true, already_inactive: result.already_inactive ?? false })
 })
 
 export default router

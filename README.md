@@ -92,9 +92,14 @@ Response: `workers`, `pagination`, `pending`, `pending_pagination`, `summary` (`
 
 | Endpoint | Description |
 |----------|-------------|
+| `GET /v2/workers/:id` | Staff detail (`role_id`, `territories`, Clerk id) |
 | `POST /v2/workers` | Create org user (+ optional Clerk account) |
+| `PATCH /v2/workers/:id` | Update staff (`full_name`, `phone`, `email`, `role_id`, `active`, `territory_id`, `metadata_json`) |
+| `DELETE /v2/workers/:id` | Soft-deactivate (`active=false`; row and Clerk account kept) |
 | `POST /v2/workers/activation/:id` | Approve or reject pending activation (`{ action, note? }`) |
 | `POST /v2/workers/repair-clerk` | Fix stuck Clerk sign-in (`{ email }`) |
+
+`POST /v2/workers` body (create): `full_name`, `role_id`, `email`, `password` (min 8, for new Clerk user), optional `phone`, `active`, `territory_id`, `clerk_user_id`, `metadata_json`.
 
 AI suggestions are created asynchronously when a citizen files via Telegram (`telegramFlow` → OpenRouter → `ai_ticket_suggestions`). Clients should use these v2 endpoints rather than querying `ai_ticket_suggestions` directly.
 

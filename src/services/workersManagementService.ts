@@ -53,6 +53,18 @@ export interface WorkerRow {
   roles: { name: string; display_name: string | null } | null
 }
 
+export interface WorkerTerritoryRef {
+  id: string
+  name: string
+  is_primary: boolean
+}
+
+export interface WorkerDetailRow extends WorkerRow {
+  role_id: string
+  clerk_user_id: string | null
+  territories: WorkerTerritoryRef[]
+}
+
 export interface PendingActivationRow {
   id: string
   full_name: string
@@ -698,6 +710,326 @@ export async function createOrgUser(
   })
 
   return { ok: true as const, id: data.id as string }
+}
+
+const WORKER_DETAIL_SELECT = `
+  id, full_name, phone, email, active, last_login_at, created_at, role_id, clerk_user_id,
+  roles(name, display_name),
+  user_territories(territory_id, is_primary, territories(id, name))
+`
+
+function mapWorkerDetailRow(raw: Record<string, unknown>): WorkerDetailRow {
+  const ut = (raw.user_territories ?? []) as Array<{
+    territory_id?: string
+    is_primary?: boolean
+    territories?: { id?: string; name?: string } | null
+  }>
+  const territories: WorkerTerritoryRef[] = ut
+    .map((row) => {
+      const t = row.territories
+      if (!t?.id) return null
+      return {
+        id: t.id,
+        name: t.name ?? '',
+        is_primary: row.is_primary === true,
+      }
+    })
+    .filter((t): t is WorkerTerritoryRef => t !== null)
+
+  const rolesRaw = raw.roles as { name?: string; display_name?: string | null } | null
+
+  return {
+    id: raw.id as string,
+    full_name: raw.full_name as string,
+    phone: (raw.phone as string | null) ?? null,
+    email: (raw.email as string | null) ?? null,
+    active: raw.active === true,
+    last_login_at: (raw.last_login_at as string | null) ?? null,
+    created_at: raw.created_at as string,
+    role_id: raw.role_id as string,
+    clerk_user_id: (raw.clerk_user_id as string | null) ?? null,
+    roles: rolesRaw?.name
+      ? { name: rolesRaw.name, display_name: rolesRaw.display_name ?? null }
+      : null,
+    territories,
+  }
+}
+
+async function loadOrgUserRow(
+  orgId: string,
+  userId: string,
+): Promise<WorkerDetailRow | { error: string } | null> {
+  const supabase = createSupabaseServiceClient()
+  const { data, error } = await supabase
+    .from('users')
+    .select(WORKER_DETAIL_SELECT)
+    .eq('id', userId)
+    .eq('organization_id', orgId)
+    .maybeSingle()
+
+  if (error) return { error: error.message }
+  if (!data) return null
+  return mapWorkerDetailRow(data as Record<string, unknown>)
+}
+
+export async function getOrgUserById(
+  actor: { organization_id: string; roles?: { name: string } | null },
+  userId: string,
+) {
+  if (!canAccessWorkersPage(actor.roles?.name)) {
+    return { ok: false as const, status: 403, error: 'Insufficient role' }
+  }
+
+  const row = await loadOrgUserRow(actor.organization_id, userId)
+  if (row && 'error' in row) {
+    return { ok: false as const, status: 500, error: row.error }
+  }
+  if (!row) {
+    return { ok: false as const, status: 404, error: 'User not found' }
+  }
+  return { ok: true as const, worker: row }
+}
+
+async function syncUserPrimaryTerritory(
+  orgId: string,
+  userId: string,
+  territoryId: string | null,
+) {
+  const supabase = createSupabaseServiceClient()
+  await supabase.from('user_territories').delete().eq('user_id', userId)
+
+  if (!territoryId) return
+
+  const { data: territory } = await supabase
+    .from('territories')
+    .select('id')
+    .eq('id', territoryId)
+    .eq('organization_id', orgId)
+    .maybeSingle()
+
+  if (!territory) return
+
+  await supabase.from('user_territories').insert({
+    user_id: userId,
+    territory_id: territoryId,
+    is_primary: true,
+  })
+}
+
+export async function updateOrgUser(
+  actor: { id: string; organization_id: string; roles?: { name: string } | null },
+  userId: string,
+  body: Record<string, unknown>,
+) {
+  if (!canAccessWorkersPage(actor.roles?.name)) {
+    return { ok: false as const, status: 403, error: 'Insufficient role' }
+  }
+
+  const supabase = createSupabaseServiceClient()
+  const { data: current } = await supabase
+    .from('users')
+    .select('id, organization_id, active, approved_at')
+    .eq('id', userId)
+    .eq('organization_id', actor.organization_id)
+    .maybeSingle()
+
+  if (!current) {
+    return { ok: false as const, status: 404, error: 'User not found' }
+  }
+
+  const now = new Date().toISOString()
+  const updates: Record<string, unknown> = { updated_at: now }
+  const auditChanges: Record<string, unknown> = {}
+
+  if ('full_name' in body) {
+    const full_name = clean(body.full_name, 200)
+    if (!full_name) {
+      return { ok: false as const, status: 400, error: 'full_name cannot be empty' }
+    }
+    updates.full_name = full_name
+    auditChanges.full_name = full_name
+  }
+
+  if ('phone' in body) {
+    const phone = clean(body.phone, 40)
+    if (phone) {
+      const { data: existingPhone } = await supabase
+        .from('users')
+        .select('id')
+        .eq('organization_id', actor.organization_id)
+        .eq('phone', phone)
+        .neq('id', userId)
+        .maybeSingle()
+      if (existingPhone) {
+        return { ok: false as const, status: 409, error: 'A user with this phone already exists' }
+      }
+    }
+    updates.phone = phone
+    auditChanges.phone = phone
+  }
+
+  if ('email' in body) {
+    const emailRaw = clean(body.email, 200)
+    const email = emailRaw ? emailRaw.toLowerCase() : null
+    if (email) {
+      const { data: existingEmail } = await supabase
+        .from('users')
+        .select('id')
+        .eq('organization_id', actor.organization_id)
+        .eq('email', email)
+        .neq('id', userId)
+        .maybeSingle()
+      if (existingEmail) {
+        return { ok: false as const, status: 409, error: 'A user with this email already exists' }
+      }
+    }
+    updates.email = email
+    auditChanges.email = email
+  }
+
+  if ('role_id' in body) {
+    const role_id =
+      typeof body.role_id === 'string' && body.role_id.trim() ? body.role_id.trim() : null
+    if (!role_id) {
+      return { ok: false as const, status: 400, error: 'role_id cannot be empty' }
+    }
+    const { data: role } = await supabase.from('roles').select('id').eq('id', role_id).maybeSingle()
+    if (!role) {
+      return { ok: false as const, status: 400, error: 'Invalid role_id' }
+    }
+    updates.role_id = role_id
+    auditChanges.role_id = role_id
+  }
+
+  if ('active' in body) {
+    const active = body.active === true || body.active === 'true' || body.active === 'on'
+    updates.active = active
+    auditChanges.active = active
+    if (active && !current.active && AUTO_APPROVE_ROLES.includes(actor.roles?.name ?? '')) {
+      updates.approved_by = actor.id
+      updates.approved_at = now
+    }
+  }
+
+  if ('metadata_json' in body) {
+    const metadata = parseMetadata(body.metadata_json)
+    if (metadata && 'error' in metadata) {
+      return { ok: false as const, status: 400, error: metadata.error }
+    }
+    updates.metadata_json = metadata
+    auditChanges.metadata_json = metadata
+  }
+
+  const territoryInBody = 'territory_id' in body
+  let territoryId: string | null | undefined
+  if (territoryInBody) {
+    territoryId =
+      typeof body.territory_id === 'string' && body.territory_id.trim()
+        ? body.territory_id.trim()
+        : null
+    if (territoryId) {
+      const { data: territory } = await supabase
+        .from('territories')
+        .select('id')
+        .eq('id', territoryId)
+        .eq('organization_id', actor.organization_id)
+        .maybeSingle()
+      if (!territory) {
+        return { ok: false as const, status: 400, error: 'Invalid territory' }
+      }
+      auditChanges.territory_id = territoryId
+    } else {
+      auditChanges.territory_id = null
+    }
+  }
+
+  if (Object.keys(updates).length === 1 && !territoryInBody) {
+    return { ok: false as const, status: 400, error: 'No fields to update' }
+  }
+
+  if (Object.keys(updates).length > 1) {
+    const { error } = await supabase
+      .from('users')
+      .update(updates)
+      .eq('id', userId)
+      .eq('organization_id', actor.organization_id)
+
+    if (error) return { ok: false as const, status: 500, error: error.message }
+  }
+
+  if (territoryInBody) {
+    await syncUserPrimaryTerritory(actor.organization_id, userId, territoryId ?? null)
+  }
+
+  if (Object.keys(auditChanges).length > 0) {
+    await supabase.from('audit_logs').insert({
+      organization_id: actor.organization_id,
+      event_type: 'user_updated',
+      entity_type: 'user',
+      entity_id: userId,
+      actor_type: 'user',
+      actor_user_id: actor.id,
+      new_value_json: auditChanges,
+    })
+  }
+
+  const refreshed = await loadOrgUserRow(actor.organization_id, userId)
+  if (!refreshed || 'error' in refreshed) {
+    return { ok: false as const, status: 500, error: 'User updated but reload failed' }
+  }
+
+  return { ok: true as const, worker: refreshed }
+}
+
+/** Soft-deactivate staff (sets active=false; does not remove Clerk or DB row). */
+export async function deactivateOrgUser(
+  actor: { id: string; organization_id: string; roles?: { name: string } | null },
+  userId: string,
+) {
+  if (!canAccessWorkersPage(actor.roles?.name)) {
+    return { ok: false as const, status: 403, error: 'Insufficient role' }
+  }
+
+  if (actor.id === userId) {
+    return { ok: false as const, status: 400, error: 'Cannot deactivate your own account' }
+  }
+
+  const supabase = createSupabaseServiceClient()
+  const { data: current } = await supabase
+    .from('users')
+    .select('id, organization_id, active, full_name')
+    .eq('id', userId)
+    .eq('organization_id', actor.organization_id)
+    .maybeSingle()
+
+  if (!current) {
+    return { ok: false as const, status: 404, error: 'User not found' }
+  }
+
+  if (!current.active) {
+    return { ok: true as const, already_inactive: true as const }
+  }
+
+  const now = new Date().toISOString()
+  const { error } = await supabase
+    .from('users')
+    .update({ active: false, updated_at: now })
+    .eq('id', userId)
+    .eq('organization_id', actor.organization_id)
+
+  if (error) return { ok: false as const, status: 500, error: error.message }
+
+  await supabase.from('audit_logs').insert({
+    organization_id: actor.organization_id,
+    event_type: 'user_deactivated',
+    entity_type: 'user',
+    entity_id: userId,
+    actor_type: 'user',
+    actor_user_id: actor.id,
+    new_value_json: { full_name: current.full_name, active: false },
+  })
+
+  return { ok: true as const }
 }
 
 export async function processActivationRequest(
