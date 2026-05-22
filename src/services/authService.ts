@@ -12,6 +12,11 @@ export interface JwtPayload {
   role: string
 }
 
+export interface PasswordSetupPayload {
+  sub: string
+  purpose: 'set_password'
+}
+
 export async function hashPassword(plain: string): Promise<string> {
   return bcrypt.hash(plain, BCRYPT_ROUNDS)
 }
@@ -27,6 +32,28 @@ export function signAccessToken(payload: JwtPayload): string {
   return jwt.sign(payload, JWT_SECRET, {
     expiresIn: JWT_EXPIRES_IN as jwt.SignOptions['expiresIn'],
   })
+}
+
+const PASSWORD_SETUP_EXPIRES_IN = '15m'
+
+export function signPasswordSetupToken(userId: string): string {
+  if (!JWT_SECRET || JWT_SECRET.length < 32) {
+    throw new Error('JWT_SECRET must be set (min 32 characters)')
+  }
+  return jwt.sign({ sub: userId, purpose: 'set_password' } satisfies PasswordSetupPayload, JWT_SECRET, {
+    expiresIn: PASSWORD_SETUP_EXPIRES_IN,
+  })
+}
+
+export function verifyPasswordSetupToken(token: string): string | null {
+  if (!JWT_SECRET) return null
+  try {
+    const decoded = jwt.verify(token, JWT_SECRET) as PasswordSetupPayload
+    if (decoded?.purpose !== 'set_password' || !decoded?.sub) return null
+    return decoded.sub
+  } catch {
+    return null
+  }
 }
 
 export function verifyAccessToken(token: string): JwtPayload | null {
@@ -76,7 +103,8 @@ export async function loginWithEmailPassword(email: string, password: string) {
   if (!hash) {
     return {
       ok: false as const,
-      error: 'Password not set for this account. Ask an admin to run npm run seed:passwords.',
+      error: 'No password set. Sign in with email, phone, and OTP to create your password.',
+      code: 'PASSWORD_NOT_SET',
       status: 403,
     }
   }
@@ -99,6 +127,44 @@ export async function loginWithEmailPassword(email: string, password: string) {
     .eq('id', user.id)
 
   return { ok: true as const, token, user }
+}
+
+export async function issueTokenForUser(user: Record<string, unknown>) {
+  const roleName = (user.roles as { name: string } | null)?.name ?? ''
+  const token = signAccessToken({
+    sub: user.id as string,
+    orgId: user.organization_id as string,
+    role: roleName,
+  })
+
+  const supabase = createSupabaseServiceClient()
+  await supabase
+    .from('users')
+    .update({ last_login_at: new Date().toISOString() })
+    .eq('id', user.id)
+
+  return { token, user }
+}
+
+export async function setPasswordForUser(userId: string, password: string) {
+  if (password.length < 8) {
+    return { ok: false as const, status: 400, error: 'password must be at least 8 characters' }
+  }
+
+  const supabase = createSupabaseServiceClient()
+  const password_hash = await hashPassword(password)
+  const { data: user, error } = await supabase
+    .from('users')
+    .update({ password_hash, updated_at: new Date().toISOString() })
+    .eq('id', userId)
+    .select('*, roles(*), organizations(name)')
+    .single()
+
+  if (error || !user) {
+    return { ok: false as const, status: 500, error: error?.message ?? 'Update failed' }
+  }
+
+  return { ok: true as const, user }
 }
 
 export function formatUserResponse(user: Record<string, unknown>) {

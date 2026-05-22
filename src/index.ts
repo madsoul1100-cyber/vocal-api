@@ -2,6 +2,7 @@ import './loadEnv.js'
 import app from './app.js'
 import { describeDatabaseBackend, isPostgresMode } from '@/lib/db.js'
 import { isDevAuthBypassEnabled } from './lib/devAuth.js'
+import { getOtpDeliveryStatus } from '@/lib/otp/delivery.js'
 
 const port = Number(process.env.PORT) || 3001
 
@@ -23,6 +24,10 @@ app.listen(port, () => {
   }
   console.log(`  api:      /v1/*  /v2/* (v2 copy of v1 — change responses in src/routes/v2/)`)
   console.log(`  health:   GET  http://localhost:${port}/health`)
+  const otp = getOtpDeliveryStatus()
+  console.log(
+    `  otp:      mode=${otp.mode} | email=${otp.email.provider}(${otp.email.configured ? 'ok' : 'missing'}) | sms=${otp.sms.provider}(${otp.sms.configured ? 'ok' : 'missing'})`,
+  )
   if (!process.env.JWT_SECRET && !isDevAuthBypassEnabled()) {
     console.warn('  warn: JWT_SECRET missing — login and protected routes will fail')
   }

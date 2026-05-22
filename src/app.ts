@@ -2,6 +2,7 @@ import express from 'express'
 import cors from 'cors'
 import helmet from 'helmet'
 import { describeDatabaseBackend } from '@/lib/db.js'
+import { getOtpDeliveryStatus } from '@/lib/otp/delivery.js'
 import { isAllowedCorsOrigin } from '@/lib/corsOrigins.js'
 import { isDevAuthBypassEnabled } from '@/lib/devAuth.js'
 import webhooksRouter from '@/routes/webhooks/index.js'
@@ -39,6 +40,7 @@ app.get('/health', (_req, res) => {
     service: 'vocal-api',
     auth: isDevAuthBypassEnabled() ? 'dev-bypass' : 'jwt',
     database: describeDatabaseBackend(),
+    otp_delivery: getOtpDeliveryStatus(),
     timestamp: new Date().toISOString(),
   })
 })

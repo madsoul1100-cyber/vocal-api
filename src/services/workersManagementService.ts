@@ -898,20 +898,23 @@ export async function createOrgUser(
   if (!email) {
     return { ok: false as const, status: 400, error: 'email is required for sign-in' }
   }
-  if (!password) {
+
+  if (!password && !phone) {
     return {
       ok: false as const,
       status: 400,
-      error: 'password is required (min 8 characters)',
+      error: 'phone is required when no password is set (staff will sign in via OTP)',
     }
   }
 
-  let password_hash: string
-  try {
-    password_hash = await hashPassword(password)
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : 'Password hashing failed'
-    return { ok: false as const, status: 500, error: msg }
+  let password_hash: string | null = null
+  if (password) {
+    try {
+      password_hash = await hashPassword(password)
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Password hashing failed'
+      return { ok: false as const, status: 500, error: msg }
+    }
   }
 
   const uniqueCheck = await assertUniqueStaffContact(user.organization_id, phone, email)
@@ -1424,11 +1427,19 @@ export async function processActivationRequest(
   const newStatus = action === 'approve' ? 'approved' : 'rejected'
 
   if (action === 'approve') {
-    if (!request.role_id || !request.password_hash) {
+    if (!request.role_id) {
       return {
         ok: false as const,
         status: 400,
-        error: 'Request is missing role or credentials — cannot approve',
+        error: 'Request is missing role — cannot approve',
+      }
+    }
+
+    if (!request.password_hash && !request.phone) {
+      return {
+        ok: false as const,
+        status: 400,
+        error: 'Request must include phone for OTP sign-in when no password was set',
       }
     }
 
