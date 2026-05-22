@@ -44,6 +44,15 @@ export const SQL_TICKET_DETAIL = `
   LEFT JOIN territories tr ON tr.id = t.territory_id
 `
 
+export const SQL_TICKET_STAGE_HISTORY = `
+  SELECT
+    h.id, h.ticket_id, h.from_stage, h.to_stage, h.from_sub_status, h.to_sub_status,
+    h.changed_by, h.change_reason, h.system_action, h.created_at,
+    CASE WHEN u.id IS NOT NULL THEN jsonb_build_object('id', u.id, 'full_name', u.full_name) END AS changed_by_user
+  FROM ticket_stage_history h
+  LEFT JOIN users u ON u.id = h.changed_by
+`
+
 export const SQL_WORKERS_WITH_TERRITORIES = `
   SELECT
     u.id, u.full_name,
