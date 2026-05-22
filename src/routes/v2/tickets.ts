@@ -1,6 +1,6 @@
 import { Router } from 'express'
 import multer from 'multer'
-import { requireClerkAuth } from '@/middleware/clerkAuth.js'
+import { requireAuth } from '@/middleware/requireAuth.js'
 import { getCurrentVocalUser } from '@/lib/auth.js'
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
 import {
@@ -52,7 +52,7 @@ const upload = multer({
 })
 
 /** v2: paginated list with sort, filters (incl. SLA), and keyword search */
-router.get('/', requireClerkAuth, async (req, res) => {
+router.get('/', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> })
     .vocalUser
 
@@ -79,6 +79,7 @@ router.get('/status-options', requireClerkAuth, async (req, res) => {
 })
 
 router.post('/accept', requireClerkAuth, async (req, res) => {
+router.post('/accept', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> }).vocalUser
   const ticketId = req.body?.ticket_id as string | undefined
   if (!ticketId) {
@@ -93,7 +94,7 @@ router.post('/accept', requireClerkAuth, async (req, res) => {
   res.json({ ok: true })
 })
 
-router.post('/reject', requireClerkAuth, async (req, res) => {
+router.post('/reject', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> }).vocalUser
   const ticketId = req.body?.ticket_id as string | undefined
   const reason = req.body?.reason as string | undefined
@@ -110,7 +111,7 @@ router.post('/reject', requireClerkAuth, async (req, res) => {
 })
 
 /** Apply pending AI suggestion to empty ticket fields; central_support / super_admin only */
-router.post('/confirm-ai', requireClerkAuth, async (req, res) => {
+router.post('/confirm-ai', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> }).vocalUser
   const ticketId = req.body?.ticket_id as string | undefined
   const suggestionId = req.body?.suggestion_id as string | undefined
@@ -167,6 +168,7 @@ router.post('/auto-assign', requireClerkAuth, async (req, res) => {
 })
 
 router.post('/status', requireClerkAuth, async (req, res) => {
+router.post('/status', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> }).vocalUser
   const ticketId = req.body?.ticket_id as string | undefined
   const subStatus = req.body?.sub_status as string | undefined
@@ -185,7 +187,7 @@ router.post('/status', requireClerkAuth, async (req, res) => {
 /** Notes + attachments: list (GET) or create note and/or file (POST multipart). */
 router.post(
   '/:id/attachments',
-  requireClerkAuth,
+  requireAuth,
   upload.fields([{ name: 'file', maxCount: 1 }]),
   async (req, res) => {
     const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> })
@@ -225,7 +227,7 @@ router.post(
   },
 )
 
-router.get('/:id/attachments', requireClerkAuth, async (req, res) => {
+router.get('/:id/attachments', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> })
     .vocalUser
   const ticketId = String(req.params.id)
@@ -281,7 +283,7 @@ router.get('/:id/assignable-workers', requireClerkAuth, async (req, res) => {
 })
 
 /** Pending AI triage suggestion; central_support / super_admin only */
-router.get('/:id/ai-suggestion', requireClerkAuth, async (req, res) => {
+router.get('/:id/ai-suggestion', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> })
     .vocalUser
 
@@ -313,7 +315,7 @@ router.get('/:id/ai-suggestion', requireClerkAuth, async (req, res) => {
   res.json({ aiSuggestion })
 })
 
-router.get('/:id', requireClerkAuth, async (req, res) => {
+router.get('/:id', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> })
     .vocalUser
 

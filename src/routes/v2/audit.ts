@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { requireClerkAuth } from '@/middleware/clerkAuth.js'
+import { requireAuth } from '@/middleware/requireAuth.js'
 import { canAccessAudit, listAuditLogs } from '@/services/auditService.js'
 
 const router = Router()
@@ -9,7 +9,7 @@ type VocalUser = {
   roles?: { name: string } | null
 }
 
-router.get('/', requireClerkAuth, async (req, res) => {
+router.get('/', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
   if (!canAccessAudit(user.roles?.name)) {
     res.status(403).json({ error: 'Insufficient role' })

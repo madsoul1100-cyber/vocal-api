@@ -22,7 +22,3 @@ export function isAllowedCorsOrigin(origin: string): boolean {
   return false
 }
 
-/** Clerk `authorizedParties` — explicit URLs only (no regex). */
-export function getClerkAuthorizedParties(): string[] {
-  return [...new Set([...DEFAULT_CORS_ORIGINS, ...getExtraCorsOrigins()])]
-}

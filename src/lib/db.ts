@@ -12,6 +12,11 @@ export function isPostgresMode(): boolean {
   return Boolean(getDatabaseUrl())
 }
 
+/** Human-readable backend for logs and /health (no secrets). */
+export function describeDatabaseBackend(): 'postgres' | 'supabase' {
+  return isPostgresMode() ? 'postgres' : 'supabase'
+}
+
 export function getPool(): pg.Pool {
   const url = getDatabaseUrl()
   if (!url) {

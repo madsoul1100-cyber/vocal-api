@@ -4,34 +4,26 @@
  * Usage (from vocal-api):
  *   npm run seed:passwords
  *
- * Default password: Vocal!Test2026 (same as Clerk seed script)
+ * Default password: Vocal!Test2026
  *
- * Requires: SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, migration 007 applied
+ * By default seeds every active user in ORG_ID that has an email.
+ * Set SEED_EMAILS_ONLY=1 to use the fixed vocal-test-* list only.
+ * Set SEED_ONLY_MISSING=1 to skip users who already have password_hash.
+ *
+ * Requires: DATABASE_URL (PostgreSQL/RDS), migration 007 applied
  */
-
-import fs from 'node:fs'
-import path from 'node:path'
-import { fileURLToPath } from 'url'
-import { createClient } from '@supabase/supabase-js'
+import dotenv from 'dotenv'
 import bcrypt from 'bcryptjs'
+import pg from 'pg'
 
-const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
-const envPaths = [
-  path.join(root, '.env'),
-  path.join(root, '.env.local'),
-  path.resolve(root, '../vocal-app/.env.local'),
-]
-for (const p of envPaths) {
-  if (!fs.existsSync(p)) continue
-  for (const line of fs.readFileSync(p, 'utf8').split(/\r?\n/)) {
-    const m = line.match(/^([A-Z0-9_]+)=(.*)$/)
-    if (m && !process.env[m[1]]) process.env[m[1]] = m[2].trim().replace(/^["']|["']$/g, '')
-  }
-}
+dotenv.config()
+dotenv.config({ path: '.env.local', override: true })
 
-const SUPABASE_URL = process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL
-const KEY = process.env.SUPABASE_SERVICE_ROLE_KEY
 const PASSWORD = process.env.SEED_PASSWORD ?? 'Vocal!Test2026'
+const ORG_ID = process.env.ORG_ID?.trim()
+const EMAILS_ONLY = process.env.SEED_EMAILS_ONLY === '1' || process.env.SEED_EMAILS_ONLY === 'true'
+const ONLY_MISSING =
+  process.env.SEED_ONLY_MISSING === '1' || process.env.SEED_ONLY_MISSING === 'true'
 
 const TEST_EMAILS = [
   'vocal-test-super@example.com',
@@ -44,42 +36,99 @@ const TEST_EMAILS = [
   'vocal-test-worker3@example.com',
   'vocal-test-media@example.com',
   'vocal-test-legal@example.com',
+  'raja@dugoutlive.com',
+  'anuragkartik7@gmail.com',
+  'abhijit.sai09@gmail.com',
 ]
 
 async function main() {
-  if (!SUPABASE_URL || !KEY) throw new Error('Missing Supabase env')
-  const hash = await bcrypt.hash(PASSWORD, 12)
-  const supabase = createClient(SUPABASE_URL, KEY, {
-    auth: { autoRefreshToken: false, persistSession: false },
-  })
-
-  let ok = 0
-  for (const email of TEST_EMAILS) {
-    const { data, error } = await supabase
-      .from('users')
-      .update({ password_hash: hash })
-      .eq('email', email.toLowerCase())
-      .select('id, full_name, email')
-      .maybeSingle()
-
-    if (error) {
-      console.error(`✗ ${email}:`, error.message)
-      if (error.message.includes('password_hash')) {
-        console.error('  → Run migration 007_user_password_auth.sql in Supabase first')
-        process.exit(1)
-      }
-      continue
-    }
-    if (!data) {
-      console.warn(`○ ${email}: no user row (run monolith seed:test-users first)`)
-      continue
-    }
-    console.log(`✓ ${email}`)
-    ok++
+  const url = process.env.DATABASE_URL?.trim()
+  if (!url) {
+    throw new Error('DATABASE_URL is required in .env.local (PostgreSQL/RDS connection string)')
   }
 
-  console.log(`\nDone. ${ok}/${TEST_EMAILS.length} users can sign in with password: ${PASSWORD}`)
-  console.log('Login: POST http://localhost:3001/v1/auth/login')
+  const hash = await bcrypt.hash(PASSWORD, 12)
+  const pool = new pg.Pool({
+    connectionString: url,
+    ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
+  })
+
+  let targets: { id: string; email: string; full_name: string }[] = []
+
+  try {
+    if (EMAILS_ONLY || !ORG_ID) {
+      if (!EMAILS_ONLY && !ORG_ID) {
+        console.warn('ORG_ID not set — using fixed test email list only')
+      }
+      const res = await pool.query<{ id: string; email: string; full_name: string }>(
+        `SELECT id, email, full_name FROM users
+         WHERE LOWER(email) = ANY($1::text[])`,
+        [TEST_EMAILS.map((e) => e.toLowerCase())],
+      )
+      targets = res.rows
+      const found = new Set(targets.map((r) => r.email.toLowerCase()))
+      for (const email of TEST_EMAILS) {
+        if (!found.has(email.toLowerCase())) {
+          console.warn(`○ ${email}: no user row`)
+        }
+      }
+    } else {
+      const res = await pool.query<{ id: string; email: string; full_name: string }>(
+        `SELECT id, email, full_name FROM users
+         WHERE organization_id = $1
+           AND active = true
+           AND email IS NOT NULL
+           AND TRIM(email) <> ''
+         ORDER BY email`,
+        [ORG_ID],
+      )
+      targets = res.rows
+      console.log(`Org ${ORG_ID}: ${targets.length} active user(s) with email`)
+    }
+
+    if (targets.length === 0) {
+      console.warn('No users to update.')
+      return
+    }
+
+    let ok = 0
+    let skipped = 0
+
+    for (const row of targets) {
+      try {
+        const res = await pool.query(
+          `UPDATE users
+           SET password_hash = $1, updated_at = NOW()
+           WHERE id = $2
+             ${ONLY_MISSING ? 'AND (password_hash IS NULL OR password_hash = \'\')' : ''}
+           RETURNING id`,
+          [hash, row.id],
+        )
+
+        if (res.rowCount === 0) {
+          console.log(`○ ${row.email} (${row.full_name}): already has password`)
+          skipped++
+          continue
+        }
+
+        console.log(`✓ ${row.email} (${row.full_name})`)
+        ok++
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err)
+        console.error(`✗ ${row.email}:`, msg)
+        if (msg.includes('password_hash')) {
+          console.error('  → Run migration 007_user_password_auth.sql first')
+          process.exit(1)
+        }
+      }
+    }
+
+    console.log(`\nDone. ${ok} updated, ${skipped} skipped, ${targets.length} total`)
+    console.log(`Password: ${PASSWORD}`)
+    console.log('Login: POST http://localhost:3001/v1/auth/login')
+  } finally {
+    await pool.end()
+  }
 }
 
 main().catch((e) => {

@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { requireClerkAuth } from '@/middleware/clerkAuth.js'
+import { requireAuth } from '@/middleware/requireAuth.js'
 import {
   processInbound,
   type IntakeRequest,
@@ -14,7 +14,7 @@ type VocalUser = {
 }
 
 function requireIntakeLabRole(
-  req: Parameters<typeof requireClerkAuth>[0],
+  req: Parameters<typeof requireAuth>[0],
   res: import('express').Response,
 ): boolean {
   const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
@@ -26,7 +26,7 @@ function requireIntakeLabRole(
   return true
 }
 
-router.post('/test', requireClerkAuth, async (req, res) => {
+router.post('/test', requireAuth, async (req, res) => {
   if (!requireIntakeLabRole(req, res)) return
 
   const body = req.body as IntakeRequest

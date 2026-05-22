@@ -1,5 +1,5 @@
 import { Router } from 'express'
-import { requireClerkAuth } from '@/middleware/clerkAuth.js'
+import { requireAuth } from '@/middleware/requireAuth.js'
 import {
   canAccessJobs,
   listExpireJobRuns,
@@ -14,7 +14,7 @@ type VocalUser = {
   roles?: { name: string } | null
 }
 
-function requireJobsRole(req: Parameters<typeof requireClerkAuth>[0], res: import('express').Response): VocalUser | null {
+function requireJobsRole(req: Parameters<typeof requireAuth>[0], res: import('express').Response): VocalUser | null {
   const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
   if (!canAccessJobs(user.roles?.name)) {
     res.status(403).json({ error: 'Insufficient role' })
@@ -23,7 +23,7 @@ function requireJobsRole(req: Parameters<typeof requireClerkAuth>[0], res: impor
   return user
 }
 
-router.get('/', requireClerkAuth, async (req, res) => {
+router.get('/', requireAuth, async (req, res) => {
   const user = requireJobsRole(req, res)
   if (!user) return
 
@@ -31,7 +31,7 @@ router.get('/', requireClerkAuth, async (req, res) => {
   res.json({ runs })
 })
 
-router.post('/run-expire', requireClerkAuth, async (req, res) => {
+router.post('/run-expire', requireAuth, async (req, res) => {
   const user = requireJobsRole(req, res)
   if (!user) return
 
