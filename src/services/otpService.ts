@@ -29,6 +29,75 @@ export function normalizePhone(raw: string): string | null {
   return `+${digits}`
 }
 
+function phoneLast10(raw: string): string {
+  return raw.replace(/\D/g, '').slice(-10)
+}
+
+/** Match stored vs input even when DB has 9120… and sign-in sends +919120… */
+export function phonesMatch(stored: string | null | undefined, input: string): boolean {
+  const normalizedInput = normalizePhone(input)
+  if (!normalizedInput) return false
+  const storedRaw = stored?.trim()
+  if (!storedRaw) return false
+
+  const normalizedStored = normalizePhone(storedRaw)
+  if (normalizedStored && normalizedStored === normalizedInput) return true
+
+  const a = phoneLast10(storedRaw)
+  const b = phoneLast10(input)
+  return a.length === 10 && b.length === 10 && a === b
+}
+
+type StaffOtpLookupResult =
+  | { ok: true; user: Record<string, unknown> }
+  | { ok: false; error: string; status: number }
+
+async function lookupStaffUserForOtp(email: string, phone: string): Promise<StaffOtpLookupResult> {
+  const normalizedEmail = normalizeEmail(email)
+  const normalizedPhone = normalizePhone(phone)
+  if (!normalizedEmail) {
+    return { ok: false, error: 'Enter a valid email address', status: 400 }
+  }
+  if (!normalizedPhone) {
+    return {
+      ok: false,
+      error: 'Enter a valid mobile number (10 digits, or +91…)',
+      status: 400,
+    }
+  }
+
+  const supabase = createSupabaseServiceClient()
+  const { data: user } = await supabase
+    .from('users')
+    .select('*, roles(*), organizations(name)')
+    .eq('email', normalizedEmail)
+    .maybeSingle()
+
+  if (!user) {
+    return { ok: false, error: 'No account found with this email', status: 404 }
+  }
+
+  const storedPhone = (user as Record<string, unknown>).phone as string | null | undefined
+  if (!storedPhone?.trim()) {
+    return {
+      ok: false,
+      error:
+        'No mobile number on this account. Ask your admin to add your phone on the Workers profile, or sign in with password.',
+      status: 403,
+    }
+  }
+
+  if (!phonesMatch(storedPhone, phone)) {
+    return {
+      ok: false,
+      error: 'This mobile number does not match the phone saved on your account',
+      status: 404,
+    }
+  }
+
+  return { ok: true, user: user as Record<string, unknown> }
+}
+
 function generateOtpCode(): string {
   const n = crypto.randomInt(0, 10 ** OTP_LENGTH)
   return String(n).padStart(OTP_LENGTH, '0')
@@ -53,19 +122,8 @@ export async function findStaffUserByEmailAndPhone(
   email: string,
   phone: string,
 ): Promise<Record<string, unknown> | null> {
-  const supabase = createSupabaseServiceClient()
-  const normalizedEmail = normalizeEmail(email)
-  const normalizedPhone = normalizePhone(phone)
-  if (!normalizedEmail || !normalizedPhone) return null
-
-  const { data } = await supabase
-    .from('users')
-    .select('*, roles(*), organizations(name)')
-    .eq('email', normalizedEmail)
-    .eq('phone', normalizedPhone)
-    .maybeSingle()
-
-  return (data as Record<string, unknown> | null) ?? null
+  const result = await lookupStaffUserForOtp(email, phone)
+  return result.ok ? result.user : null
 }
 
 function assertUserCanAuthenticate(
@@ -99,10 +157,11 @@ export async function requestStaffOtp(args: {
     }
   | { ok: false; error: string; status: number }
 > {
-  const user = await findStaffUserByEmailAndPhone(args.email, args.phone)
-  if (!user) {
-    return { ok: false, error: 'No account found for this email and phone', status: 404 }
+  const lookup = await lookupStaffUserForOtp(args.email, args.phone)
+  if (!lookup.ok) {
+    return { ok: false, error: lookup.error, status: lookup.status }
   }
+  const user = lookup.user
 
   const gate = assertUserCanAuthenticate(user)
   if ('error' in gate) {
