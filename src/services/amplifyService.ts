@@ -64,6 +64,45 @@ export const PLATFORMS: PlatformMeta[] = [
   { key: 'press_release',      label: 'Press Release',       short_hint: 'FOR IMMEDIATE RELEASE header, dateline, body, boilerplate.' },
 ]
 
+export interface ToneMeta {
+  key: AmplifyTone
+  label: string
+  group: 'neutral' | 'campaign'
+  /** Shown in the editor when this tone is selected (campaign tones only). */
+  campaign_hint?: string
+}
+
+export const TONES: ToneMeta[] = [
+  { key: 'informative', label: 'Informative', group: 'neutral' },
+  { key: 'urgent', label: 'Urgent', group: 'neutral' },
+  { key: 'formal', label: 'Formal', group: 'neutral' },
+  { key: 'empathetic', label: 'Empathetic', group: 'neutral' },
+  { key: 'neutral', label: 'Neutral', group: 'neutral' },
+  {
+    key: 'activist',
+    label: 'Activist — campaign push',
+    group: 'campaign',
+    campaign_hint:
+      'Campaign voice — sharper, visibility-seeking language with [@Handle] placeholders. Review before posting; only facts in the source are used.',
+  },
+  {
+    key: 'opposition',
+    label: 'Opposition — accountability',
+    group: 'campaign',
+    campaign_hint:
+      'Campaign voice — sharper, visibility-seeking language with [@Handle] placeholders. Review before posting; only facts in the source are used.',
+  },
+  {
+    key: 'public_shame',
+    label: 'Public shame — viral hook',
+    group: 'campaign',
+    campaign_hint:
+      'Campaign voice — sharper, visibility-seeking language with [@Handle] placeholders. Review before posting; only facts in the source are used.',
+  },
+]
+
+export const VALID_TONE_KEYS = new Set(TONES.map((t) => t.key))
+
 // Voice shaping for the campaign/escalation tones. These bias the writer
 // toward post-ready, visibility-maximising output while keeping the
 // organization legally safe: no unverified accusations, qualify opinion

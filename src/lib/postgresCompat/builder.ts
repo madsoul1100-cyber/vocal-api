@@ -2,6 +2,7 @@ import { dbQuery } from '@/lib/db.js'
 import {
   SQL_TICKET_DETAIL,
   SQL_TICKET_LIST,
+  SQL_TICKET_STAGE_HISTORY,
   SQL_WORKERS_WITH_TERRITORIES,
   sqlForUserWithRelations,
 } from '@/lib/postgresCompat/embedSql.js'
@@ -83,7 +84,31 @@ function matchEmbedSelect(table: string, select: string): string | null {
   if (table === 'users' && s.includes('roles!inner')) {
     return 'USER_ROLES_INNER'
   }
+  if (table === 'audit_logs' && s.includes('users:actor_user_id')) {
+    return 'AUDIT_LOG_ACTOR'
+  }
+  if (table === 'ticket_assignments' && s.includes('tickets!inner')) {
+    return 'TICKET_ASSIGNMENTS_TICKET_INNER'
+  }
+  if (
+    table === 'ticket_stage_history' &&
+    (s.includes('changed_by_user:users') || s.includes('users!ticket_stage_history_changed_by'))
+  ) {
+    return 'TICKET_STAGE_HISTORY'
+  }
   return null
+}
+
+function remapTicketAssignmentFilters(filters: Filter[]): Filter[] {
+  return filters.map((f) => {
+    if ('col' in f && f.col === 'tickets.organization_id') {
+      return { ...f, col: 't.organization_id' }
+    }
+    if ('col' in f && !f.col.includes('.')) {
+      return { ...f, col: `ta.${f.col}` }
+    }
+    return f
+  })
 }
 
 function remapJoinFilters(filters: Filter[]): Filter[] {
@@ -219,10 +244,10 @@ export class PostgresTableQuery<T = Record<string, unknown>> {
 
   async execute(): Promise<DbResult<T>> {
     try {
-      if (this.insertRow) return this.runInsert()
-      if (this.updateRow) return this.runUpdate()
-      if (this.upsertRow) return this.runUpsert()
-      return this.runSelect()
+      if (this.insertRow) return await this.runInsert()
+      if (this.updateRow) return await this.runUpdate()
+      if (this.upsertRow) return await this.runUpsert()
+      return await this.runSelect()
     } catch (err) {
       return { data: null, error: { message: err instanceof Error ? err.message : String(err) } }
     }
@@ -342,6 +367,76 @@ export class PostgresTableQuery<T = Record<string, unknown>> {
       `
       const res = await dbQuery(baseSql, params)
       return this.finishSelect(res.rows as T[], res.rowCount)
+    }
+
+    if (embed === 'AUDIT_LOG_ACTOR') {
+      const { sql: where, params } = buildWhere(this.prefixWhere('a'))
+      baseSql = `
+        SELECT a.id, a.created_at, a.new_value_json,
+          CASE WHEN u.id IS NOT NULL THEN jsonb_build_object('full_name', u.full_name) END AS users
+        FROM audit_logs a
+        LEFT JOIN users u ON u.id = a.actor_user_id
+        WHERE ${where}
+      `
+      if (this.orderCol) {
+        baseSql += ` ORDER BY a.${this.orderCol} ${this.orderAsc ? 'ASC' : 'DESC'}`
+      }
+      if (this.limitN != null) {
+        const lim = params.length + 1
+        const off = params.length + 2
+        baseSql += ` LIMIT $${lim} OFFSET $${off}`
+        params.push(this.limitN, this.offsetN ?? 0)
+      }
+      const res = await dbQuery(baseSql, params)
+      return this.finishSelect(res.rows as T[], res.rowCount)
+    }
+
+    if (embed === 'TICKET_STAGE_HISTORY') {
+      const { sql: where, params } = buildWhere(this.prefixWhere('h'))
+      baseSql = `${SQL_TICKET_STAGE_HISTORY} WHERE ${where}`
+      if (this.orderCol) {
+        baseSql += ` ORDER BY h.${this.orderCol} ${this.orderAsc ? 'ASC' : 'DESC'}`
+      }
+      if (this.limitN != null) {
+        const lim = params.length + 1
+        const off = params.length + 2
+        baseSql += ` LIMIT $${lim} OFFSET $${off}`
+        params.push(this.limitN, this.offsetN ?? 0)
+      }
+      const res = await dbQuery(baseSql, params)
+      return this.finishSelect(res.rows as T[], res.rowCount)
+    }
+
+    if (embed === 'TICKET_ASSIGNMENTS_TICKET_INNER') {
+      const filters = remapTicketAssignmentFilters(this.filters)
+      const { sql: where, params } = buildWhere(filters)
+      if (this.countExact) {
+        const countRes = await dbQuery<{ c: string }>(
+          `SELECT COUNT(*)::text AS c
+           FROM ticket_assignments ta
+           INNER JOIN tickets t ON t.id = ta.ticket_id
+           WHERE ${where}`,
+          params,
+        )
+        return this.finishSelect([] as T[], Number(countRes.rows[0]?.c ?? 0))
+      }
+      baseSql = `
+        SELECT ta.id, jsonb_build_object('organization_id', t.organization_id) AS tickets
+        FROM ticket_assignments ta
+        INNER JOIN tickets t ON t.id = ta.ticket_id
+        WHERE ${where}
+      `
+      const res = await dbQuery(baseSql, params)
+      return this.finishSelect(res.rows as T[], res.rowCount)
+    }
+
+    if (/[:!]/.test(this.selectCols)) {
+      return {
+        data: null,
+        error: {
+          message: `PostgREST embed select is not supported in postgres mode: ${this.selectCols.replace(/\s+/g, ' ').slice(0, 120)}`,
+        },
+      }
     }
 
     const cols = this.selectCols === '*' ? '*' : snakeCols(this.selectCols)
