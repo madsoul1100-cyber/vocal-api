@@ -11,6 +11,7 @@ import {
   WORKER_ALLOWED_SUB_STATUSES,
   type TicketStatusOptionsResponse,
 } from '@/lib/ticketStatusCatalog.js'
+import { assignTicketToWorker, canAssignTickets } from '@/services/ticketAssignmentService.js'
 import { notifyCitizenOfTicketUpdate } from '@/services/citizenNotifier.js'
 
 const VALID_REJECTION_REASONS = [
@@ -286,7 +287,12 @@ export async function rejectTicket(user: VocalUser, ticketId: string, reason: st
   return { ok: true as const, reoffered }
 }
 
-export async function updateTicketStatus(user: VocalUser, ticketId: string, subStatusRaw: string) {
+export async function updateTicketStatus(
+  user: VocalUser,
+  ticketId: string,
+  subStatusRaw: string,
+  workerId?: string,
+) {
   const subStatus = subStatusRaw.trim()
   if (!subStatus) {
     return { ok: false as const, status: 400, error: 'sub_status required' }
@@ -295,18 +301,38 @@ export async function updateTicketStatus(user: VocalUser, ticketId: string, subS
     return { ok: false as const, status: 400, error: 'Invalid sub_status value' }
   }
 
-  if ((SUB_STATUSES_REQUIRING_WORKER as readonly string[]).includes(subStatus)) {
+  const roleName = user.roles?.name
+  const isPrivileged = isPrivilegedRole(roleName)
+  const isWorker = roleName === 'ground_worker'
+
+  /** Assign path: same as POST /v2/tickets/assign (kept for clients that still use /status). */
+  if (subStatus === 'assigned_awaiting_acceptance') {
+    if (!canAssignTickets(roleName)) {
+      return {
+        ok: false as const,
+        status: 403,
+        error: 'Only central support can assign tickets to workers',
+      }
+    }
+    if (!workerId?.trim()) {
+      return {
+        ok: false as const,
+        status: 400,
+        error: 'worker_id required — or use POST /v2/tickets/assign',
+      }
+    }
+    const assignResult = await assignTicketToWorker(user, ticketId, workerId.trim())
+    if (!assignResult.ok) {
+      return { ok: false as const, status: assignResult.status, error: assignResult.error }
+    }
     return {
-      ok: false as const,
-      status: 400,
-      error: `Use POST /v2/tickets/assign for sub_status "${subStatus}"`,
+      ok: true as const,
+      assignment_id: assignResult.assignment_id,
+      expires_at: assignResult.expires_at,
     }
   }
 
   const newStage = stageForSubStatus(subStatus)
-  const roleName = user.roles?.name
-  const isPrivileged = isPrivilegedRole(roleName)
-  const isWorker = roleName === 'ground_worker'
 
   const supabase = createSupabaseServiceClient()
   const { data: ticket } = await supabase
