@@ -78,6 +78,40 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 | `GET /v2/tickets/:id/ai-suggestion` | Pending AI suggestion (`super_admin` / `central_support` only; latest completed, unconfirmed, or `null`) |
 | `POST /v2/tickets/confirm-ai` | Apply AI suggestion to empty ticket fields; body `{ ticket_id, suggestion_id }`; same roles only |
 
+### v2 worker / My Assignments (`ground_worker`)
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /v2/worker/assignments` (no query) | Legacy: `{ offered, activeTickets, telegramLinked }` |
+| `GET /v2/worker/assignments/summary` | Tab counts: `{ counts: { offered, active, closed }, telegramLinked }` |
+| `GET /v2/worker/assignments?bucket=…` | Paginated tab list (see below) |
+| `GET /v2/worker/current-offer` | Poll single pending offer |
+| `POST /v2/tickets/accept` / `reject` / `status` | Accept offer, reject, update sub-status |
+
+**Buckets** (`bucket` required for paginated list):
+
+| `bucket` | Rows |
+|----------|------|
+| `offered` | Current assignment offer (`status=offered`, not expired); items `{ id, expires_at, ticket }` |
+| `active` | Owned tickets `in_progress` or `on_hold`, excluding `assigned_awaiting_acceptance` |
+| `closed` | Owned tickets with `stage=closed` (includes `closed_at`, `outcome`) |
+
+| Query param | Description |
+|-------------|-------------|
+| `limit` / `offset` | Page size (default `20`, max `100`) |
+| `keyword` or `search` | Title, issue text, ticket number, location |
+| `severity` | `critical`, `high`, `medium`, `low` |
+| `sub_status` | Filter by sub-status |
+| `critical` | `true` / `false` |
+| `sla_breached` | `true` / `false` |
+| `sla_first_contact_overdue` | `true` |
+| `sla_resolution_overdue` | `true` |
+| `sla_at_risk` | `true` — due within 24h |
+| `sort` | `offered`: `expires_at` (default). `active`: `accepted_at` (default). `closed`: `closed_at` (default). Also `updated_at`, `created_at` |
+| `order` | `asc` or `desc` (default `desc` for closed, `asc` for offered/active) |
+
+Paginated response: `{ bucket, items, pagination, filters }`.
+
 ### v2 workers (paginated)
 
 `GET /v2/workers` — `super_admin`, `central_support`, `district_leader` only. v1 unchanged (returns first 200 workers + 50 pending).
