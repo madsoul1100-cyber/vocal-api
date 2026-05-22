@@ -69,8 +69,8 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 | `POST /v2/tickets/assign` | Offer ticket to worker (`super_admin` / `central_support`); body `{ ticket_id, worker_id }` → `{ ok, assignment_id, expires_at }` |
 | `POST /v2/tickets/auto-assign` | Auto-pick nearest eligible worker; body `{ ticket_id }` → `{ ok, assignment_id, expires_at, worker }` or `409` if none |
 | `GET /v2/tickets/status-options` | Status picker catalog for current role (`groups`, `sub_statuses_requiring_worker`, `worker_allowed_sub_statuses`) |
-| `POST /v2/tickets/status` | Update sub-status only; body `{ ticket_id, sub_status }` (codes, not labels). Close requires `citizen_contacted` in history + closure note (422). Do not send `assigned_awaiting_acceptance` — use assign |
-| `POST /v2/tickets/assign` | Offer to worker when picker value is `assigned_awaiting_acceptance`; body `{ ticket_id, worker_id }` |
+| `POST /v2/tickets/status` | Update sub-status; body `{ ticket_id, sub_status }`. For `assigned_awaiting_acceptance` also send `worker_id` (same as assign). Close requires `citizen_contacted` in history + closure note (422) |
+| `POST /v2/tickets/assign` | Offer to worker; body `{ ticket_id, worker_id }` (preferred for assign; `/status` with `worker_id` still supported) |
 | `POST /v2/tickets/accept` | Worker accepts current offer; body `{ ticket_id }` |
 | `POST /v2/tickets/reject` | Worker rejects offer; body `{ ticket_id, reason }` |
 | `GET /v2/tickets/:id/attachments` | Paginated `notes` + `attachments` (same `limit`/`offset` each); `preview_url` when `can_preview_media` |
