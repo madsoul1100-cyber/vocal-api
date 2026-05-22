@@ -1,6 +1,20 @@
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
 import { isPostgresMode, dbQuery } from '@/lib/db.js'
 import { hashPassword } from '@/services/authService.js'
+import {
+  canApproveStaffCreation,
+  canAssignRoleLevel,
+  hierarchyLevelForRoleName,
+  requiresStaffCreationApproval,
+} from '@/lib/roleHierarchy.js'
+import {
+  deriveUserStaffStatus,
+  type StaffCategoryCounts,
+  type StaffStatus,
+} from '@/lib/staffStatus.js'
+import type { StaffKycDocument } from '@/types/staffDocuments.js'
+
+export type { StaffStatus, StaffCategoryCounts }
 
 export const WORKERS_PAGE_ROLES = ['super_admin', 'central_support', 'district_leader']
 const AUTO_APPROVE_ROLES = ['super_admin', 'central_support']
@@ -18,22 +32,104 @@ export interface RoleOption {
   id: string
   name: string
   display_name: string
+  hierarchy_level: number
 }
 
-async function listRoles(): Promise<RoleOption[]> {
+interface RoleRef {
+  id: string
+  name: string
+  hierarchy_level: number
+}
+
+async function listAllRoles(): Promise<RoleOption[]> {
   if (isPostgresMode()) {
     const res = await dbQuery<RoleOption>(
-      `SELECT id, name, display_name FROM roles WHERE active = true ORDER BY display_name ASC`,
+      `SELECT id, name, display_name, hierarchy_level
+       FROM roles WHERE active = true ORDER BY hierarchy_level ASC, display_name ASC`,
     )
-    return res.rows
+    return res.rows.map(normalizeRoleOption)
   }
   const supabase = createSupabaseServiceClient()
   const { data } = await supabase
     .from('roles')
-    .select('id, name, display_name')
+    .select('id, name, display_name, hierarchy_level')
     .eq('active', true)
+    .order('hierarchy_level', { ascending: true })
     .order('display_name', { ascending: true })
-  return (data ?? []) as RoleOption[]
+  return ((data ?? []) as RoleOption[]).map(normalizeRoleOption)
+}
+
+function normalizeRoleOption(role: RoleOption): RoleOption {
+  return {
+    ...role,
+    hierarchy_level: role.hierarchy_level ?? hierarchyLevelForRoleName(role.name) ?? 99,
+  }
+}
+
+/** Roles the actor may assign when creating or editing staff (strictly below their level). */
+export async function listAssignableRoles(actorRoleName: string | null | undefined): Promise<RoleOption[]> {
+  const actorLevel = hierarchyLevelForRoleName(actorRoleName)
+  if (actorLevel == null) return []
+  const all = await listAllRoles()
+  return all.filter((r) => canAssignRoleLevel(actorLevel, r.hierarchy_level))
+}
+
+async function loadRoleById(roleId: string): Promise<RoleRef | null> {
+  if (isPostgresMode()) {
+    const res = await dbQuery<RoleRef>(
+      `SELECT id, name, hierarchy_level FROM roles WHERE id = $1 AND active = true`,
+      [roleId],
+    )
+    const row = res.rows[0]
+    if (!row) return null
+    return {
+      ...row,
+      hierarchy_level: row.hierarchy_level ?? hierarchyLevelForRoleName(row.name) ?? 99,
+    }
+  }
+  const supabase = createSupabaseServiceClient()
+  const { data } = await supabase
+    .from('roles')
+    .select('id, name, hierarchy_level')
+    .eq('id', roleId)
+    .eq('active', true)
+    .maybeSingle()
+  if (!data) return null
+  const row = data as RoleRef
+  return {
+    ...row,
+    hierarchy_level: row.hierarchy_level ?? hierarchyLevelForRoleName(row.name) ?? 99,
+  }
+}
+
+async function loadActorRole(
+  user: { role_id?: string; roles?: { name: string; hierarchy_level?: number } | null },
+): Promise<RoleRef | null> {
+  if (user.roles?.name) {
+    const level =
+      user.roles.hierarchy_level ?? hierarchyLevelForRoleName(user.roles.name) ?? 99
+    return {
+      id: user.role_id ?? '',
+      name: user.roles.name,
+      hierarchy_level: level,
+    }
+  }
+  if (user.role_id) return loadRoleById(user.role_id)
+  return null
+}
+
+function assertCanAssignRole(
+  actorRole: RoleRef,
+  targetRole: RoleRef,
+): { ok: true } | { ok: false; status: number; error: string } {
+  if (!canAssignRoleLevel(actorRole.hierarchy_level, targetRole.hierarchy_level)) {
+    return {
+      ok: false,
+      status: 403,
+      error: `You cannot assign the role "${targetRole.name.replace(/_/g, ' ')}" — only roles below your level (${actorRole.name.replace(/_/g, ' ')})`,
+    }
+  }
+  return { ok: true }
 }
 
 function clean(v: unknown, max = 200): string | null {
@@ -48,9 +144,30 @@ export interface WorkerRow {
   phone: string | null
   email: string | null
   active: boolean
+  approved_at: string | null
+  staff_status: StaffStatus
   last_login_at: string | null
   created_at: string
   roles: { name: string; display_name: string | null } | null
+}
+
+function mapWorkerRow(raw: {
+  id: string
+  full_name: string
+  phone: string | null
+  email: string | null
+  active: boolean
+  approved_at?: string | null
+  last_login_at: string | null
+  created_at: string
+  roles: WorkerRow['roles']
+}): WorkerRow {
+  const approved_at = raw.approved_at ?? null
+  return {
+    ...raw,
+    approved_at,
+    staff_status: deriveUserStaffStatus(raw.active === true, approved_at),
+  }
 }
 
 export interface WorkerTerritoryRef {
@@ -62,17 +179,23 @@ export interface WorkerTerritoryRef {
 export interface WorkerDetailRow extends WorkerRow {
   role_id: string
   clerk_user_id: string | null
+  notes: string | null
+  image_url: string | null
+  kyc_documents: StaffKycDocument[]
   territories: WorkerTerritoryRef[]
 }
 
 export interface PendingActivationRow {
   id: string
   full_name: string
-  phone: string
+  phone: string | null
   email: string | null
   status: string
+  staff_status: 'pending'
   created_at: string
   territories: { name: string } | null
+  roles: { name: string; display_name: string | null } | null
+  requested_by_user: { full_name: string } | null
 }
 
 // --- v2 list (pagination, sort, filters) ---
@@ -97,6 +220,8 @@ export interface WorkersListV2Options {
   includePending: boolean
   pendingLimit: number
   pendingOffset: number
+  /** When set, only activation requests submitted by this user (district leaders). */
+  pendingRequestedBy?: string
 }
 
 export interface WorkersListV2Pagination {
@@ -339,8 +464,8 @@ async function listWorkersV2Pg(
   const offsetParam = paramIndex.i++
   const orderSql = workersV2OrderSql(opts.sort, opts.order)
 
-  const workersRes = await dbQuery<WorkerRow>(
-    `SELECT u.id, u.full_name, u.phone, u.email, u.active, u.last_login_at, u.created_at,
+  const workersRes = await dbQuery<WorkerRow & { approved_at: string | null }>(
+    `SELECT u.id, u.full_name, u.phone, u.email, u.active, u.approved_at, u.last_login_at, u.created_at,
             jsonb_build_object('name', r.name, 'display_name', r.display_name) AS roles
      FROM users u
      INNER JOIN roles r ON r.id = u.role_id
@@ -353,30 +478,46 @@ async function listWorkersV2Pg(
   let pending: PendingActivationRow[] = []
   let pendingTotal = 0
   if (opts.includePending) {
+    const pendingWhere = opts.pendingRequestedBy
+      ? `war.organization_id = $1 AND war.status = 'pending' AND war.requested_by = $2`
+      : `war.organization_id = $1 AND war.status = 'pending'`
+    const pendingCountParams = opts.pendingRequestedBy
+      ? [orgId, opts.pendingRequestedBy]
+      : [orgId]
+
     const pendingCountRes = await dbQuery<{ c: string }>(
-      `SELECT COUNT(*)::text AS c FROM worker_activation_requests
-       WHERE organization_id = $1 AND status = 'pending'`,
-      [orgId],
+      `SELECT COUNT(*)::text AS c FROM worker_activation_requests war WHERE ${pendingWhere}`,
+      pendingCountParams,
     )
     pendingTotal = Number(pendingCountRes.rows[0]?.c ?? 0)
 
+    const pendingLimitParam = pendingCountParams.length + 1
+    const pendingOffsetParam = pendingCountParams.length + 2
     const pendingRes = await dbQuery<PendingActivationRow>(
       `SELECT war.id, war.full_name, war.phone, war.email, war.status, war.created_at,
               CASE WHEN t.id IS NULL THEN NULL
                    ELSE jsonb_build_object('name', t.name)
-              END AS territories
+              END AS territories,
+              CASE WHEN r.id IS NULL THEN NULL
+                   ELSE jsonb_build_object('name', r.name, 'display_name', r.display_name)
+              END AS roles,
+              CASE WHEN ru.id IS NULL THEN NULL
+                   ELSE jsonb_build_object('full_name', ru.full_name)
+              END AS requested_by_user
        FROM worker_activation_requests war
        LEFT JOIN territories t ON t.id = war.territory_id
-       WHERE war.organization_id = $1 AND war.status = 'pending'
+       LEFT JOIN roles r ON r.id = war.role_id
+       LEFT JOIN users ru ON ru.id = war.requested_by
+       WHERE ${pendingWhere}
        ORDER BY war.created_at DESC
-       LIMIT $2 OFFSET $3`,
-      [orgId, opts.pendingLimit, opts.pendingOffset],
+       LIMIT $${pendingLimitParam} OFFSET $${pendingOffsetParam}`,
+      [...pendingCountParams, opts.pendingLimit, opts.pendingOffset],
     )
-    pending = pendingRes.rows
+    pending = pendingRes.rows.map((row) => ({ ...row, staff_status: 'pending' as const }))
   }
 
   return {
-    workers: workersRes.rows,
+    workers: workersRes.rows.map(mapWorkerRow),
     pagination: buildWorkersV2Pagination(opts.offset, opts.limit, total),
     pending,
     pending_pagination: buildWorkersV2Pagination(
@@ -392,7 +533,7 @@ function workersV2SupabaseSelect(opts: WorkersListV2Options): string {
     ? 'roles!inner(name, display_name)'
     : 'roles(name, display_name)'
   const parts = [
-    'id, full_name, phone, email, active, last_login_at, created_at',
+    'id, full_name, phone, email, active, approved_at, last_login_at, created_at',
     rolesEmbed,
   ]
   if (opts.territoryId) parts.push('user_territories!inner(territory_id)')
@@ -441,24 +582,53 @@ async function listWorkersV2Supabase(
   let pending: PendingActivationRow[] = []
   let pendingTotal = 0
   if (opts.includePending) {
-    const pendingQuery = supabase
+    let pendingQuery = supabase
       .from('worker_activation_requests')
-      .select('id, full_name, phone, email, status, created_at, territories(name)', {
-        count: 'exact',
-      })
+      .select(
+        'id, full_name, phone, email, status, created_at, territories(name), roles(name, display_name), users!requested_by(full_name)',
+        { count: 'exact' },
+      )
       .eq('organization_id', orgId)
       .eq('status', 'pending')
+    if (opts.pendingRequestedBy) {
+      pendingQuery = pendingQuery.eq('requested_by', opts.pendingRequestedBy)
+    }
+    pendingQuery = pendingQuery
       .order('created_at', { ascending: false })
       .range(opts.pendingOffset, opts.pendingOffset + opts.pendingLimit - 1)
 
     const pendingRes = await pendingQuery
     if (pendingRes.error) throw new Error(pendingRes.error.message)
-    pending = (pendingRes.data ?? []) as unknown as PendingActivationRow[]
+    pending = ((pendingRes.data ?? []) as Array<Record<string, unknown>>).map((row) => {
+      const requester = row.users as { full_name?: string } | { full_name?: string }[] | null
+      const requesterName = Array.isArray(requester)
+        ? requester[0]?.full_name
+        : requester?.full_name
+      return {
+        ...(row as unknown as PendingActivationRow),
+        staff_status: 'pending' as const,
+        requested_by_user: requesterName ? { full_name: requesterName } : null,
+      }
+    })
     pendingTotal = pendingRes.count ?? 0
   }
 
+  const workers = ((data ?? []) as unknown as Array<Record<string, unknown>>).map((row) =>
+    mapWorkerRow({
+      id: row.id as string,
+      full_name: row.full_name as string,
+      phone: (row.phone as string | null) ?? null,
+      email: (row.email as string | null) ?? null,
+      active: row.active === true,
+      approved_at: (row.approved_at as string | null) ?? null,
+      last_login_at: (row.last_login_at as string | null) ?? null,
+      created_at: row.created_at as string,
+      roles: row.roles as WorkerRow['roles'],
+    }),
+  )
+
   return {
-    workers: (data ?? []) as unknown as WorkerRow[],
+    workers,
     pagination: buildWorkersV2Pagination(opts.offset, opts.limit, count ?? 0),
     pending,
     pending_pagination: buildWorkersV2Pagination(
@@ -472,38 +642,81 @@ async function listWorkersV2Supabase(
 export async function listWorkersV2(
   orgId: string,
   opts: WorkersListV2Options,
+  actorRoleName?: string | null,
 ): Promise<WorkersListV2Result> {
   const [listPart, summary, territories, roles] = await Promise.all([
     isPostgresMode() ? listWorkersV2Pg(orgId, opts) : listWorkersV2Supabase(orgId, opts),
     isPostgresMode() ? getWorkersOrgSummaryPg(orgId) : getWorkersOrgSummarySupabase(orgId),
     listTerritories(orgId),
-    listRoles(),
+    listAssignableRoles(actorRoleName),
   ])
 
   return { ...listPart, summary, territories, roles }
 }
 
+function buildStaffCategories(
+  workers: WorkerRow[],
+  pendingRequests: PendingActivationRow[],
+): StaffCategoryCounts {
+  const active = workers.filter((w) => w.staff_status === 'active').length
+  const inactive = workers.filter((w) => w.staff_status === 'inactive').length
+  const awaitingApproval = workers.filter((w) => w.staff_status === 'pending').length
+  const pending = pendingRequests.length + awaitingApproval
+  return {
+    pending,
+    active,
+    inactive,
+    total: workers.length + pendingRequests.length,
+  }
+}
+
 /** @deprecated Use listWorkersV2 — kept for v1 compat (first 200 workers, 50 pending). */
-export async function getWorkersPageData(orgId: string): Promise<{
+export async function getWorkersPageData(
+  orgId: string,
+  actor?: { roleName?: string | null; userId?: string },
+): Promise<{
   workers: WorkerRow[]
+  active_workers: WorkerRow[]
+  inactive_workers: WorkerRow[]
+  awaiting_approval_workers: WorkerRow[]
   pending: PendingActivationRow[]
+  categories: StaffCategoryCounts
   territories: TerritoryOption[]
   roles: RoleOption[]
+  can_approve_staff: boolean
 }> {
-  const result = await listWorkersV2(orgId, {
-    limit: 200,
-    offset: 0,
-    sort: 'full_name',
-    order: 'asc',
-    includePending: true,
-    pendingLimit: 50,
-    pendingOffset: 0,
-  })
+  const actorRoleName = actor?.roleName
+  const canApprove = canApproveStaffCreation(actorRoleName)
+
+  const result = await listWorkersV2(
+    orgId,
+    {
+      limit: 200,
+      offset: 0,
+      sort: 'full_name',
+      order: 'asc',
+      includePending: true,
+      pendingLimit: 50,
+      pendingOffset: 0,
+      pendingRequestedBy: canApprove ? undefined : actor?.userId,
+    },
+    actorRoleName,
+  )
+
+  const active_workers = result.workers.filter((w) => w.staff_status === 'active')
+  const inactive_workers = result.workers.filter((w) => w.staff_status === 'inactive')
+  const awaiting_approval_workers = result.workers.filter((w) => w.staff_status === 'pending')
+
   return {
     workers: result.workers,
+    active_workers,
+    inactive_workers,
+    awaiting_approval_workers,
     pending: result.pending,
+    categories: buildStaffCategories(result.workers, result.pending),
     territories: result.territories,
     roles: result.roles,
+    can_approve_staff: canApprove,
   }
 }
 
@@ -524,6 +737,30 @@ async function listTerritories(orgId: string): Promise<TerritoryOption[]> {
   return (data ?? []) as TerritoryOption[]
 }
 
+function cleanNotes(raw: unknown): string | null {
+  return clean(raw, 5000)
+}
+
+function parseStaffProfileFromBody(body: Record<string, unknown>): {
+  notes: string | null
+  image_url: string | null
+  kyc_documents: StaffKycDocument[]
+} {
+  const notes = cleanNotes(body.notes)
+  const image_url =
+    typeof body.image_url === 'string' && body.image_url.trim() ? body.image_url.trim() : null
+  let kyc_documents: StaffKycDocument[] = []
+  if (Array.isArray(body.kyc_documents)) {
+    kyc_documents = body.kyc_documents.filter(
+      (d): d is StaffKycDocument =>
+        typeof d === 'object' &&
+        d !== null &&
+        typeof (d as StaffKycDocument).storage_path === 'string',
+    )
+  }
+  return { notes, image_url, kyc_documents }
+}
+
 function parseMetadata(raw: unknown): Record<string, unknown> | null | { error: string } {
   if (raw === undefined || raw === null || raw === '') return null
   if (typeof raw === 'object' && !Array.isArray(raw)) return raw as Record<string, unknown>
@@ -541,12 +778,67 @@ function parseMetadata(raw: unknown): Record<string, unknown> | null | { error: 
   }
 }
 
+async function assertUniqueStaffContact(
+  orgId: string,
+  phone: string | null,
+  email: string | null,
+): Promise<{ ok: true } | { ok: false; status: number; error: string }> {
+  const supabase = createSupabaseServiceClient()
+  if (phone) {
+    const { data: existingPhone } = await supabase
+      .from('users')
+      .select('id')
+      .eq('organization_id', orgId)
+      .eq('phone', phone)
+      .maybeSingle()
+    if (existingPhone) {
+      return { ok: false, status: 409, error: 'A user with this phone already exists' }
+    }
+  }
+  if (email) {
+    const { data: existingEmail } = await supabase
+      .from('users')
+      .select('id')
+      .eq('organization_id', orgId)
+      .eq('email', email)
+      .maybeSingle()
+    if (existingEmail) {
+      return { ok: false, status: 409, error: 'A user with this email already exists' }
+    }
+    const { data: pendingEmail } = await supabase
+      .from('worker_activation_requests')
+      .select('id')
+      .eq('organization_id', orgId)
+      .eq('email', email)
+      .eq('status', 'pending')
+      .maybeSingle()
+    if (pendingEmail) {
+      return {
+        ok: false,
+        status: 409,
+        error: 'A pending activation request already exists for this email',
+      }
+    }
+  }
+  return { ok: true }
+}
+
 export async function createOrgUser(
-  user: { id: string; organization_id: string; roles?: { name: string } | null },
+  user: {
+    id: string
+    organization_id: string
+    role_id?: string
+    roles?: { name: string; hierarchy_level?: number } | null
+  },
   body: Record<string, unknown>,
 ) {
   if (!canAccessWorkersPage(user.roles?.name)) {
     return { ok: false as const, status: 403, error: 'Insufficient role' }
+  }
+
+  const actorRole = await loadActorRole(user)
+  if (!actorRole) {
+    return { ok: false as const, status: 403, error: 'Could not resolve your role' }
   }
 
   const full_name = clean(body.full_name, 200)
@@ -558,6 +850,16 @@ export async function createOrgUser(
     typeof body.role_id === 'string' && body.role_id.trim() ? body.role_id.trim() : null
   if (!role_id) {
     return { ok: false as const, status: 400, error: 'role_id is required' }
+  }
+
+  const targetRole = await loadRoleById(role_id)
+  if (!targetRole) {
+    return { ok: false as const, status: 400, error: 'Invalid role_id' }
+  }
+
+  const assignCheck = assertCanAssignRole(actorRole, targetRole)
+  if (!assignCheck.ok) {
+    return { ok: false as const, status: assignCheck.status, error: assignCheck.error }
   }
 
   const phone = clean(body.phone, 40)
@@ -576,18 +878,10 @@ export async function createOrgUser(
       ? body.territory_id.trim()
       : null
 
-  const metadata = parseMetadata(body.metadata_json)
-  if (metadata && 'error' in metadata) {
-    return { ok: false as const, status: 400, error: metadata.error }
-  }
+  const profile = parseStaffProfileFromBody(body)
 
   const supabase = createSupabaseServiceClient()
   const now = new Date().toISOString()
-
-  const { data: role } = await supabase.from('roles').select('id').eq('id', role_id).maybeSingle()
-  if (!role) {
-    return { ok: false as const, status: 400, error: 'Invalid role_id' }
-  }
 
   if (territory_id) {
     const { data: territory } = await supabase
@@ -620,27 +914,54 @@ export async function createOrgUser(
     return { ok: false as const, status: 500, error: msg }
   }
 
-  if (phone) {
-    const { data: existingPhone } = await supabase
-      .from('users')
-      .select('id')
-      .eq('organization_id', user.organization_id)
-      .eq('phone', phone)
-      .maybeSingle()
-    if (existingPhone) {
-      return { ok: false as const, status: 409, error: 'A user with this phone already exists' }
-    }
+  const uniqueCheck = await assertUniqueStaffContact(user.organization_id, phone, email)
+  if (!uniqueCheck.ok) {
+    return { ok: false as const, status: uniqueCheck.status, error: uniqueCheck.error }
   }
 
-  if (email) {
-    const { data: existingEmail } = await supabase
-      .from('users')
+  if (requiresStaffCreationApproval(user.roles?.name)) {
+    const { data: requestRow, error: requestError } = await supabase
+      .from('worker_activation_requests')
+      .insert({
+        organization_id: user.organization_id,
+        requested_by: user.id,
+        full_name,
+        phone,
+        email,
+        territory_id,
+        role_id,
+        password_hash,
+        notes: profile.notes,
+        image_url: profile.image_url,
+        kyc_documents: profile.kyc_documents,
+        active_requested: active,
+        status: 'pending',
+      })
       .select('id')
-      .eq('organization_id', user.organization_id)
-      .eq('email', email)
-      .maybeSingle()
-    if (existingEmail) {
-      return { ok: false as const, status: 409, error: 'A user with this email already exists' }
+      .single()
+
+    if (requestError || !requestRow) {
+      return {
+        ok: false as const,
+        status: 500,
+        error: requestError?.message ?? 'Failed to submit activation request',
+      }
+    }
+
+    await supabase.from('audit_logs').insert({
+      organization_id: user.organization_id,
+      event_type: 'worker_activation_requested',
+      entity_type: 'worker_activation_request',
+      entity_id: requestRow.id,
+      actor_type: 'user',
+      actor_user_id: user.id,
+      new_value_json: { full_name, phone, email, role_id, active_requested: active },
+    })
+
+    return {
+      ok: true as const,
+      pending_approval: true as const,
+      request_id: requestRow.id as string,
     }
   }
 
@@ -652,7 +973,9 @@ export async function createOrgUser(
     role_id,
     active,
     password_hash,
-    metadata_json: metadata,
+    notes: profile.notes,
+    image_url: profile.image_url,
+    kyc_documents: profile.kyc_documents,
     updated_at: now,
   }
 
@@ -685,11 +1008,12 @@ export async function createOrgUser(
     new_value_json: { full_name, phone, email, role_id, active },
   })
 
-  return { ok: true as const, id: data.id as string }
+  return { ok: true as const, id: data.id as string, pending_approval: false as const }
 }
 
 const WORKER_DETAIL_SELECT = `
-  id, full_name, phone, email, active, last_login_at, created_at, role_id, clerk_user_id,
+  id, full_name, phone, email, active, approved_at, last_login_at, created_at, role_id, clerk_user_id,
+  notes, image_url, kyc_documents,
   roles(name, display_name),
   user_territories(territory_id, is_primary, territories(id, name))
 `
@@ -713,17 +1037,26 @@ function mapWorkerDetailRow(raw: Record<string, unknown>): WorkerDetailRow {
     .filter((t): t is WorkerTerritoryRef => t !== null)
 
   const rolesRaw = raw.roles as { name?: string; display_name?: string | null } | null
+  const approved_at = (raw.approved_at as string | null) ?? null
+  const active = raw.active === true
 
   return {
     id: raw.id as string,
     full_name: raw.full_name as string,
     phone: (raw.phone as string | null) ?? null,
     email: (raw.email as string | null) ?? null,
-    active: raw.active === true,
+    active,
+    approved_at,
+    staff_status: deriveUserStaffStatus(active, approved_at),
     last_login_at: (raw.last_login_at as string | null) ?? null,
     created_at: raw.created_at as string,
     role_id: raw.role_id as string,
     clerk_user_id: (raw.clerk_user_id as string | null) ?? null,
+    notes: (raw.notes as string | null) ?? null,
+    image_url: (raw.image_url as string | null) ?? null,
+    kyc_documents: Array.isArray(raw.kyc_documents)
+      ? (raw.kyc_documents as StaffKycDocument[])
+      : [],
     roles: rolesRaw?.name
       ? { name: rolesRaw.name, display_name: rolesRaw.display_name ?? null }
       : null,
@@ -869,9 +1202,17 @@ export async function updateOrgUser(
     if (!role_id) {
       return { ok: false as const, status: 400, error: 'role_id cannot be empty' }
     }
-    const { data: role } = await supabase.from('roles').select('id').eq('id', role_id).maybeSingle()
-    if (!role) {
+    const actorRole = await loadActorRole(actor)
+    const targetRole = await loadRoleById(role_id)
+    if (!actorRole) {
+      return { ok: false as const, status: 403, error: 'Could not resolve your role' }
+    }
+    if (!targetRole) {
       return { ok: false as const, status: 400, error: 'Invalid role_id' }
+    }
+    const assignCheck = assertCanAssignRole(actorRole, targetRole)
+    if (!assignCheck.ok) {
+      return { ok: false as const, status: assignCheck.status, error: assignCheck.error }
     }
     updates.role_id = role_id
     auditChanges.role_id = role_id
@@ -881,19 +1222,31 @@ export async function updateOrgUser(
     const active = body.active === true || body.active === 'true' || body.active === 'on'
     updates.active = active
     auditChanges.active = active
-    if (active && !current.active && AUTO_APPROVE_ROLES.includes(actor.roles?.name ?? '')) {
+    if (
+      active &&
+      AUTO_APPROVE_ROLES.includes(actor.roles?.name ?? '') &&
+      (!current.approved_at || !current.active)
+    ) {
       updates.approved_by = actor.id
       updates.approved_at = now
     }
   }
 
-  if ('metadata_json' in body) {
-    const metadata = parseMetadata(body.metadata_json)
-    if (metadata && 'error' in metadata) {
-      return { ok: false as const, status: 400, error: metadata.error }
-    }
-    updates.metadata_json = metadata
-    auditChanges.metadata_json = metadata
+  if ('notes' in body) {
+    updates.notes = cleanNotes(body.notes)
+    auditChanges.notes = updates.notes
+  }
+
+  if ('image_url' in body) {
+    const image_url =
+      typeof body.image_url === 'string' && body.image_url.trim() ? body.image_url.trim() : null
+    updates.image_url = image_url
+    auditChanges.image_url = image_url
+  }
+
+  if ('kyc_documents' in body && Array.isArray(body.kyc_documents)) {
+    updates.kyc_documents = body.kyc_documents
+    auditChanges.kyc_documents = body.kyc_documents
   }
 
   if ('password' in body) {
@@ -1032,8 +1385,12 @@ export async function processActivationRequest(
   requestId: string,
   body: { action?: string; note?: string },
 ) {
-  if (!canAccessWorkersPage(user.roles?.name)) {
-    return { ok: false as const, status: 403, error: 'Insufficient role' }
+  if (!canApproveStaffCreation(user.roles?.name)) {
+    return {
+      ok: false as const,
+      status: 403,
+      error: 'Only Super Admin or Central Support can approve worker requests',
+    }
   }
 
   const action = body.action
@@ -1049,7 +1406,9 @@ export async function processActivationRequest(
   const supabase = createSupabaseServiceClient()
   const { data: request } = await supabase
     .from('worker_activation_requests')
-    .select('id, organization_id, status, full_name, phone, email, territory_id')
+    .select(
+      'id, organization_id, status, full_name, phone, email, territory_id, role_id, password_hash, notes, image_url, kyc_documents, active_requested',
+    )
     .eq('id', requestId)
     .single()
 
@@ -1063,6 +1422,81 @@ export async function processActivationRequest(
 
   const now = new Date().toISOString()
   const newStatus = action === 'approve' ? 'approved' : 'rejected'
+
+  if (action === 'approve') {
+    if (!request.role_id || !request.password_hash) {
+      return {
+        ok: false as const,
+        status: 400,
+        error: 'Request is missing role or credentials — cannot approve',
+      }
+    }
+
+    const email = request.email ? String(request.email).toLowerCase() : null
+    if (!email) {
+      return { ok: false as const, status: 400, error: 'Request is missing sign-in email' }
+    }
+
+    const uniqueCheck = await assertUniqueStaffContact(
+      user.organization_id,
+      request.phone as string | null,
+      email,
+    )
+    if (!uniqueCheck.ok) {
+      return { ok: false as const, status: uniqueCheck.status, error: uniqueCheck.error }
+    }
+
+    const active = request.active_requested === true
+    const insert: Record<string, unknown> = {
+      organization_id: user.organization_id,
+      full_name: request.full_name,
+      phone: request.phone,
+      email,
+      role_id: request.role_id,
+      active,
+      password_hash: request.password_hash,
+      notes: request.notes,
+      image_url: request.image_url,
+      kyc_documents: request.kyc_documents ?? [],
+      approved_by: user.id,
+      approved_at: now,
+      updated_at: now,
+    }
+
+    const { data: created, error: createError } = await supabase
+      .from('users')
+      .insert(insert)
+      .select('id')
+      .single()
+
+    if (createError || !created) {
+      return { ok: false as const, status: 500, error: createError?.message ?? 'User create failed' }
+    }
+
+    if (request.territory_id) {
+      await supabase.from('user_territories').insert({
+        user_id: created.id,
+        territory_id: request.territory_id,
+        is_primary: true,
+      })
+    }
+
+    await supabase.from('audit_logs').insert({
+      organization_id: user.organization_id,
+      event_type: 'user_created',
+      entity_type: 'user',
+      entity_id: created.id,
+      actor_type: 'user',
+      actor_user_id: user.id,
+      new_value_json: {
+        from_activation_request: requestId,
+        full_name: request.full_name,
+        email,
+        role_id: request.role_id,
+        active,
+      },
+    })
+  }
 
   const { error } = await supabase
     .from('worker_activation_requests')

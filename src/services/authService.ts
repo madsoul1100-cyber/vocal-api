@@ -57,7 +57,16 @@ export async function loginWithEmailPassword(email: string, password: string) {
   if (!user.active) {
     return {
       ok: false as const,
-      error: 'Account pending activation',
+      error: 'Account is inactive. Contact Super Admin or Central Support.',
+      code: 'INACTIVE',
+      status: 403,
+    }
+  }
+
+  if (!user.approved_at) {
+    return {
+      ok: false as const,
+      error: 'Account pending approval from Super Admin or Central Support',
       code: 'PENDING_ACTIVATION',
       status: 403,
     }

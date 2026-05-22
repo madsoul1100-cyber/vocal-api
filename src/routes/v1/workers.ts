@@ -1,5 +1,7 @@
 import { Router } from 'express'
 import { requireAuth } from '@/middleware/requireAuth.js'
+import { mergeWorkerCreateBody, workersCreateUpload } from '@/lib/workersUpload.js'
+import { processStaffCreateUploads } from '@/services/staffUploadService.js'
 import {
   canAccessWorkersPage,
   createOrgUser,
@@ -25,27 +27,55 @@ router.get('/', requireAuth, async (req, res) => {
     return
   }
 
-  const { workers, pending, territories, roles } = await getWorkersPageData(user.organization_id)
-  const activeCount = workers.filter((w) => w.active).length
+  const page = await getWorkersPageData(user.organization_id, {
+    roleName: user.roles?.name,
+    userId: user.id,
+  })
 
   res.json({
-    workers,
-    pending,
-    territories,
-    roles,
-    activeCount,
-    inactiveCount: workers.length - activeCount,
+    workers: page.workers,
+    active_workers: page.active_workers,
+    inactive_workers: page.inactive_workers,
+    awaiting_approval_workers: page.awaiting_approval_workers,
+    pending: page.pending,
+    categories: page.categories,
+    territories: page.territories,
+    roles: page.roles,
+    can_approve_staff: page.can_approve_staff,
+    activeCount: page.categories.active,
+    inactiveCount: page.categories.inactive,
+    pendingCount: page.categories.pending,
   })
 })
 
-router.post('/', requireAuth, async (req, res) => {
+router.post('/', requireAuth, workersCreateUpload, async (req, res) => {
   const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
-  const result = await createOrgUser(user, req.body ?? {})
+  const files = req.files as {
+    profile_image?: Express.Multer.File[]
+    kyc_documents?: Express.Multer.File[]
+  } | undefined
+
+  const uploadResult = await processStaffCreateUploads(user.organization_id, {
+    profile_image: files?.profile_image,
+    kyc_documents: files?.kyc_documents,
+  })
+  if ('error' in uploadResult) {
+    res.status(uploadResult.status).json({ error: uploadResult.error })
+    return
+  }
+
+  const body = mergeWorkerCreateBody((req.body ?? {}) as Record<string, unknown>, uploadResult)
+  const result = await createOrgUser(user, body)
   if (!result.ok) {
     res.status(result.status).json({ error: result.error })
     return
   }
-  res.json({ ok: true, id: result.id })
+  res.json({
+    ok: true,
+    id: result.id,
+    pending_approval: result.pending_approval ?? false,
+    request_id: result.request_id,
+  })
 })
 
 router.post('/activation/:id', requireAuth, async (req, res) => {
@@ -78,6 +108,7 @@ router.patch('/:id', requireAuth, async (req, res) => {
   res.json({ ok: true, worker: result.worker })
 })
 
+/** Soft-deactivate (active=false). Does not delete the users row. */
 router.delete('/:id', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
   const result = await deactivateOrgUser(user, String(req.params.id))
