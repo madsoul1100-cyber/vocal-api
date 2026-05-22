@@ -3,22 +3,13 @@ import { isPostgresMode, dbQuery } from '@/lib/db.js'
 import {
   generateAmplifyContent,
   PLATFORMS,
+  TONES,
+  VALID_TONE_KEYS,
   type AmplifyPlatform,
   type AmplifyTone,
 } from '@/services/amplifyService.js'
 
 export const AMPLIFY_ALLOWED_ROLES = ['super_admin', 'central_support']
-
-const TONES: AmplifyTone[] = [
-  'informative',
-  'urgent',
-  'formal',
-  'empathetic',
-  'neutral',
-  'activist',
-  'opposition',
-  'public_shame',
-]
 
 export function canAccessAmplify(role: string | null | undefined): boolean {
   return !!role && AMPLIFY_ALLOWED_ROLES.includes(role)
@@ -66,6 +57,7 @@ export interface AmplifySessionDetail {
     metadata_json: Record<string, unknown> | null
   }>
   platforms: typeof PLATFORMS
+  tones: typeof TONES
 }
 
 export async function listAmplifySessions(
@@ -209,6 +201,7 @@ async function getAmplifySessionPg(
       metadata_json: (o.metadata_json as Record<string, unknown> | null) ?? null,
     })),
     platforms: PLATFORMS,
+    tones: TONES,
   }
 }
 
@@ -259,6 +252,7 @@ async function getAmplifySessionSupabase(
     sources: sources ?? [],
     outputs: (outputs ?? []) as AmplifySessionDetail['outputs'],
     platforms: PLATFORMS,
+    tones: TONES,
   }
 }
 
@@ -357,7 +351,7 @@ export async function generateAmplifyDraft(
   if (!platformKeys.has(body.platform)) {
     return { ok: false, status: 400, error: 'Invalid platform' }
   }
-  if (!TONES.includes(tone)) {
+  if (!VALID_TONE_KEYS.has(tone)) {
     return { ok: false, status: 400, error: 'Invalid tone' }
   }
 
