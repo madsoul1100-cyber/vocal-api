@@ -72,13 +72,12 @@ router.get('/', requireAuth, async (req, res) => {
 })
 
 /** Status picker catalog for current user role (codes + labels; no DB). */
-router.get('/status-options', requireClerkAuth, async (req, res) => {
+router.get('/status-options', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> })
     .vocalUser
   res.json(getTicketStatusOptions(user.roles?.name))
 })
 
-router.post('/accept', requireClerkAuth, async (req, res) => {
 router.post('/accept', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> }).vocalUser
   const ticketId = req.body?.ticket_id as string | undefined
@@ -127,7 +126,7 @@ router.post('/confirm-ai', requireAuth, async (req, res) => {
   res.json({ ok: true, ticket: result.ticket })
 })
 
-router.post('/assign', requireClerkAuth, async (req, res) => {
+router.post('/assign', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> }).vocalUser
   const ticketId = req.body?.ticket_id as string | undefined
   const workerId = req.body?.worker_id as string | undefined
@@ -147,7 +146,7 @@ router.post('/assign', requireClerkAuth, async (req, res) => {
   })
 })
 
-router.post('/auto-assign', requireClerkAuth, async (req, res) => {
+router.post('/auto-assign', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> }).vocalUser
   const ticketId = req.body?.ticket_id as string | undefined
   if (!ticketId) {
@@ -167,7 +166,6 @@ router.post('/auto-assign', requireClerkAuth, async (req, res) => {
   })
 })
 
-router.post('/status', requireClerkAuth, async (req, res) => {
 router.post('/status', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> }).vocalUser
   const ticketId = req.body?.ticket_id as string | undefined
@@ -256,7 +254,7 @@ router.get('/:id/attachments', requireAuth, async (req, res) => {
 })
 
 /** Paginated ground workers for assign dropdown; central_support / super_admin only */
-router.get('/:id/assignable-workers', requireClerkAuth, async (req, res) => {
+router.get('/:id/assignable-workers', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> })
     .vocalUser
   const ticketId = String(req.params.id)
