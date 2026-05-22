@@ -2,6 +2,7 @@ import {
   exposeDevOtpInApi,
   otpAppName,
   otpChannelPreference,
+  otpEnabledChannels,
   otpTtlMinutes,
   resolveOtpDeliveryMode,
 } from '@/lib/otp/config.js'
@@ -34,17 +35,22 @@ function smsProvider() {
 
 export function getOtpDeliveryStatus(): OtpDeliveryStatus {
   const mode = resolveOtpDeliveryMode()
+  const channels = otpEnabledChannels()
+  const emailEnabled = channels.includes('email')
+  const smsEnabled = channels.includes('sms')
   if (mode === 'console') {
     return {
       mode,
-      email: { provider: 'console', configured: true },
-      sms: { provider: 'console', configured: true },
+      channels,
+      email: { provider: 'console', configured: true, enabled: emailEnabled },
+      sms: { provider: 'console', configured: true, enabled: smsEnabled },
     }
   }
   return {
     mode,
-    email: { provider: 'aws-ses', configured: sesEmailConfigured() },
-    sms: { provider: 'twilio-sms', configured: twilioSmsConfigured() },
+    channels,
+    email: { provider: 'aws-ses', configured: sesEmailConfigured(), enabled: emailEnabled },
+    sms: { provider: 'twilio-sms', configured: twilioSmsConfigured(), enabled: smsEnabled },
   }
 }
 
@@ -67,8 +73,9 @@ export async function deliverStaffOtp(args: {
 }): Promise<{ ok: true; result: DeliverOtpResult } | { ok: false; error: string }> {
   const payload = buildPayload(args.code, args.purpose)
   const preference = otpChannelPreference()
+  const enabled = new Set(otpEnabledChannels())
 
-  const attempts: Array<{ channel: OtpChannel; destination: string }> =
+  const ordered: Array<{ channel: OtpChannel; destination: string }> =
     preference === 'email_first'
       ? [
           { channel: 'email', destination: args.email },
@@ -78,6 +85,15 @@ export async function deliverStaffOtp(args: {
           { channel: 'sms', destination: args.phone },
           { channel: 'email', destination: args.email },
         ]
+
+  const attempts = ordered.filter((a) => enabled.has(a.channel))
+
+  if (attempts.length === 0) {
+    return {
+      ok: false,
+      error: 'No OTP channels enabled. Set OTP_CHANNELS=sms and/or email in environment.',
+    }
+  }
 
   const errors: string[] = []
   let devCode: string | undefined

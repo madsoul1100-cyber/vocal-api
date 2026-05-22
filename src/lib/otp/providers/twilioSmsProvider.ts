@@ -1,8 +1,20 @@
 import { getTwilioClient } from '@/lib/twilio.js'
 import type { OtpSendPayload, OtpSmsProvider } from '@/lib/otp/types.js'
 
+function smsFrom(): string | null {
+  return process.env.TWILIO_SMS_FROM?.trim() || null
+}
+
+function messagingServiceSid(): string | null {
+  return process.env.TWILIO_MESSAGING_SERVICE_SID?.trim() || null
+}
+
 function isConfigured(): boolean {
-  return !!(process.env.TWILIO_ACCOUNT_SID?.trim() && process.env.TWILIO_AUTH_TOKEN?.trim() && process.env.TWILIO_SMS_FROM?.trim())
+  return !!(
+    process.env.TWILIO_ACCOUNT_SID?.trim() &&
+    process.env.TWILIO_AUTH_TOKEN?.trim() &&
+    (smsFrom() || messagingServiceSid())
+  )
 }
 
 export const twilioSmsProvider: OtpSmsProvider = {
@@ -12,7 +24,8 @@ export const twilioSmsProvider: OtpSmsProvider = {
       return {
         ok: false,
         provider: 'twilio-sms',
-        error: 'Twilio SMS not configured (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, TWILIO_SMS_FROM)',
+        error:
+          'Twilio SMS not configured (TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, and TWILIO_SMS_FROM or TWILIO_MESSAGING_SERVICE_SID)',
       }
     }
 
@@ -21,12 +34,13 @@ export const twilioSmsProvider: OtpSmsProvider = {
       return { ok: false, provider: 'twilio-sms', error: 'Twilio client unavailable' }
     }
 
-    const from = process.env.TWILIO_SMS_FROM!.trim()
+    const from = smsFrom()
+    const serviceSid = messagingServiceSid()
     const action = payload.purpose === 'forgot_password' ? 'reset your password' : 'sign in'
 
     try {
       await client.messages.create({
-        from,
+        ...(serviceSid ? { messagingServiceSid: serviceSid } : { from: from! }),
         to,
         body: `${payload.appName}: Your verification code is ${payload.code}. Use it to ${action}. Expires in ${payload.ttlMinutes} minutes.`,
       })

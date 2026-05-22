@@ -1,4 +1,4 @@
-import type { OtpDeliveryMode } from '@/lib/otp/types.js'
+import type { OtpChannel, OtpDeliveryMode } from '@/lib/otp/types.js'
 
 export function otpAppName(): string {
   return process.env.OTP_APP_NAME?.trim() || 'Vocal'
@@ -27,6 +27,24 @@ export function resolveOtpDeliveryMode(): OtpDeliveryMode {
 export function otpChannelPreference(): 'sms_first' | 'email_first' {
   const raw = process.env.OTP_CHANNEL_PREFERENCE?.trim().toLowerCase()
   return raw === 'email_first' ? 'email_first' : 'sms_first'
+}
+
+/**
+ * Which channels to use. Comma-separated: sms, email (default both).
+ * Example: OTP_CHANNELS=sms — Twilio only, skip SES entirely.
+ */
+export function otpEnabledChannels(): OtpChannel[] {
+  const raw = process.env.OTP_CHANNELS?.trim().toLowerCase()
+  if (raw) {
+    const parts = raw.split(',').map((p) => p.trim())
+    const channels: OtpChannel[] = []
+    if (parts.includes('sms')) channels.push('sms')
+    if (parts.includes('email')) channels.push('email')
+    if (channels.length) return channels
+  }
+  if (process.env.OTP_EMAIL_ENABLED === 'false') return ['sms']
+  if (process.env.OTP_SMS_ENABLED === 'false') return ['email']
+  return ['sms', 'email']
 }
 
 export function exposeDevOtpInApi(): boolean {

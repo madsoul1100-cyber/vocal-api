@@ -11,6 +11,7 @@ import { LocalStorageApi } from '@/lib/postgresCompat/storage.js'
 type Filter =
   | { kind: 'eq'; col: string; val: unknown }
   | { kind: 'neq'; col: string; val: unknown }
+  | { kind: 'is'; col: string; val: unknown }
   | { kind: 'not_is'; col: string; val: unknown }
   | { kind: 'in'; col: string; vals: unknown[] }
   | { kind: 'lt'; col: string; val: unknown }
@@ -38,6 +39,12 @@ function buildWhere(filters: Filter[], startIdx = 1): { sql: string; params: unk
     } else if (f.kind === 'neq') {
       parts.push(`${f.col} <> $${i++}`)
       params.push(f.val)
+    } else if (f.kind === 'is') {
+      if (f.val === null) parts.push(`${f.col} IS NULL`)
+      else {
+        parts.push(`${f.col} IS $${i++}`)
+        params.push(f.val)
+      }
     } else if (f.kind === 'not_is') {
       if (f.val === null) parts.push(`${f.col} IS NOT NULL`)
       else {
@@ -168,6 +175,11 @@ export class PostgresTableQuery<T = Record<string, unknown>> {
 
   neq(col: string, val: unknown) {
     this.filters.push({ kind: 'neq', col, val })
+    return this
+  }
+
+  is(col: string, val: unknown) {
+    this.filters.push({ kind: 'is', col, val })
     return this
   }
 

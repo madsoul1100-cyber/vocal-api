@@ -17,7 +17,11 @@ function sesClient(): SESClient | null {
 }
 
 function isConfigured(): boolean {
-  return !!(process.env.AWS_SES_FROM_EMAIL?.trim() && process.env.AWS_REGION?.trim())
+  const from = process.env.AWS_SES_FROM_EMAIL?.trim().toLowerCase() ?? ''
+  if (!from || !process.env.AWS_REGION?.trim()) return false
+  // Placeholder from .env.example — treat as not set up
+  if (from.includes('yourdomain.com') || from === 'noreply@example.com') return false
+  return true
 }
 
 function buildHtml(payload: OtpSendPayload): string {

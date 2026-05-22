@@ -38,6 +38,7 @@ export interface OtpSmsProvider {
 
 export interface OtpDeliveryStatus {
   mode: OtpDeliveryMode
-  email: { provider: string; configured: boolean }
-  sms: { provider: string; configured: boolean }
+  channels: OtpChannel[]
+  email: { provider: string; configured: boolean; enabled: boolean }
+  sms: { provider: string; configured: boolean; enabled: boolean }
 }
