@@ -64,7 +64,15 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 | Endpoint | Description |
 |----------|-------------|
 | `GET /v2/dashboard` | Insight dashboard stats (`super_admin`, `central_support`, `state_leader` only). Others get `403` with optional `redirect` (`ground_worker` → `/my-assignments`, `district_leader` → `/tickets`). Response: `action_required`, `pipeline`, `operational_health`, `recent_tickets`, `meta`. |
-| `GET /v2/tickets/:id` | Ticket detail; `classification`, `sla`, `citizen_identity`, `status_history`; `has_notes_or_attachments` → skip `GET .../attachments` when `false` |
+| `GET /v2/tickets/:id` | Ticket detail; `classification`, `sla`, `citizen_identity`, `status_history`; `current_assignment`, `assignable_worker_count`, `can_assign`, `can_respond_to_offer`; `has_notes_or_attachments` → skip `GET .../attachments` when `false` |
+| `GET /v2/tickets/:id/assignable-workers` | Paginated assign dropdown (`super_admin` / `central_support`); `limit`/`offset`/`keyword`/`territory_id`; `in_ticket_territory=true` filters to ticket territory |
+| `POST /v2/tickets/assign` | Offer ticket to worker (`super_admin` / `central_support`); body `{ ticket_id, worker_id }` → `{ ok, assignment_id, expires_at }` |
+| `POST /v2/tickets/auto-assign` | Auto-pick nearest eligible worker; body `{ ticket_id }` → `{ ok, assignment_id, expires_at, worker }` or `409` if none |
+| `GET /v2/tickets/status-options` | Status picker catalog for current role (`groups`, `sub_statuses_requiring_worker`, `worker_allowed_sub_statuses`) |
+| `POST /v2/tickets/status` | Update sub-status only; body `{ ticket_id, sub_status }` (codes, not labels). Close requires `citizen_contacted` in history + closure note (422). Do not send `assigned_awaiting_acceptance` — use assign |
+| `POST /v2/tickets/assign` | Offer to worker when picker value is `assigned_awaiting_acceptance`; body `{ ticket_id, worker_id }` |
+| `POST /v2/tickets/accept` | Worker accepts current offer; body `{ ticket_id }` |
+| `POST /v2/tickets/reject` | Worker rejects offer; body `{ ticket_id, reason }` |
 | `GET /v2/tickets/:id/attachments` | Paginated `notes` + `attachments` (same `limit`/`offset` each); `preview_url` when `can_preview_media` |
 | `POST /v2/tickets/:id/attachments` | Multipart: optional `content`, optional `file` (at least one); optional `note_type`; creates note and/or attachment |
 | `GET /v2/tickets/:id/ai-suggestion` | Pending AI suggestion (`super_admin` / `central_support` only; latest completed, unconfirmed, or `null`) |
