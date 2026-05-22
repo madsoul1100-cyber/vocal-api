@@ -14,6 +14,15 @@ import {
 } from '@/services/ticketQueries.js'
 import { acceptTicket, rejectTicket, updateTicketStatus } from '@/services/ticketActionsService.js'
 import {
+  assignTicketToWorker,
+  autoAssignTicket,
+  canAssignTickets,
+  countAssignableWorkers,
+  getCurrentAssignment,
+  listAssignableWorkersForTicket,
+  workerCanRespondToOffer,
+} from '@/services/ticketAssignmentService.js'
+import {
   canAccessAiSuggestions,
   confirmAiSuggestion,
   getPendingAiSuggestion,
@@ -105,20 +114,66 @@ router.post('/confirm-ai', requireClerkAuth, async (req, res) => {
   res.json({ ok: true, ticket: result.ticket })
 })
 
-router.post('/status', requireClerkAuth, async (req, res) => {
+router.post('/assign', requireClerkAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> }).vocalUser
   const ticketId = req.body?.ticket_id as string | undefined
-  const subStatus = req.body?.sub_status as string | undefined
-  if (!ticketId || !subStatus) {
-    res.status(400).json({ error: 'ticket_id and sub_status required' })
+  const workerId = req.body?.worker_id as string | undefined
+  if (!ticketId || !workerId) {
+    res.status(400).json({ error: 'ticket_id and worker_id required' })
     return
   }
-  const result = await updateTicketStatus(user as any, ticketId, subStatus)
+  const result = await assignTicketToWorker(user as any, ticketId, workerId)
   if (!result.ok) {
     res.status(result.status).json({ error: result.error })
     return
   }
-  res.json({ ok: true })
+  res.json({
+    ok: true,
+    assignment_id: result.assignment_id,
+    expires_at: result.expires_at,
+  })
+})
+
+router.post('/auto-assign', requireClerkAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> }).vocalUser
+  const ticketId = req.body?.ticket_id as string | undefined
+  if (!ticketId) {
+    res.status(400).json({ error: 'ticket_id required' })
+    return
+  }
+  const result = await autoAssignTicket(user as any, ticketId)
+  if (!result.ok) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+  res.json({
+    ok: true,
+    assignment_id: result.assignment_id,
+    expires_at: result.expires_at,
+    worker: result.worker,
+  })
+})
+
+router.post('/status', requireClerkAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> }).vocalUser
+  const ticketId = req.body?.ticket_id as string | undefined
+  const subStatus = req.body?.sub_status as string | undefined
+  const workerId = req.body?.worker_id as string | undefined
+  if (!ticketId || !subStatus) {
+    res.status(400).json({ error: 'ticket_id and sub_status required' })
+    return
+  }
+  const result = await updateTicketStatus(user as any, ticketId, subStatus, workerId)
+  if (!result.ok) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+  const body: Record<string, unknown> = { ok: true }
+  if ('assignment_id' in result) {
+    body.assignment_id = result.assignment_id
+    body.expires_at = result.expires_at
+  }
+  res.json(body)
 })
 
 /** Notes + attachments: list (GET) or create note and/or file (POST multipart). */
@@ -190,6 +245,33 @@ router.get('/:id/attachments', requireClerkAuth, async (req, res) => {
     can_preview_media: result.can_preview_media,
     filters: { limit: listOpts.limit, offset: listOpts.offset },
   })
+})
+
+/** Paginated ground workers for assign dropdown; central_support / super_admin only */
+router.get('/:id/assignable-workers', requireClerkAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> })
+    .vocalUser
+  const ticketId = String(req.params.id)
+
+  try {
+    const result = await listAssignableWorkersForTicket(
+      user as any,
+      ticketId,
+      req.query as Record<string, unknown>,
+    )
+    if (!result.ok) {
+      res.status(result.status).json({ error: result.error })
+      return
+    }
+    res.json({
+      workers: result.result.workers,
+      pagination: result.result.pagination,
+      filters: result.filters,
+    })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Assignable workers list failed'
+    res.status(500).json({ error: message })
+  }
 })
 
 /** Pending AI triage suggestion; central_support / super_admin only */
@@ -265,12 +347,16 @@ router.get('/:id', requireClerkAuth, async (req, res) => {
     user.roles?.name,
   )
   const ticketId = String(req.params.id)
-  const [has_pending_ai_suggestion, has_attachments, has_notes, statusHistoryRes] =
+  const roleName = user.roles?.name
+  const privilegedAssign = canAssignTickets(roleName)
+  const [has_pending_ai_suggestion, has_attachments, has_notes, statusHistoryRes, current_assignment, assignable_worker_count] =
     await Promise.all([
-      Promise.resolve(shouldFetchAiSuggestion(user.roles?.name, row.needs_triage === true)),
+      Promise.resolve(shouldFetchAiSuggestion(roleName, row.needs_triage === true)),
       ticketHasAttachments(ticketId),
       ticketHasNotes(ticketId),
       listTicketStageHistory(ticketId, user.organization_id),
+      getCurrentAssignment(ticketId, user.organization_id),
+      privilegedAssign ? countAssignableWorkers(user.organization_id) : Promise.resolve(0),
     ])
   const can_preview_attachments = canPreviewAttachmentMedia(
     user.roles?.name,
@@ -283,6 +369,8 @@ router.get('/:id', requireClerkAuth, async (req, res) => {
     return
   }
 
+  const can_respond_to_offer = workerCanRespondToOffer(roleName, user.id, current_assignment)
+
   res.json({
     ticket: stripTicketDetailDuplicates({
       ...ticket,
@@ -292,6 +380,10 @@ router.get('/:id', requireClerkAuth, async (req, res) => {
       has_notes_or_attachments: has_attachments || has_notes,
       can_preview_attachments,
     }),
+    current_assignment,
+    assignable_worker_count: privilegedAssign ? assignable_worker_count : null,
+    can_assign: privilegedAssign && assignable_worker_count > 0,
+    can_respond_to_offer,
   })
 })
 

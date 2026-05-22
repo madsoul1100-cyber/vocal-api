@@ -64,7 +64,13 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 | Endpoint | Description |
 |----------|-------------|
 | `GET /v2/dashboard` | Insight dashboard stats (`super_admin`, `central_support`, `state_leader` only). Others get `403` with optional `redirect` (`ground_worker` → `/my-assignments`, `district_leader` → `/tickets`). Response: `action_required`, `pipeline`, `operational_health`, `recent_tickets`, `meta`. |
-| `GET /v2/tickets/:id` | Ticket detail; `classification`, `sla`, `citizen_identity`, `status_history`; `has_notes_or_attachments` → skip `GET .../attachments` when `false` |
+| `GET /v2/tickets/:id` | Ticket detail; `classification`, `sla`, `citizen_identity`, `status_history`; `current_assignment`, `assignable_worker_count`, `can_assign`, `can_respond_to_offer`; `has_notes_or_attachments` → skip `GET .../attachments` when `false` |
+| `GET /v2/tickets/:id/assignable-workers` | Paginated assign dropdown (`super_admin` / `central_support`); `limit`/`offset`/`keyword`/`territory_id`; `in_ticket_territory=true` filters to ticket territory |
+| `POST /v2/tickets/assign` | Offer ticket to worker (`super_admin` / `central_support`); body `{ ticket_id, worker_id }` → `{ ok, assignment_id, expires_at }` |
+| `POST /v2/tickets/auto-assign` | Auto-pick nearest eligible worker; body `{ ticket_id }` → `{ ok, assignment_id, expires_at, worker }` or `409` if none |
+| `POST /v2/tickets/accept` | Worker accepts current offer; body `{ ticket_id }` |
+| `POST /v2/tickets/reject` | Worker rejects offer; body `{ ticket_id, reason }` |
+| `POST /v2/tickets/status` | Update sub-status; body `{ ticket_id, sub_status }`. For `assigned_awaiting_acceptance` also send `worker_id` (runs assign flow) |
 | `GET /v2/tickets/:id/attachments` | Paginated `notes` + `attachments` (same `limit`/`offset` each); `preview_url` when `can_preview_media` |
 | `POST /v2/tickets/:id/attachments` | Multipart: optional `content`, optional `file` (at least one); optional `note_type`; creates note and/or attachment |
 | `GET /v2/tickets/:id/ai-suggestion` | Pending AI suggestion (`super_admin` / `central_support` only; latest completed, unconfirmed, or `null`) |

@@ -1,5 +1,6 @@
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
 import { listCandidateWorkers, offerTicketToWorker } from '@/services/assignmentService.js'
+import { assignTicketToWorker, canAssignTickets } from '@/services/ticketAssignmentService.js'
 import { notifyCitizenOfTicketUpdate } from '@/services/citizenNotifier.js'
 
 const VALID_REJECTION_REASONS = [
@@ -273,13 +274,40 @@ export async function rejectTicket(user: VocalUser, ticketId: string, reason: st
   return { ok: true as const, reoffered }
 }
 
-export async function updateTicketStatus(user: VocalUser, ticketId: string, subStatus: string) {
+export async function updateTicketStatus(
+  user: VocalUser,
+  ticketId: string,
+  subStatus: string,
+  workerId?: string,
+) {
   const newStage = SUB_STATUS_STAGE_MAP[subStatus]
   if (!newStage) return { ok: false as const, status: 400, error: 'Invalid sub_status value' }
 
   const roleName = user.roles?.name
   const isPrivileged = roleName === 'super_admin' || roleName === 'central_support'
   const isWorker = roleName === 'ground_worker'
+
+  if (subStatus === 'assigned_awaiting_acceptance') {
+    if (!canAssignTickets(roleName)) {
+      return {
+        ok: false as const,
+        status: 403,
+        error: 'Only central support can assign tickets to workers',
+      }
+    }
+    if (!workerId?.trim()) {
+      return { ok: false as const, status: 400, error: 'worker_id required for assignment' }
+    }
+    const assignResult = await assignTicketToWorker(user, ticketId, workerId.trim())
+    if (!assignResult.ok) {
+      return { ok: false as const, status: assignResult.status, error: assignResult.error }
+    }
+    return {
+      ok: true as const,
+      assignment_id: assignResult.assignment_id,
+      expires_at: assignResult.expires_at,
+    }
+  }
 
   const supabase = createSupabaseServiceClient()
   const { data: ticket } = await supabase
