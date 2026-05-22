@@ -12,7 +12,12 @@ import {
   nestTicketSla,
   stripTicketDetailDuplicates,
 } from '@/services/ticketQueries.js'
-import { acceptTicket, rejectTicket, updateTicketStatus } from '@/services/ticketActionsService.js'
+import {
+  acceptTicket,
+  getTicketStatusOptions,
+  rejectTicket,
+  updateTicketStatus,
+} from '@/services/ticketActionsService.js'
 import {
   assignTicketToWorker,
   autoAssignTicket,
@@ -64,6 +69,13 @@ router.get('/', requireClerkAuth, async (req, res) => {
     const message = err instanceof Error ? err.message : 'Ticket list failed'
     res.status(500).json({ error: message })
   }
+})
+
+/** Status picker catalog for current user role (codes + labels; no DB). */
+router.get('/status-options', requireClerkAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> })
+    .vocalUser
+  res.json(getTicketStatusOptions(user.roles?.name))
 })
 
 router.post('/accept', requireClerkAuth, async (req, res) => {
@@ -158,22 +170,16 @@ router.post('/status', requireClerkAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> }).vocalUser
   const ticketId = req.body?.ticket_id as string | undefined
   const subStatus = req.body?.sub_status as string | undefined
-  const workerId = req.body?.worker_id as string | undefined
   if (!ticketId || !subStatus) {
     res.status(400).json({ error: 'ticket_id and sub_status required' })
     return
   }
-  const result = await updateTicketStatus(user as any, ticketId, subStatus, workerId)
+  const result = await updateTicketStatus(user as any, ticketId, subStatus)
   if (!result.ok) {
     res.status(result.status).json({ error: result.error })
     return
   }
-  const body: Record<string, unknown> = { ok: true }
-  if ('assignment_id' in result) {
-    body.assignment_id = result.assignment_id
-    body.expires_at = result.expires_at
-  }
-  res.json(body)
+  res.json({ ok: true })
 })
 
 /** Notes + attachments: list (GET) or create note and/or file (POST multipart). */

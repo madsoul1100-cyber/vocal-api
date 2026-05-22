@@ -1,6 +1,16 @@
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
 import { listCandidateWorkers, offerTicketToWorker } from '@/services/assignmentService.js'
-import { assignTicketToWorker, canAssignTickets } from '@/services/ticketAssignmentService.js'
+import {
+  getTicketStatusOptionsForRole,
+  isClosedSubStatus,
+  isValidSubStatus,
+  PRIVILEGED_STATUS_ROLES,
+  stageForSubStatus,
+  STAGE_ORDER,
+  SUB_STATUSES_REQUIRING_WORKER,
+  WORKER_ALLOWED_SUB_STATUSES,
+  type TicketStatusOptionsResponse,
+} from '@/lib/ticketStatusCatalog.js'
 import { notifyCitizenOfTicketUpdate } from '@/services/citizenNotifier.js'
 
 const VALID_REJECTION_REASONS = [
@@ -12,61 +22,63 @@ const VALID_REJECTION_REASONS = [
   'fake_spam',
 ]
 
-const SUB_STATUS_STAGE_MAP: Record<string, string> = {
-  new_awaiting_triage: 'to_do',
-  incomplete_information: 'to_do',
-  needs_location_validation: 'to_do',
-  ready_for_assignment: 'to_do',
-  critical_immediate_attention: 'to_do',
-  reassignment_pending: 'on_hold',
-  assigned_awaiting_acceptance: 'in_progress',
-  accepted_by_worker: 'in_progress',
-  citizen_contacted: 'in_progress',
-  field_verification_in_progress: 'in_progress',
-  action_plan_created: 'in_progress',
-  escalated_to_authority: 'in_progress',
-  escalated_to_internal_leadership: 'in_progress',
-  escalated_to_media_support: 'in_progress',
-  support_required_from_specialist: 'in_progress',
-  waiting_on_external_action: 'in_progress',
-  awaiting_citizen_response: 'on_hold',
-  awaiting_documents_evidence: 'on_hold',
-  unsafe_to_intervene: 'on_hold',
-  outside_jurisdiction_review: 'on_hold',
-  suspected_fake_spam_review: 'on_hold',
-  sla_breach_escalation_queue: 'on_hold',
-  resolved_by_organization: 'closed',
-  resolved_by_external_party: 'closed',
-  unable_to_support: 'closed',
-  duplicate_merged_manually: 'closed',
-  fake_invalid: 'closed',
-  citizen_unresponsive_closed: 'closed',
-  closed_by_central_support: 'closed',
-  closed_with_advice_only: 'closed',
-}
-
-const WORKER_ALLOWED_SUB_STATUSES = new Set([
-  'accepted_by_worker',
-  'citizen_contacted',
-  'field_verification_in_progress',
-  'action_plan_created',
-  'escalated_to_authority',
-  'awaiting_citizen_response',
-  'awaiting_documents_evidence',
-  'suspected_fake_spam_review',
-])
-
-const STAGE_ORDER: Record<string, number> = {
-  to_do: 0,
-  in_progress: 1,
-  on_hold: 2,
-  closed: 3,
-}
+const WORKER_ALLOWED_SET = new Set<string>(WORKER_ALLOWED_SUB_STATUSES)
 
 type VocalUser = {
   id: string
   organization_id: string
   roles?: { name: string } | null
+}
+
+export function getTicketStatusOptions(role: string | null | undefined): TicketStatusOptionsResponse {
+  return getTicketStatusOptionsForRole(role)
+}
+
+function isPrivilegedRole(role: string | null | undefined): boolean {
+  return !!role && (PRIVILEGED_STATUS_ROLES as readonly string[]).includes(role)
+}
+
+async function validateCloseAllowed(
+  ticketId: string,
+): Promise<{ ok: true } | { ok: false; status: number; error: string }> {
+  const supabase = createSupabaseServiceClient()
+
+  const { count: historyCount, error: histErr } = await supabase
+    .from('ticket_stage_history')
+    .select('id', { count: 'exact', head: true })
+    .eq('ticket_id', ticketId)
+    .eq('to_sub_status', 'citizen_contacted')
+
+  if (histErr) {
+    return { ok: false, status: 500, error: histErr.message }
+  }
+  if ((historyCount ?? 0) === 0) {
+    return {
+      ok: false,
+      status: 422,
+      error: 'Cannot close: ticket must reach Citizen Contacted first (stage history)',
+    }
+  }
+
+  const { count: noteCount, error: noteErr } = await supabase
+    .from('ticket_notes')
+    .select('id', { count: 'exact', head: true })
+    .eq('ticket_id', ticketId)
+    .eq('note_type', 'closure')
+    .eq('soft_deleted', false)
+
+  if (noteErr) {
+    return { ok: false, status: 500, error: noteErr.message }
+  }
+  if ((noteCount ?? 0) === 0) {
+    return {
+      ok: false,
+      status: 422,
+      error: 'Cannot close: add a closure note (note_type closure) before closing',
+    }
+  }
+
+  return { ok: true }
 }
 
 export async function acceptTicket(user: VocalUser, ticketId: string) {
@@ -274,40 +286,27 @@ export async function rejectTicket(user: VocalUser, ticketId: string, reason: st
   return { ok: true as const, reoffered }
 }
 
-export async function updateTicketStatus(
-  user: VocalUser,
-  ticketId: string,
-  subStatus: string,
-  workerId?: string,
-) {
-  const newStage = SUB_STATUS_STAGE_MAP[subStatus]
-  if (!newStage) return { ok: false as const, status: 400, error: 'Invalid sub_status value' }
+export async function updateTicketStatus(user: VocalUser, ticketId: string, subStatusRaw: string) {
+  const subStatus = subStatusRaw.trim()
+  if (!subStatus) {
+    return { ok: false as const, status: 400, error: 'sub_status required' }
+  }
+  if (!isValidSubStatus(subStatus)) {
+    return { ok: false as const, status: 400, error: 'Invalid sub_status value' }
+  }
 
-  const roleName = user.roles?.name
-  const isPrivileged = roleName === 'super_admin' || roleName === 'central_support'
-  const isWorker = roleName === 'ground_worker'
-
-  if (subStatus === 'assigned_awaiting_acceptance') {
-    if (!canAssignTickets(roleName)) {
-      return {
-        ok: false as const,
-        status: 403,
-        error: 'Only central support can assign tickets to workers',
-      }
-    }
-    if (!workerId?.trim()) {
-      return { ok: false as const, status: 400, error: 'worker_id required for assignment' }
-    }
-    const assignResult = await assignTicketToWorker(user, ticketId, workerId.trim())
-    if (!assignResult.ok) {
-      return { ok: false as const, status: assignResult.status, error: assignResult.error }
-    }
+  if ((SUB_STATUSES_REQUIRING_WORKER as readonly string[]).includes(subStatus)) {
     return {
-      ok: true as const,
-      assignment_id: assignResult.assignment_id,
-      expires_at: assignResult.expires_at,
+      ok: false as const,
+      status: 400,
+      error: `Use POST /v2/tickets/assign for sub_status "${subStatus}"`,
     }
   }
+
+  const newStage = stageForSubStatus(subStatus)
+  const roleName = user.roles?.name
+  const isPrivileged = isPrivilegedRole(roleName)
+  const isWorker = roleName === 'ground_worker'
 
   const supabase = createSupabaseServiceClient()
   const { data: ticket } = await supabase
@@ -323,17 +322,32 @@ export async function updateTicketStatus(
   if (isWorker && ticket.owner_user_id !== user.id) {
     return { ok: false as const, status: 403, error: 'You are not the owner of this ticket' }
   }
-  if (isWorker && !WORKER_ALLOWED_SUB_STATUSES.has(subStatus)) {
+  if (isWorker && !WORKER_ALLOWED_SET.has(subStatus)) {
     return { ok: false as const, status: 403, error: 'Status not allowed for workers' }
   }
 
-  const currentStageOrder = STAGE_ORDER[ticket.stage as string] ?? 0
-  const newStageOrder = STAGE_ORDER[newStage] ?? 0
+  if (newStage === 'closed' && !isPrivileged) {
+    return {
+      ok: false as const,
+      status: 403,
+      error: 'Only central support can close tickets',
+    }
+  }
+
+  const currentStageOrder = STAGE_ORDER[ticket.stage as keyof typeof STAGE_ORDER] ?? 0
+  const newStageOrder = STAGE_ORDER[newStage]
   if (!isPrivileged && newStageOrder < currentStageOrder) {
     return {
       ok: false as const,
       status: 403,
       error: 'Only central support can move tickets backward in the stage flow',
+    }
+  }
+
+  if (isClosedSubStatus(subStatus)) {
+    const closeCheck = await validateCloseAllowed(ticketId)
+    if (!closeCheck.ok) {
+      return { ok: false as const, status: closeCheck.status, error: closeCheck.error }
     }
   }
 
