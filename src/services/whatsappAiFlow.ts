@@ -11,11 +11,17 @@ import {
 } from './intakeConversationManager.js'
 import {
   sendWhatsAppMessage,
-  citizenStageLabel,
   extractTicketNumber,
   words,
   isCommand,
 } from './whatsappService.js'
+import {
+  looksLikeStatusFollowUp,
+  offerTicketStatusFlow,
+  resolveTicketPickerChoice,
+  sendTicketStatus,
+  type TicketPickerOption,
+} from './whatsappTicketStatus.js'
 import { createTicket } from './ticketService.js'
 import { generateTicketSuggestions } from './aiService.js'
 import { findNearestAvailableWorker, offerTicketToWorker } from './assignmentService.js'
@@ -43,6 +49,8 @@ export interface WhatsAppConversationMeta {
   aiDraft?: AiDraftState
   draft?: Draft
   last_ticket_number?: string | null
+  /** Active numbered menu for ticket status (reply 1, 2, …). */
+  ticketPickerOptions?: TicketPickerOption[] | null
 }
 
 export interface AiFlowContext {
@@ -217,6 +225,7 @@ async function persistMeta(ctx: AiFlowContext, step: WhatsAppAiStep, meta: Whats
     aiDraft: meta.aiDraft ?? {},
     draft: meta.draft ?? {},
     last_ticket_number: meta.last_ticket_number ?? null,
+    ticketPickerOptions: meta.ticketPickerOptions ?? null,
   }
   const { error } = await ctx.supabase
     .from('channel_conversations')
@@ -234,49 +243,24 @@ async function persistMeta(ctx: AiFlowContext, step: WhatsAppAiStep, meta: Whats
   ctx.meta = payload
 }
 
-async function replyStatus(ctx: AiFlowContext, ticketNumber: string | null) {
-  if (ticketNumber) {
-    const { data: t } = await ctx.supabase
-      .from('tickets')
-      .select('ticket_number, stage, updated_at')
-      .eq('organization_id', ctx.organizationId)
-      .eq('ticket_number', ticketNumber)
-      .maybeSingle()
-    if (!t) {
-      await sendWhatsAppMessage(
-        ctx.msg.chat_id,
-        "I couldn't find that ticket number. Please check and try again, or tell me your issue if you want to file a new report.",
-      )
-      return
-    }
-    await sendWhatsAppMessage(
-      ctx.msg.chat_id,
-      `Ticket ${t.ticket_number}\nStage: ${citizenStageLabel(t.stage)}\nLast update: ${new Date(t.updated_at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}`,
-    )
-    return
-  }
+async function handleTicketStatusRequest(
+  ctx: AiFlowContext,
+  preferredTicket: string | null,
+): Promise<void> {
+  const result = await offerTicketStatusFlow({
+    supabase: ctx.supabase,
+    organizationId: ctx.organizationId,
+    citizenId: ctx.citizenId,
+    channelUserId: ctx.msg.chat_id,
+    preferredTicket,
+    lastTicketNumber: ctx.meta.last_ticket_number ?? null,
+  })
 
-  const { data: recent } = await ctx.supabase
-    .from('tickets')
-    .select('ticket_number, stage, updated_at')
-    .eq('organization_id', ctx.organizationId)
-    .eq('citizen_id', ctx.citizenId)
-    .order('created_at', { ascending: false })
-    .limit(1)
-    .maybeSingle()
-
-  if (!recent) {
-    await sendWhatsAppMessage(
-      ctx.msg.chat_id,
-      "You don't have a ticket on record yet. Tell me what's happening and where — I'll help you file it.",
-    )
-    return
-  }
-
-  await sendWhatsAppMessage(
-    ctx.msg.chat_id,
-    `Your latest ticket: ${recent.ticket_number}\nStage: ${citizenStageLabel(recent.stage)}\nLast update: ${new Date(recent.updated_at).toLocaleString('en-IN', { dateStyle: 'medium', timeStyle: 'short' })}`,
-  )
+  await persistMeta(ctx, ctx.currentStep, {
+    ...ctx.meta,
+    ticketPickerOptions: result.pickerOptions,
+    last_ticket_number: result.shownTicket ?? ctx.meta.last_ticket_number,
+  })
 }
 
 async function finalizeTicket(ctx: AiFlowContext, aiDraft: AiDraftState) {
@@ -393,7 +377,7 @@ async function finalizeTicket(ctx: AiFlowContext, aiDraft: AiDraftState) {
   // AI already confirmed filing in replyText on the same turn; send ticket id clearly.
   await sendWhatsAppMessage(
     ctx.msg.chat_id,
-    `Your reference number is ${result.ticketNumber}. Save it to check status anytime. Our team will review and update you.`,
+    `Registered as *${result.ticketNumber}*.\n\nReply *status* anytime for an update on this report. Our team will review and contact you if needed.`,
   )
 }
 
@@ -410,9 +394,32 @@ export async function handleInboundMessageAi(ctx: AiFlowContext): Promise<void> 
     return
   }
 
+  if (ctx.meta.ticketPickerOptions?.length) {
+    const picked = resolveTicketPickerChoice(text, ctx.meta.ticketPickerOptions)
+    if (picked) {
+      await sendTicketStatus(ctx.msg.chat_id, ctx.supabase, ctx.organizationId, picked)
+      await persistMeta(ctx, ctx.currentStep, {
+        ...ctx.meta,
+        ticketPickerOptions: null,
+        last_ticket_number: picked,
+      })
+      return
+    }
+  }
+
   const ticketFromText = extractTicketNumber(text)
-  if (words.isStatus(text) || ticketFromText) {
-    await replyStatus(ctx, ticketFromText ?? ctx.meta.last_ticket_number ?? null)
+  if (ticketFromText) {
+    await handleTicketStatusRequest(ctx, ticketFromText)
+    return
+  }
+
+  if (words.isStatus(text)) {
+    await handleTicketStatusRequest(ctx, null)
+    return
+  }
+
+  if (ctx.currentStep === 'post_ticket' && (looksLikeStatusFollowUp(text) || ctx.msg.media)) {
+    await handleTicketStatusRequest(ctx, ctx.meta.last_ticket_number ?? null)
     return
   }
 
@@ -479,12 +486,12 @@ export async function handleInboundMessageAi(ctx: AiFlowContext): Promise<void> 
   }
 
   if (response.intent === 'status_check') {
-    await sendWhatsAppMessage(ctx.msg.chat_id, assistantText)
-    await replyStatus(ctx, ticketFromText ?? ctx.meta.last_ticket_number ?? null)
+    await handleTicketStatusRequest(ctx, ctx.meta.last_ticket_number ?? ticketFromText ?? null)
     await persistMeta(ctx, ctx.currentStep === 'post_ticket' ? 'post_ticket' : 'ai_intake', {
       ...ctx.meta,
       history: updatedHistory,
       aiDraft,
+      ticketPickerOptions: null,
     })
     return
   }
