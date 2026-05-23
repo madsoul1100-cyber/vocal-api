@@ -22,6 +22,12 @@ import {
   sendTicketStatus,
   type TicketPickerOption,
 } from './whatsappTicketStatus.js'
+import {
+  normalizeStoredLanguage,
+  resolveReplyLanguage,
+  statusCopy,
+  type WhatsAppLang,
+} from './whatsappLocale.js'
 import { createTicket } from './ticketService.js'
 import { generateTicketSuggestions } from './aiService.js'
 import { findNearestAvailableWorker, offerTicketToWorker } from './assignmentService.js'
@@ -51,6 +57,8 @@ export interface WhatsAppConversationMeta {
   last_ticket_number?: string | null
   /** Active numbered menu for ticket status (reply 1, 2, …). */
   ticketPickerOptions?: TicketPickerOption[] | null
+  /** Last detected reply language (hi / te / en). */
+  preferredLanguage?: string | null
 }
 
 export interface AiFlowContext {
@@ -226,6 +234,7 @@ async function persistMeta(ctx: AiFlowContext, step: WhatsAppAiStep, meta: Whats
     draft: meta.draft ?? {},
     last_ticket_number: meta.last_ticket_number ?? null,
     ticketPickerOptions: meta.ticketPickerOptions ?? null,
+    preferredLanguage: meta.preferredLanguage ?? null,
   }
   const { error } = await ctx.supabase
     .from('channel_conversations')
@@ -243,10 +252,16 @@ async function persistMeta(ctx: AiFlowContext, step: WhatsAppAiStep, meta: Whats
   ctx.meta = payload
 }
 
+function replyLang(ctx: AiFlowContext, userText?: string): WhatsAppLang {
+  return resolveReplyLanguage(userText ?? ctx.msg.text ?? '', ctx.meta.preferredLanguage)
+}
+
 async function handleTicketStatusRequest(
   ctx: AiFlowContext,
   preferredTicket: string | null,
+  userText?: string,
 ): Promise<void> {
+  const lang = replyLang(ctx, userText)
   const result = await offerTicketStatusFlow({
     supabase: ctx.supabase,
     organizationId: ctx.organizationId,
@@ -254,12 +269,14 @@ async function handleTicketStatusRequest(
     channelUserId: ctx.msg.chat_id,
     preferredTicket,
     lastTicketNumber: ctx.meta.last_ticket_number ?? null,
+    replyLanguage: lang,
   })
 
   await persistMeta(ctx, ctx.currentStep, {
     ...ctx.meta,
     ticketPickerOptions: result.pickerOptions,
     last_ticket_number: result.shownTicket ?? ctx.meta.last_ticket_number,
+    preferredLanguage: lang,
   })
 }
 
@@ -375,9 +392,10 @@ async function finalizeTicket(ctx: AiFlowContext, aiDraft: AiDraftState) {
   })
 
   // AI already confirmed filing in replyText on the same turn; send ticket id clearly.
+  const lang = replyLang(ctx)
   await sendWhatsAppMessage(
     ctx.msg.chat_id,
-    `Registered as *${result.ticketNumber}*.\n\nReply *status* anytime for an update on this report. Our team will review and contact you if needed.`,
+    statusCopy(lang).filed(result.ticketNumber),
   )
 }
 
@@ -394,14 +412,17 @@ export async function handleInboundMessageAi(ctx: AiFlowContext): Promise<void> 
     return
   }
 
+  const lang = replyLang(ctx, text)
+
   if (ctx.meta.ticketPickerOptions?.length) {
     const picked = resolveTicketPickerChoice(text, ctx.meta.ticketPickerOptions)
     if (picked) {
-      await sendTicketStatus(ctx.msg.chat_id, ctx.supabase, ctx.organizationId, picked)
+      await sendTicketStatus(ctx.msg.chat_id, ctx.supabase, ctx.organizationId, picked, lang)
       await persistMeta(ctx, ctx.currentStep, {
         ...ctx.meta,
         ticketPickerOptions: null,
         last_ticket_number: picked,
+        preferredLanguage: lang,
       })
       return
     }
@@ -409,17 +430,17 @@ export async function handleInboundMessageAi(ctx: AiFlowContext): Promise<void> 
 
   const ticketFromText = extractTicketNumber(text)
   if (ticketFromText) {
-    await handleTicketStatusRequest(ctx, ticketFromText)
+    await handleTicketStatusRequest(ctx, ticketFromText, text)
     return
   }
 
   if (words.isStatus(text)) {
-    await handleTicketStatusRequest(ctx, null)
+    await handleTicketStatusRequest(ctx, null, text)
     return
   }
 
   if (ctx.currentStep === 'post_ticket' && (looksLikeStatusFollowUp(text) || ctx.msg.media)) {
-    await handleTicketStatusRequest(ctx, ctx.meta.last_ticket_number ?? null)
+    await handleTicketStatusRequest(ctx, ctx.meta.last_ticket_number ?? null, text)
     return
   }
 
@@ -465,6 +486,11 @@ export async function handleInboundMessageAi(ctx: AiFlowContext): Promise<void> 
   const aiDraft = mergeAiDraft(ctx.meta.aiDraft ?? {}, response.draftUpdates, ctx)
   aiDraft.scope_assessment = response.scopeAssessment
 
+  const preferredLanguage =
+    response.language && response.language !== 'unknown'
+      ? normalizeStoredLanguage(response.language)
+      : lang
+
   const assistantText =
     response.replyText?.trim() ||
     'Tell me more about what happened — I am here to help you report it to the right people.'
@@ -481,17 +507,23 @@ export async function handleInboundMessageAi(ctx: AiFlowContext): Promise<void> 
       ...ctx.meta,
       history: updatedHistory,
       aiDraft: {},
+      preferredLanguage,
     })
     return
   }
 
   if (response.intent === 'status_check') {
-    await handleTicketStatusRequest(ctx, ctx.meta.last_ticket_number ?? ticketFromText ?? null)
+    await handleTicketStatusRequest(
+      ctx,
+      ctx.meta.last_ticket_number ?? ticketFromText ?? null,
+      text,
+    )
     await persistMeta(ctx, ctx.currentStep === 'post_ticket' ? 'post_ticket' : 'ai_intake', {
       ...ctx.meta,
       history: updatedHistory,
       aiDraft,
       ticketPickerOptions: null,
+      preferredLanguage,
     })
     return
   }
@@ -503,6 +535,7 @@ export async function handleInboundMessageAi(ctx: AiFlowContext): Promise<void> 
       ...ctx.meta,
       history: updatedHistory,
       aiDraft,
+      preferredLanguage,
     })
     await finalizeTicket(ctx, aiDraft)
     return
@@ -512,5 +545,6 @@ export async function handleInboundMessageAi(ctx: AiFlowContext): Promise<void> 
     ...ctx.meta,
     history: updatedHistory,
     aiDraft,
+    preferredLanguage,
   })
 }

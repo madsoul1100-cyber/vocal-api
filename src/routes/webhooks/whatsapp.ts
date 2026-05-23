@@ -183,6 +183,7 @@ router.post('/', async (req, res) => {
           draft: metaJson.draft ?? {},
           last_ticket_number: metaJson.last_ticket_number ?? null,
           ticketPickerOptions: metaJson.ticketPickerOptions ?? null,
+          preferredLanguage: metaJson.preferredLanguage ?? null,
         },
         msg: incoming,
       })
