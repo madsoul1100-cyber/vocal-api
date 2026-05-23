@@ -1,6 +1,8 @@
 # WhatsApp intake via Twilio
 
-Citizen grievance intake on WhatsApp uses the same flow as Telegram (issue → media → location → confirm → ticket).
+Citizen grievance intake on WhatsApp uses **AI conversational intake** by default (`WHATSAPP_INTAKE_MODE=ai`), powered by `intakeConversationManager` and OpenRouter. Citizens can chat naturally (“Hi, what can you do?”, describe problems in their own words); the bot empathizes, stays on civic topics, and files a ticket when enough detail is collected.
+
+Set `WHATSAPP_INTAKE_MODE=script` to restore the older numbered-menu flow (reply `1` / `report`, etc.).
 
 ## What you need from Twilio
 
@@ -25,9 +27,16 @@ TWILIO_WHATSAPP_FROM=whatsapp:+14155238886
 
 # Local dev only (tunnel URL changes break signature validation):
 # TWILIO_SKIP_SIGNATURE_VALIDATION=true
+
+# AI chat (default for WhatsApp)
+OPENROUTER_API_KEY=sk-or-...
+# OPENROUTER_MODEL=google/gemini-2.5-flash
+# WHATSAPP_INTAKE_MODE=ai
 ```
 
 `TWILIO_WHATSAPP_FROM` must match the sender Twilio uses (include `whatsapp:` prefix).
+
+`OPENROUTER_API_KEY` is required for natural-language replies. Without it, users get a short fallback prompt asking them to describe their issue.
 
 ## Twilio Console steps
 
@@ -40,7 +49,7 @@ TWILIO_WHATSAPP_FROM=whatsapp:+14155238886
 
 1. On your phone, send the sandbox **join code** to the sandbox WhatsApp number (shown in Twilio Console).  
 2. Message that same number from your phone — Twilio POSTs to your webhook.  
-3. Reply with `1` or `report` to start filing an issue.
+3. Send a normal message (e.g. “Hi” or describe a road/pipe problem). The AI assistant will guide you.
 
 ## Local development
 

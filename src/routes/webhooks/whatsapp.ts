@@ -13,6 +13,12 @@ import {
   type Draft,
   type DraftMedia,
 } from '@/services/whatsappFlow.js'
+import {
+  handleInboundMessageAi,
+  isWhatsAppAiIntakeEnabled,
+  type WhatsAppAiStep,
+  type WhatsAppConversationMeta,
+} from '@/services/whatsappAiFlow.js'
 
 const router = Router()
 router.use(express.urlencoded({ extended: false }))
@@ -118,9 +124,10 @@ router.post('/', async (req, res) => {
       .eq('id', conversationId)
       .single()
 
+    const useAi = isWhatsAppAiIntakeEnabled()
+    const metaJson = (conv?.metadata_json ?? {}) as WhatsAppConversationMeta & { draft?: Draft }
     const currentStep: Step = (conv?.current_step as Step) || 'idle'
-    const draft: Draft =
-      (conv?.metadata_json as { draft?: Draft } | null)?.draft ?? {}
+    const draft: Draft = metaJson.draft ?? {}
 
     const { data: dup } = await supabase
       .from('channel_messages')
@@ -158,15 +165,42 @@ router.post('/', async (req, res) => {
           : null,
     }
 
-    await handleInboundMessage({
-      supabase,
-      organizationId: ORG_ID,
-      conversationId,
-      citizenId,
-      currentStep,
-      draft,
-      msg: incoming,
-    })
+    if (useAi) {
+      const aiStep: WhatsAppAiStep =
+        conv?.current_step === 'post_ticket' ? 'post_ticket' : 'ai_intake'
+      await handleInboundMessageAi({
+        supabase,
+        organizationId: ORG_ID,
+        conversationId,
+        citizenId,
+        currentStep: aiStep,
+        meta: {
+          history: metaJson.history ?? [],
+          aiDraft: metaJson.aiDraft ?? {},
+          draft: metaJson.draft ?? {},
+          last_ticket_number: metaJson.last_ticket_number ?? null,
+        },
+        msg: incoming,
+      })
+    } else {
+      await handleInboundMessage({
+        supabase,
+        organizationId: ORG_ID,
+        conversationId,
+        citizenId,
+        currentStep,
+        draft,
+        msg: incoming,
+      })
+    }
+
+    if (!dup) {
+      await supabase
+        .from('channel_messages')
+        .update({ processed: true })
+        .eq('channel', 'whatsapp')
+        .eq('channel_message_id', body.MessageSid)
+    }
   } catch (err) {
     console.error('[WhatsApp webhook error]', err)
     await supabase
