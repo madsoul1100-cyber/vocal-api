@@ -109,6 +109,39 @@ function trimHistory(history: ConversationTurn[]): ConversationTurn[] {
   return history.slice(-MAX_HISTORY_TURNS)
 }
 
+function isShortGreeting(text: string): boolean {
+  const t = text.trim().toLowerCase()
+  return /^(hi+|hii+|hello+|hey+|namaste|namaskar)\s*!?\.?$/.test(t)
+}
+
+/** Location-only message (pin, city, "I live in…") — not an issue description that mentions a road. */
+function isStandaloneLocationMessage(text: string): boolean {
+  const t = text.trim()
+  if (/\b\d{6}\b/.test(t)) return true
+  if (/\b(pin\s*code|pincode|pin\s*[-:])\s*\d{5,6}/i.test(t)) return true
+  if (/\b(i live in|located at|my address is|address:)\b/i.test(t)) return true
+  if (t.length < 90 && /\b(kanpur|rawatpur|lucknow|delhi|mumbai|nagar|ward)\b/i.test(t)) return true
+  return false
+}
+
+/** Merge v1 script-flow draft into AI draft when switching modes mid-conversation. */
+export function hydrateConversationMeta(meta: WhatsAppConversationMeta): WhatsAppConversationMeta {
+  const legacy = meta.draft ?? {}
+  const ai = meta.aiDraft ?? {}
+  return {
+    ...meta,
+    aiDraft: {
+      ...ai,
+      issue_text: ai.issue_text ?? legacy.issue_text ?? null,
+      issue_text_native: ai.issue_text_native ?? legacy.issue_text ?? null,
+      location_text: ai.location_text ?? legacy.location_text ?? null,
+      latitude: ai.latitude ?? legacy.latitude ?? null,
+      longitude: ai.longitude ?? legacy.longitude ?? null,
+      media: (ai.media?.length ? ai.media : legacy.media) ?? [],
+    },
+  }
+}
+
 /** When OpenRouter fails — still progress the conversation from accumulated draft + message. */
 function localIntakeFallback(
   userContent: string,
@@ -121,62 +154,84 @@ function localIntakeFallback(
   const text = userContent.trim()
   const issue = (draft.issue_text_native ?? draft.issue_text ?? '').trim()
   const location = (draft.location_text ?? '').trim()
-  const looksLikeLocation =
-    /\b\d{6}\b/i.test(text) ||
-    /\b(kanpur|nagar|ward|colony|pin|live in|area|road|street)\b/i.test(text)
 
-  if (!issue && text.length > 8 && !looksLikeLocation) {
+  if (isShortGreeting(text)) {
     return {
-      replyText: `Thanks for sharing that. I've noted your concern. Which area is this in — locality, landmark, or pin code?`,
-      draftUpdates: { issue_text: text, issue_text_native: text },
-      readyToFile: false,
-    }
-  }
-
-  if (issue && !location && looksLikeLocation) {
-    return {
-      replyText: `Got it — problem: ${issue.slice(0, 200)}. Location: ${text}. Reply *yes* to submit to your local team, or send more details.`,
-      draftUpdates: { location_text: text },
-      readyToFile: true,
-    }
-  }
-
-  if (issue && !location) {
-    return {
-      replyText: `Understood about "${issue.slice(0, 120)}${issue.length > 120 ? '…' : ''}". Where is this happening? (area, landmark, or pin code)`,
+      replyText:
+        'Hello! I am here to help you report civic problems to your local team — roads, drainage, water, garbage, and similar issues. What is going on in your area?',
       draftUpdates: {},
       readyToFile: false,
     }
   }
 
-  if (issue && location) {
+  if (!issue) {
+    if (isStandaloneLocationMessage(text)) {
+      return {
+        replyText:
+          'Thanks for the location. What problem should we report there — for example drainage, road damage, or water supply?',
+        draftUpdates: { location_text: text },
+        readyToFile: false,
+      }
+    }
+    if (text.length >= 10) {
+      const preview = text.length > 100 ? `${text.slice(0, 100)}…` : text
+      return {
+        replyText: `I understand — "${preview}". Which locality or landmark is this in? (city, ward, or pin code)`,
+        draftUpdates: { issue_text: text, issue_text_native: text },
+        readyToFile: false,
+      }
+    }
     return {
-      replyText: `Ready to register:\n• Issue: ${issue.slice(0, 300)}\n• Location: ${location}\n\nReply *yes* to submit.`,
+      replyText:
+        'Tell me what civic problem you are facing (for example: broken road, blocked drainage, no water).',
       draftUpdates: {},
-      readyToFile: true,
+      readyToFile: false,
+    }
+  }
+
+  if (!location) {
+    if (text.length >= 4) {
+      return {
+        replyText: `Noted your issue. Location: ${text}.\n\nReply *yes* to submit, or add more detail.`,
+        draftUpdates: { location_text: text },
+        readyToFile: true,
+      }
+    }
+    return {
+      replyText: `Got it: "${issue.slice(0, 120)}${issue.length > 120 ? '…' : ''}". Where is this — locality, landmark, or pin code?`,
+      draftUpdates: {},
+      readyToFile: false,
     }
   }
 
   return {
-    replyText:
-      'Hi! I help report civic issues (roads, drainage, water, etc.) to your local team. What problem are you facing?',
+    replyText: `Ready to register:\n• Issue: ${issue.slice(0, 300)}\n• Location: ${location}\n\nReply *yes* to submit.`,
     draftUpdates: {},
-    readyToFile: false,
+    readyToFile: true,
   }
 }
 
 async function persistMeta(ctx: AiFlowContext, step: WhatsAppAiStep, meta: WhatsAppConversationMeta) {
-  await ctx.supabase
+  const payload: WhatsAppConversationMeta = {
+    history: meta.history ?? [],
+    aiDraft: meta.aiDraft ?? {},
+    draft: meta.draft ?? {},
+    last_ticket_number: meta.last_ticket_number ?? null,
+  }
+  const { error } = await ctx.supabase
     .from('channel_conversations')
     .update({
       current_step: step,
       state: step === 'post_ticket' ? 'follow_up' : 'intake',
-      metadata_json: meta,
+      metadata_json: payload,
       last_activity_at: new Date().toISOString(),
     })
     .eq('id', ctx.conversationId)
+  if (error) {
+    console.error('[whatsappAiFlow] persistMeta failed:', error.message, { conversationId: ctx.conversationId })
+  }
   ctx.currentStep = step
-  ctx.meta = meta
+  ctx.meta = payload
 }
 
 async function replyStatus(ctx: AiFlowContext, ticketNumber: string | null) {
@@ -343,6 +398,7 @@ async function finalizeTicket(ctx: AiFlowContext, aiDraft: AiDraftState) {
 }
 
 export async function handleInboundMessageAi(ctx: AiFlowContext): Promise<void> {
+  ctx.meta = hydrateConversationMeta(ctx.meta)
   const text = (ctx.msg.text ?? '').trim()
 
   if (isCommand(text, '/cancel') || words.isNo(text)) {
@@ -380,7 +436,14 @@ export async function handleInboundMessageAi(ctx: AiFlowContext): Promise<void> 
 
   if (response._meta?.fallback) {
     const err = response._meta.error ?? 'unknown'
-    console.error('[whatsappAiFlow] OpenRouter fallback:', err)
+    console.error(
+      '[whatsappAiFlow] OpenRouter fallback:',
+      err,
+      '| model:',
+      process.env.OPENROUTER_MODEL ?? '(default)',
+      '| history turns:',
+      history.length,
+    )
     const local = localIntakeFallback(userContent, ctx.meta.aiDraft ?? {})
     response = {
       ...response,

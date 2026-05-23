@@ -15,6 +15,7 @@ import {
 } from '@/services/whatsappFlow.js'
 import {
   handleInboundMessageAi,
+  hydrateConversationMeta,
   isWhatsAppAiIntakeEnabled,
   type WhatsAppAiStep,
   type WhatsAppConversationMeta,
@@ -125,7 +126,9 @@ router.post('/', async (req, res) => {
       .single()
 
     const useAi = isWhatsAppAiIntakeEnabled()
-    const metaJson = (conv?.metadata_json ?? {}) as WhatsAppConversationMeta & { draft?: Draft }
+    const metaJson = hydrateConversationMeta(
+      (conv?.metadata_json ?? {}) as WhatsAppConversationMeta & { draft?: Draft },
+    )
     const currentStep: Step = (conv?.current_step as Step) || 'idle'
     const draft: Draft = metaJson.draft ?? {}
 

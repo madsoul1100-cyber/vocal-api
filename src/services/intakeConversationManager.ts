@@ -35,7 +35,12 @@ import { tenantApp, tenantParty, tenantGeography, tenantLanguage, tenantCivicSco
 
 const OPENROUTER_BASE_URL = process.env.OPENROUTER_BASE_URL ?? 'https://openrouter.ai/api/v1'
 const OPENROUTER_API_KEY  = process.env.OPENROUTER_API_KEY ?? ''
-const OPENROUTER_MODEL    = process.env.OPENROUTER_MODEL ?? 'google/gemini-2.5-flash'
+const RAW_OPENROUTER_MODEL = process.env.OPENROUTER_MODEL ?? 'google/gemini-2.5-flash'
+/** Invalid preview slug returns OpenRouter 400 — normalize so WhatsApp/Telegram intake does not loop. */
+const OPENROUTER_MODEL =
+  RAW_OPENROUTER_MODEL.includes('flash-preview') || RAW_OPENROUTER_MODEL.includes('gemini-2.5-flash-preview')
+    ? 'google/gemini-2.5-flash'
+    : RAW_OPENROUTER_MODEL
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
