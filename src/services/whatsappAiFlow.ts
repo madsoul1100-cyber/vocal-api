@@ -109,6 +109,62 @@ function trimHistory(history: ConversationTurn[]): ConversationTurn[] {
   return history.slice(-MAX_HISTORY_TURNS)
 }
 
+/** When OpenRouter fails — still progress the conversation from accumulated draft + message. */
+function localIntakeFallback(
+  userContent: string,
+  draft: AiDraftState,
+): {
+  replyText: string
+  draftUpdates: IntakeResponse['draftUpdates']
+  readyToFile: boolean
+} {
+  const text = userContent.trim()
+  const issue = (draft.issue_text_native ?? draft.issue_text ?? '').trim()
+  const location = (draft.location_text ?? '').trim()
+  const looksLikeLocation =
+    /\b\d{6}\b/i.test(text) ||
+    /\b(kanpur|nagar|ward|colony|pin|live in|area|road|street)\b/i.test(text)
+
+  if (!issue && text.length > 8 && !looksLikeLocation) {
+    return {
+      replyText: `Thanks for sharing that. I've noted your concern. Which area is this in — locality, landmark, or pin code?`,
+      draftUpdates: { issue_text: text, issue_text_native: text },
+      readyToFile: false,
+    }
+  }
+
+  if (issue && !location && looksLikeLocation) {
+    return {
+      replyText: `Got it — problem: ${issue.slice(0, 200)}. Location: ${text}. Reply *yes* to submit to your local team, or send more details.`,
+      draftUpdates: { location_text: text },
+      readyToFile: true,
+    }
+  }
+
+  if (issue && !location) {
+    return {
+      replyText: `Understood about "${issue.slice(0, 120)}${issue.length > 120 ? '…' : ''}". Where is this happening? (area, landmark, or pin code)`,
+      draftUpdates: {},
+      readyToFile: false,
+    }
+  }
+
+  if (issue && location) {
+    return {
+      replyText: `Ready to register:\n• Issue: ${issue.slice(0, 300)}\n• Location: ${location}\n\nReply *yes* to submit.`,
+      draftUpdates: {},
+      readyToFile: true,
+    }
+  }
+
+  return {
+    replyText:
+      'Hi! I help report civic issues (roads, drainage, water, etc.) to your local team. What problem are you facing?',
+    draftUpdates: {},
+    readyToFile: false,
+  }
+}
+
 async function persistMeta(ctx: AiFlowContext, step: WhatsAppAiStep, meta: WhatsAppConversationMeta) {
   await ctx.supabase
     .from('channel_conversations')
@@ -304,26 +360,44 @@ export async function handleInboundMessageAi(ctx: AiFlowContext): Promise<void> 
     return
   }
 
+  const existingDraft = ctx.meta.aiDraft ?? {}
+  if (words.isYes(text)) {
+    const issue = (existingDraft.issue_text_native ?? existingDraft.issue_text ?? '').trim()
+    if (issue) {
+      await finalizeTicket(ctx, existingDraft)
+      return
+    }
+  }
+
   const userContent = buildUserContent(ctx)
   const history = ctx.meta.history ?? []
 
-  const response = await processInbound({
+  let response = await processInbound({
     history,
     newMessage: { text: userContent },
     existingDraft: (ctx.meta.aiDraft ?? {}) as Record<string, unknown>,
   })
 
+  if (response._meta?.fallback) {
+    const err = response._meta.error ?? 'unknown'
+    console.error('[whatsappAiFlow] OpenRouter fallback:', err)
+    const local = localIntakeFallback(userContent, ctx.meta.aiDraft ?? {})
+    response = {
+      ...response,
+      replyText: local.replyText,
+      draftUpdates: local.draftUpdates,
+      readyToFile: local.readyToFile,
+      scopeAssessment: 'needs_review',
+      intent: 'civic_issue',
+    }
+  }
+
   const aiDraft = mergeAiDraft(ctx.meta.aiDraft ?? {}, response.draftUpdates, ctx)
   aiDraft.scope_assessment = response.scopeAssessment
 
-  let assistantText =
+  const assistantText =
     response.replyText?.trim() ||
     'Tell me more about what happened — I am here to help you report it to the right people.'
-
-  if (response._meta?.fallback) {
-    assistantText =
-      'Hi! I help you report civic issues to your local team. Tell me what problem you are facing and where it is happening.'
-  }
 
   const updatedHistory = trimHistory([
     ...history,
