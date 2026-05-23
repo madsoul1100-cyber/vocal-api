@@ -53,6 +53,42 @@ export const SQL_TICKET_STAGE_HISTORY = `
   LEFT JOIN users u ON u.id = h.changed_by
 `
 
+/** Full staff row for GET/PATCH /workers/:id (edit form). */
+export const SQL_WORKER_DETAIL = `
+  SELECT
+    u.id,
+    u.full_name,
+    u.phone,
+    u.email,
+    u.active,
+    u.approved_at,
+    u.last_login_at,
+    u.created_at,
+    u.role_id,
+    u.clerk_user_id,
+    u.notes,
+    u.image_url,
+    u.kyc_documents,
+    jsonb_build_object('name', r.name, 'display_name', r.display_name) AS roles,
+    COALESCE(
+      jsonb_agg(
+        jsonb_build_object(
+          'territory_id', ut.territory_id,
+          'is_primary', ut.is_primary,
+          'territories', CASE
+            WHEN tr.id IS NOT NULL THEN jsonb_build_object('id', tr.id, 'name', tr.name)
+            ELSE NULL
+          END
+        )
+      ) FILTER (WHERE ut.territory_id IS NOT NULL),
+      '[]'::jsonb
+    ) AS user_territories
+  FROM users u
+  INNER JOIN roles r ON r.id = u.role_id
+  LEFT JOIN user_territories ut ON ut.user_id = u.id
+  LEFT JOIN territories tr ON tr.id = ut.territory_id
+`
+
 export const SQL_WORKERS_WITH_TERRITORIES = `
   SELECT
     u.id, u.full_name,

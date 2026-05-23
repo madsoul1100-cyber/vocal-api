@@ -4,9 +4,11 @@
  */
 
 import crypto from 'node:crypto'
+import fs from 'node:fs/promises'
 import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { GetObjectCommand } from '@aws-sdk/client-s3'
+import { localStoragePath } from '@/lib/postgresCompat/storage.js'
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
 import {
   STAFF_KYC_FILE_MAX_BYTES,
@@ -152,9 +154,17 @@ export async function uploadStaffKycDocument(args: {
   mime: string
   originalName: string
 }): Promise<StaffKycDocument | { error: string }> {
-  const mime = args.mime === 'application/octet-stream' ? 'application/pdf' : args.mime
+  let mime = args.mime === 'application/octet-stream' ? 'application/pdf' : args.mime
+  const lowerName = args.originalName.toLowerCase()
+  if (mime === 'application/octet-stream') {
+    if (lowerName.endsWith('.pdf')) mime = 'application/pdf'
+    else if (lowerName.endsWith('.doc')) mime = 'application/msword'
+    else if (lowerName.endsWith('.docx')) {
+      mime = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    }
+  }
   if (!KYC_MIMES.has(mime)) {
-    return { error: `File type not allowed: ${args.mime}` }
+    return { error: `File type not allowed: ${args.mime}. Use PDF, Word, or images.` }
   }
   if (args.buffer.length > STAFF_KYC_FILE_MAX_BYTES) {
     return { error: 'Each KYC document must be under 10 MB' }
@@ -204,4 +214,69 @@ export async function signedUrlForStaffStorage(
 
 export function staffStorageBackend(): 's3' | 'supabase' {
   return isS3Configured() ? 's3' : 'supabase'
+}
+
+/** Read object bytes for API streaming (local bucket or S3). */
+export async function readStaffStorageObject(
+  storagePath: string,
+): Promise<{ data: Buffer; contentType: string } | null> {
+  const { backend, key } = parseStorageRef(storagePath)
+
+  if (backend === 's3') {
+    if (!isS3Configured()) return null
+    try {
+      const res = await s3Client().send(
+        new GetObjectCommand({ Bucket: process.env.AWS_S3_BUCKET!, Key: key }),
+      )
+      const body = res.Body
+      if (!body) return null
+      const bytes = await body.transformToByteArray()
+      return {
+        data: Buffer.from(bytes),
+        contentType: res.ContentType ?? 'application/octet-stream',
+      }
+    } catch {
+      return null
+    }
+  }
+
+  try {
+    const full = localStoragePath(SUPABASE_BUCKET, key)
+    const data = await fs.readFile(full)
+    const ext = key.split('.').pop()?.split('--')[0]?.toLowerCase() ?? ''
+    const mimeByExt: Record<string, string> = {
+      jpg: 'image/jpeg',
+      jpeg: 'image/jpeg',
+      png: 'image/png',
+      webp: 'image/webp',
+      gif: 'image/gif',
+      pdf: 'application/pdf',
+    }
+    return { data, contentType: mimeByExt[ext] ?? 'application/octet-stream' }
+  } catch {
+    const supabase = createSupabaseServiceClient()
+    const { data, error } = await supabase.storage.from(SUPABASE_BUCKET).download(key)
+    if (error || !data) return null
+    const buf = Buffer.from(await data.arrayBuffer())
+    return { data: buf, contentType: data.type || 'application/octet-stream' }
+  }
+}
+
+export async function enrichStaffMediaUrls<T extends {
+  image_url: string | null
+  kyc_documents: StaffKycDocument[]
+}>(row: T): Promise<
+  T & {
+    profile_image_url: string | null
+    kyc_documents: (StaffKycDocument & { download_url: string | null })[]
+  }
+> {
+  const profile_image_url = await signedUrlForStaffStorage(row.image_url)
+  const kyc_documents = await Promise.all(
+    row.kyc_documents.map(async (doc) => ({
+      ...doc,
+      download_url: await signedUrlForStaffStorage(doc.storage_path),
+    })),
+  )
+  return { ...row, profile_image_url, kyc_documents }
 }

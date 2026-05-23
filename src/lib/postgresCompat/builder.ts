@@ -3,6 +3,7 @@ import {
   SQL_TICKET_DETAIL,
   SQL_TICKET_LIST,
   SQL_TICKET_STAGE_HISTORY,
+  SQL_WORKER_DETAIL,
   SQL_WORKERS_WITH_TERRITORIES,
   sqlForUserWithRelations,
 } from '@/lib/postgresCompat/embedSql.js'
@@ -25,6 +26,31 @@ function snakeCols(cols: string): string {
     .map((c) => c.trim())
     .filter(Boolean)
     .join(', ')
+}
+
+const JSONB_COLUMN_NAMES = new Set([
+  'kyc_documents',
+  'metadata_json',
+  'new_value_json',
+  'old_value_json',
+  'ai_suggestion_json',
+  'context_json',
+])
+
+function isJsonbColumn(col: string): boolean {
+  return JSONB_COLUMN_NAMES.has(col) || col.endsWith('_json')
+}
+
+/** Serialize objects/arrays for PostgreSQL jsonb columns (node-pg + raw SQL). */
+function formatPgValue(val: unknown, col: string): unknown {
+  if (val === null || val === undefined) return val
+  if (!isJsonbColumn(col)) return val
+  if (typeof val === 'string') return val
+  return JSON.stringify(val)
+}
+
+function setClauseFragment(col: string, paramIndex: number): string {
+  return isJsonbColumn(col) ? `${col} = $${paramIndex}::jsonb` : `${col} = $${paramIndex}`
 }
 
 function buildWhere(filters: Filter[], startIdx = 1): { sql: string; params: unknown[] } {
@@ -85,6 +111,13 @@ function matchEmbedSelect(table: string, select: string): string | null {
   if (table === 'tickets' && s.includes('territories(id, name)') && s.includes('ticket_number')) {
     return 'TICKET_LIST'
   }
+  if (
+    table === 'users' &&
+    s.includes('user_territories(') &&
+    (s.includes('kyc_documents') || s.includes('territories(id, name)'))
+  ) {
+    return 'WORKER_DETAIL'
+  }
   if (table === 'users' && s.includes('user_territories(')) {
     return 'WORKERS_TERRITORIES'
   }
@@ -139,6 +172,7 @@ export class PostgresTableQuery<T = Record<string, unknown>> {
   private updateRow?: Record<string, unknown>
   private upsertRow?: Record<string, unknown>
   private upsertConflict?: string
+  private wantDelete = false
 
   constructor(
     private table: string,
@@ -165,6 +199,11 @@ export class PostgresTableQuery<T = Record<string, unknown>> {
   upsert(row: Record<string, unknown>, opts?: { onConflict?: string }) {
     this.upsertRow = row
     this.upsertConflict = opts?.onConflict
+    return this
+  }
+
+  delete() {
+    this.wantDelete = true
     return this
   }
 
@@ -256,6 +295,7 @@ export class PostgresTableQuery<T = Record<string, unknown>> {
 
   async execute(): Promise<DbResult<T>> {
     try {
+      if (this.wantDelete) return await this.runDelete()
       if (this.insertRow) return await this.runInsert()
       if (this.updateRow) return await this.runUpdate()
       if (this.upsertRow) return await this.runUpsert()
@@ -275,8 +315,12 @@ export class PostgresTableQuery<T = Record<string, unknown>> {
     const params: unknown[] = []
     let p = 1
     for (const r of rows) {
-      valuesClause.push(`(${cols.map(() => `$${p++}`).join(', ')})`)
-      params.push(...cols.map((c) => r[c]))
+      const placeholders: string[] = []
+      for (const c of cols) {
+        placeholders.push(isJsonbColumn(c) ? `$${p++}::jsonb` : `$${p++}`)
+        params.push(formatPgValue(r[c], c))
+      }
+      valuesClause.push(`(${placeholders.join(', ')})`)
     }
     const returning = this.selectCols !== '*' ? ` RETURNING ${snakeCols(this.selectCols)}` : ' RETURNING *'
     const sql = `INSERT INTO ${this.table} (${cols.join(', ')}) VALUES ${valuesClause.join(', ')}${returning}`
@@ -293,11 +337,18 @@ export class PostgresTableQuery<T = Record<string, unknown>> {
   private async runUpdate(): Promise<DbResult<T>> {
     const row = this.updateRow!
     const cols = Object.keys(row)
-    const vals = Object.values(row)
-    const set = cols.map((c, i) => `${c} = $${i + 1}`).join(', ')
+    const vals = cols.map((c) => formatPgValue(row[c], c))
+    const set = cols.map((c, i) => setClauseFragment(c, i + 1)).join(', ')
     const { sql: where, params: wParams } = buildWhere(this.filters, vals.length + 1)
     const sql = `UPDATE ${this.table} SET ${set} WHERE ${where}`
     await dbQuery(sql, [...vals, ...wParams])
+    return { data: null, error: null }
+  }
+
+  private async runDelete(): Promise<DbResult<T>> {
+    const { sql: where, params } = buildWhere(this.filters)
+    const sql = `DELETE FROM ${this.table} WHERE ${where}`
+    await dbQuery(sql, params)
     return { data: null, error: null }
   }
 
@@ -305,15 +356,17 @@ export class PostgresTableQuery<T = Record<string, unknown>> {
     const row = this.upsertRow!
     const conflict = this.upsertConflict ?? 'id'
     const cols = Object.keys(row)
-    const vals = Object.values(row)
-    const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ')
+    const params = cols.map((c) => formatPgValue(row[c], c))
+    const placeholders = cols
+      .map((c, i) => (isJsonbColumn(c) ? `$${i + 1}::jsonb` : `$${i + 1}`))
+      .join(', ')
     const updates = cols.filter((c) => c !== conflict).map((c) => `${c} = EXCLUDED.${c}`).join(', ')
     const sql = `
       INSERT INTO ${this.table} (${cols.join(', ')})
       VALUES (${placeholders})
       ON CONFLICT (${conflict}) DO UPDATE SET ${updates}
     `
-    await dbQuery(sql, vals)
+    await dbQuery(sql, params)
     return { data: null, error: null }
   }
 
@@ -357,6 +410,13 @@ export class PostgresTableQuery<T = Record<string, unknown>> {
     if (embed === 'TICKET_DETAIL') {
       const { sql: where, params } = buildWhere(this.prefixWhere('t'))
       baseSql = `${SQL_TICKET_DETAIL} WHERE ${where}`
+      const res = await dbQuery(baseSql, params)
+      return this.finishSelect(res.rows as T[], res.rowCount)
+    }
+
+    if (embed === 'WORKER_DETAIL') {
+      const { sql: where, params } = buildWhere(this.prefixWhere('u'))
+      baseSql = `${SQL_WORKER_DETAIL} WHERE ${where} GROUP BY u.id, r.id`
       const res = await dbQuery(baseSql, params)
       return this.finishSelect(res.rows as T[], res.rowCount)
     }

@@ -1,6 +1,7 @@
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
 import { isPostgresMode, dbQuery } from '@/lib/db.js'
 import { hashPassword } from '@/services/authService.js'
+import { normalizePhone } from '@/services/otpService.js'
 import {
   canApproveStaffCreation,
   canAssignRoleLevel,
@@ -12,7 +13,11 @@ import {
   type StaffCategoryCounts,
   type StaffStatus,
 } from '@/lib/staffStatus.js'
-import type { StaffKycDocument } from '@/types/staffDocuments.js'
+import { sanitizeKycDocumentsForDb, type StaffKycDocument } from '@/types/staffDocuments.js'
+import {
+  enrichStaffMediaUrls,
+  readStaffStorageObject,
+} from '@/services/staffStorageService.js'
 
 export type { StaffStatus, StaffCategoryCounts }
 
@@ -176,12 +181,15 @@ export interface WorkerTerritoryRef {
   is_primary: boolean
 }
 
+export type StaffKycDocumentWithUrl = StaffKycDocument & { download_url: string | null }
+
 export interface WorkerDetailRow extends WorkerRow {
   role_id: string
   clerk_user_id: string | null
   notes: string | null
   image_url: string | null
-  kyc_documents: StaffKycDocument[]
+  profile_image_url: string | null
+  kyc_documents: StaffKycDocumentWithUrl[]
   territories: WorkerTerritoryRef[]
 }
 
@@ -749,15 +757,7 @@ function parseStaffProfileFromBody(body: Record<string, unknown>): {
   const notes = cleanNotes(body.notes)
   const image_url =
     typeof body.image_url === 'string' && body.image_url.trim() ? body.image_url.trim() : null
-  let kyc_documents: StaffKycDocument[] = []
-  if (Array.isArray(body.kyc_documents)) {
-    kyc_documents = body.kyc_documents.filter(
-      (d): d is StaffKycDocument =>
-        typeof d === 'object' &&
-        d !== null &&
-        typeof (d as StaffKycDocument).storage_path === 'string',
-    )
-  }
+  const kyc_documents = sanitizeKycDocumentsForDb(body.kyc_documents)
   return { notes, image_url, kyc_documents }
 }
 
@@ -1058,8 +1058,9 @@ function mapWorkerDetailRow(raw: Record<string, unknown>): WorkerDetailRow {
     notes: (raw.notes as string | null) ?? null,
     image_url: (raw.image_url as string | null) ?? null,
     kyc_documents: Array.isArray(raw.kyc_documents)
-      ? (raw.kyc_documents as StaffKycDocument[])
+      ? (raw.kyc_documents as StaffKycDocument[]).map((d) => ({ ...d, download_url: null }))
       : [],
+    profile_image_url: null,
     roles: rolesRaw?.name
       ? { name: rolesRaw.name, display_name: rolesRaw.display_name ?? null }
       : null,
@@ -1099,7 +1100,64 @@ export async function getOrgUserById(
   if (!row) {
     return { ok: false as const, status: 404, error: 'User not found' }
   }
-  return { ok: true as const, worker: row }
+  const worker = await enrichStaffMediaUrls(row)
+  return { ok: true as const, worker }
+}
+
+export async function streamWorkerStaffMedia(
+  actor: { organization_id: string; roles?: { name: string } | null },
+  userId: string,
+  kind: 'profile' | 'kyc',
+  docIndex?: number,
+): Promise<
+  | { ok: true; data: Buffer; contentType: string; fileName?: string }
+  | { ok: false; status: number; error: string }
+> {
+  if (!canAccessWorkersPage(actor.roles?.name)) {
+    return { ok: false, status: 403, error: 'Insufficient role' }
+  }
+
+  const row = await loadOrgUserRow(actor.organization_id, userId)
+  if (row && 'error' in row) {
+    return { ok: false, status: 500, error: row.error }
+  }
+  if (!row) {
+    return { ok: false, status: 404, error: 'User not found' }
+  }
+
+  let storagePath: string | null = null
+  let fileName: string | undefined
+  let contentType: string | undefined
+
+  if (kind === 'profile') {
+    storagePath = row.image_url
+    fileName = 'profile.jpg'
+  } else {
+    const idx = docIndex ?? -1
+    const doc = row.kyc_documents[idx]
+    if (!doc) {
+      return { ok: false, status: 404, error: 'KYC document not found' }
+    }
+    storagePath = doc.storage_path
+    fileName = doc.file_name
+    contentType = doc.mime_type ?? undefined
+  }
+
+  if (!storagePath) {
+    return { ok: false, status: 404, error: 'No file on record' }
+  }
+
+  const file = await readStaffStorageObject(storagePath)
+  if (!file) {
+    return { ok: false, status: 404, error: 'File could not be read from storage' }
+  }
+
+  return {
+    ok: true,
+    data: file.data,
+    contentType: contentType ?? file.contentType,
+    fileName,
+  }
 }
 
 async function syncUserPrimaryTerritory(
@@ -1163,7 +1221,8 @@ export async function updateOrgUser(
   }
 
   if ('phone' in body) {
-    const phone = clean(body.phone, 40)
+    const phoneRaw = clean(body.phone, 40)
+    const phone = phoneRaw ? normalizePhone(phoneRaw) ?? phoneRaw : null
     if (phone) {
       const { data: existingPhone } = await supabase
         .from('users')
@@ -1221,15 +1280,50 @@ export async function updateOrgUser(
     auditChanges.role_id = role_id
   }
 
-  if ('active' in body) {
+  const canApprove = AUTO_APPROVE_ROLES.includes(actor.roles?.name ?? '')
+
+  if ('staff_status' in body) {
+    const raw = typeof body.staff_status === 'string' ? body.staff_status.trim().toLowerCase() : ''
+    if (raw !== 'active' && raw !== 'pending' && raw !== 'inactive') {
+      return { ok: false as const, status: 400, error: 'staff_status must be active, pending, or inactive' }
+    }
+
+    if (raw === 'inactive') {
+      updates.active = false
+      auditChanges.staff_status = raw
+    } else if (raw === 'pending') {
+      if (!canApprove) {
+        return {
+          ok: false as const,
+          status: 403,
+          error: 'Only Super Admin or Central Support can set pending status',
+        }
+      }
+      updates.active = true
+      updates.approved_at = null
+      updates.approved_by = null
+      auditChanges.staff_status = raw
+    } else {
+      updates.active = true
+      if (current.approved_at) {
+        auditChanges.staff_status = raw
+      } else if (canApprove) {
+        updates.approved_by = actor.id
+        updates.approved_at = now
+        auditChanges.staff_status = raw
+      } else {
+        return {
+          ok: false as const,
+          status: 403,
+          error: 'Only Super Admin or Central Support can approve and activate workers',
+        }
+      }
+    }
+  } else if ('active' in body) {
     const active = body.active === true || body.active === 'true' || body.active === 'on'
     updates.active = active
     auditChanges.active = active
-    if (
-      active &&
-      AUTO_APPROVE_ROLES.includes(actor.roles?.name ?? '') &&
-      (!current.approved_at || !current.active)
-    ) {
+    if (active && canApprove && (!current.approved_at || !current.active)) {
       updates.approved_by = actor.id
       updates.approved_at = now
     }
@@ -1247,9 +1341,10 @@ export async function updateOrgUser(
     auditChanges.image_url = image_url
   }
 
-  if ('kyc_documents' in body && Array.isArray(body.kyc_documents)) {
-    updates.kyc_documents = body.kyc_documents
-    auditChanges.kyc_documents = body.kyc_documents
+  if ('kyc_documents' in body) {
+    const kyc_documents = sanitizeKycDocumentsForDb(body.kyc_documents)
+    updates.kyc_documents = kyc_documents
+    auditChanges.kyc_documents = kyc_documents
   }
 
   if ('password' in body) {
@@ -1329,7 +1424,8 @@ export async function updateOrgUser(
     return { ok: false as const, status: 500, error: 'User updated but reload failed' }
   }
 
-  return { ok: true as const, worker: refreshed }
+  const worker = await enrichStaffMediaUrls(refreshed)
+  return { ok: true as const, worker }
 }
 
 /** Soft-deactivate staff (sets active=false; does not delete the users row). */
