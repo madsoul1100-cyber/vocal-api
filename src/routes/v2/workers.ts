@@ -18,6 +18,7 @@ import {
   updateOrgUser,
   workersV2FiltersEcho,
 } from '@/services/workersManagementService.js'
+import { createOrgTerritory } from '@/services/territoryService.js'
 
 const router = Router()
 
@@ -53,6 +54,17 @@ router.get('/', requireAuth, async (req, res) => {
     const message = err instanceof Error ? err.message : 'Workers list failed'
     res.status(500).json({ error: message })
   }
+})
+
+router.post('/territories', requireAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
+  const name = typeof req.body?.name === 'string' ? req.body.name : ''
+  const result = await createOrgTerritory(user, name)
+  if (!result.ok) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+  res.status(201).json({ ok: true, territory: result.territory })
 })
 
 router.post('/', requireAuth, workersCreateUpload, async (req, res) => {

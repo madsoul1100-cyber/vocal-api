@@ -18,6 +18,7 @@ import {
   enrichStaffMediaUrls,
   readStaffStorageObject,
 } from '@/services/staffStorageService.js'
+import { listOrgTerritories, validateTerritoryIdsForOrg } from '@/services/territoryService.js'
 
 export type { StaffStatus, StaffCategoryCounts }
 
@@ -729,20 +730,52 @@ export async function getWorkersPageData(
 }
 
 async function listTerritories(orgId: string): Promise<TerritoryOption[]> {
-  if (isPostgresMode()) {
-    const res = await dbQuery<TerritoryOption>(
-      `SELECT id, name FROM territories WHERE organization_id = $1 ORDER BY name ASC`,
-      [orgId],
-    )
-    return res.rows
+  return listOrgTerritories(orgId)
+}
+
+/** Parse territory_ids from multipart/JSON body (supports legacy territory_id). */
+export function parseTerritoryIdsFromBody(body: Record<string, unknown>): string[] {
+  const ids: string[] = []
+  const raw = body.territory_ids
+
+  if (typeof raw === 'string' && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw) as unknown
+      if (Array.isArray(parsed)) {
+        for (const item of parsed) {
+          if (typeof item === 'string' && item.trim()) ids.push(item.trim())
+        }
+      }
+    } catch {
+      for (const part of raw.split(',')) {
+        const t = part.trim()
+        if (t) ids.push(t)
+      }
+    }
+  } else if (Array.isArray(raw)) {
+    for (const item of raw) {
+      if (typeof item === 'string' && item.trim()) ids.push(item.trim())
+    }
   }
-  const supabase = createSupabaseServiceClient()
-  const { data } = await supabase
-    .from('territories')
-    .select('id, name')
-    .eq('organization_id', orgId)
-    .order('name', { ascending: true })
-  return (data ?? []) as TerritoryOption[]
+
+  if (ids.length === 0) {
+    const legacy = body.territory_id
+    if (typeof legacy === 'string' && legacy.trim()) ids.push(legacy.trim())
+  }
+
+  return [...new Set(ids)]
+}
+
+function resolvePrimaryTerritoryId(
+  body: Record<string, unknown>,
+  territoryIds: string[],
+): string | null {
+  const raw = body.primary_territory_id
+  if (typeof raw === 'string' && raw.trim()) {
+    const id = raw.trim()
+    if (territoryIds.includes(id)) return id
+  }
+  return territoryIds[0] ?? null
 }
 
 function cleanNotes(raw: unknown): string | null {
@@ -873,27 +906,21 @@ export async function createOrgUser(
         : null
 
   const active = body.active === true || body.active === 'true' || body.active === 'on'
-  const territory_id =
-    typeof body.territory_id === 'string' && body.territory_id.trim()
-      ? body.territory_id.trim()
-      : null
+  const territoryIdsParsed = parseTerritoryIdsFromBody(body)
+  const territoryCheck = await validateTerritoryIdsForOrg(
+    user.organization_id,
+    territoryIdsParsed,
+  )
+  if (!territoryCheck.ok) {
+    return { ok: false as const, status: 400, error: territoryCheck.error }
+  }
+  const territory_ids = territoryCheck.ids
+  const territory_id = resolvePrimaryTerritoryId(body, territory_ids)
 
   const profile = parseStaffProfileFromBody(body)
 
   const supabase = createSupabaseServiceClient()
   const now = new Date().toISOString()
-
-  if (territory_id) {
-    const { data: territory } = await supabase
-      .from('territories')
-      .select('id')
-      .eq('id', territory_id)
-      .eq('organization_id', user.organization_id)
-      .maybeSingle()
-    if (!territory) {
-      return { ok: false as const, status: 400, error: 'Invalid territory' }
-    }
-  }
 
   if (!email) {
     return { ok: false as const, status: 400, error: 'email is required for sign-in' }
@@ -939,6 +966,7 @@ export async function createOrgUser(
         kyc_documents: profile.kyc_documents,
         active_requested: active,
         status: 'pending',
+        metadata_json: territory_ids.length ? { territory_ids } : null,
       })
       .select('id')
       .single()
@@ -993,13 +1021,7 @@ export async function createOrgUser(
     return { ok: false as const, status: 500, error: error?.message ?? 'Insert failed' }
   }
 
-  if (territory_id) {
-    await supabase.from('user_territories').insert({
-      user_id: data.id,
-      territory_id,
-      is_primary: true,
-    })
-  }
+  await syncUserTerritories(user.organization_id, data.id as string, territory_ids, territory_id)
 
   await supabase.from('audit_logs').insert({
     organization_id: user.organization_id,
@@ -1008,7 +1030,7 @@ export async function createOrgUser(
     entity_id: data.id,
     actor_type: 'user',
     actor_user_id: user.id,
-    new_value_json: { full_name, phone, email, role_id, active },
+    new_value_json: { full_name, phone, email, role_id, active, territory_ids },
   })
 
   return { ok: true as const, id: data.id as string, pending_approval: false as const }
@@ -1160,30 +1182,29 @@ export async function streamWorkerStaffMedia(
   }
 }
 
-async function syncUserPrimaryTerritory(
+async function syncUserTerritories(
   orgId: string,
   userId: string,
-  territoryId: string | null,
+  territoryIds: string[],
+  primaryTerritoryId: string | null,
 ) {
   const supabase = createSupabaseServiceClient()
   await supabase.from('user_territories').delete().eq('user_id', userId)
 
-  if (!territoryId) return
+  if (territoryIds.length === 0) return
 
-  const { data: territory } = await supabase
-    .from('territories')
-    .select('id')
-    .eq('id', territoryId)
-    .eq('organization_id', orgId)
-    .maybeSingle()
+  const primary =
+    primaryTerritoryId && territoryIds.includes(primaryTerritoryId)
+      ? primaryTerritoryId
+      : territoryIds[0]!
 
-  if (!territory) return
-
-  await supabase.from('user_territories').insert({
-    user_id: userId,
-    territory_id: territoryId,
-    is_primary: true,
-  })
+  for (const territory_id of territoryIds) {
+    await supabase.from('user_territories').insert({
+      user_id: userId,
+      territory_id,
+      is_primary: territory_id === primary,
+    })
+  }
 }
 
 export async function updateOrgUser(
@@ -1366,30 +1387,22 @@ export async function updateOrgUser(
     }
   }
 
-  const territoryInBody = 'territory_id' in body
-  let territoryId: string | null | undefined
-  if (territoryInBody) {
-    territoryId =
-      typeof body.territory_id === 'string' && body.territory_id.trim()
-        ? body.territory_id.trim()
-        : null
-    if (territoryId) {
-      const { data: territory } = await supabase
-        .from('territories')
-        .select('id')
-        .eq('id', territoryId)
-        .eq('organization_id', actor.organization_id)
-        .maybeSingle()
-      if (!territory) {
-        return { ok: false as const, status: 400, error: 'Invalid territory' }
-      }
-      auditChanges.territory_id = territoryId
-    } else {
-      auditChanges.territory_id = null
+  const territoriesInBody = 'territory_ids' in body || 'territory_id' in body
+  let territoryIdsToSync: string[] | undefined
+  let primaryTerritoryId: string | null | undefined
+  if (territoriesInBody) {
+    const parsed = parseTerritoryIdsFromBody(body)
+    const territoryCheck = await validateTerritoryIdsForOrg(actor.organization_id, parsed)
+    if (!territoryCheck.ok) {
+      return { ok: false as const, status: 400, error: territoryCheck.error }
     }
+    territoryIdsToSync = territoryCheck.ids
+    primaryTerritoryId = resolvePrimaryTerritoryId(body, territoryIdsToSync)
+    auditChanges.territory_ids = territoryIdsToSync
+    auditChanges.primary_territory_id = primaryTerritoryId
   }
 
-  if (Object.keys(updates).length === 1 && !territoryInBody) {
+  if (Object.keys(updates).length === 1 && !territoriesInBody) {
     return { ok: false as const, status: 400, error: 'No fields to update' }
   }
 
@@ -1403,8 +1416,13 @@ export async function updateOrgUser(
     if (error) return { ok: false as const, status: 500, error: error.message }
   }
 
-  if (territoryInBody) {
-    await syncUserPrimaryTerritory(actor.organization_id, userId, territoryId ?? null)
+  if (territoriesInBody && territoryIdsToSync !== undefined) {
+    await syncUserTerritories(
+      actor.organization_id,
+      userId,
+      territoryIdsToSync,
+      primaryTerritoryId ?? null,
+    )
   }
 
   if (Object.keys(auditChanges).length > 0) {
@@ -1506,7 +1524,7 @@ export async function processActivationRequest(
   const { data: request } = await supabase
     .from('worker_activation_requests')
     .select(
-      'id, organization_id, status, full_name, phone, email, territory_id, role_id, password_hash, notes, image_url, kyc_documents, active_requested',
+      'id, organization_id, status, full_name, phone, email, territory_id, role_id, password_hash, notes, image_url, kyc_documents, active_requested, metadata_json',
     )
     .eq('id', requestId)
     .single()
@@ -1580,13 +1598,25 @@ export async function processActivationRequest(
       return { ok: false as const, status: 500, error: createError?.message ?? 'User create failed' }
     }
 
-    if (request.territory_id) {
-      await supabase.from('user_territories').insert({
-        user_id: created.id,
-        territory_id: request.territory_id,
-        is_primary: true,
-      })
+    const meta = request.metadata_json as { territory_ids?: string[] } | null
+    const activationTerritoryIds = Array.isArray(meta?.territory_ids)
+      ? meta!.territory_ids!.filter((id) => typeof id === 'string')
+      : request.territory_id
+        ? [request.territory_id as string]
+        : []
+    const territoryCheck = await validateTerritoryIdsForOrg(
+      user.organization_id,
+      activationTerritoryIds,
+    )
+    if (!territoryCheck.ok) {
+      return { ok: false as const, status: 400, error: territoryCheck.error }
     }
+    await syncUserTerritories(
+      user.organization_id,
+      created.id as string,
+      territoryCheck.ids,
+      (request.territory_id as string | null) ?? territoryCheck.ids[0] ?? null,
+    )
 
     await supabase.from('audit_logs').insert({
       organization_id: user.organization_id,
