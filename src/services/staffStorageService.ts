@@ -9,7 +9,7 @@ import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import {
   DEFAULT_STAFF_PROFILE_STORAGE_PATH,
-  resolveStaffProfileStoragePath,
+  isDefaultStaffProfilePath,
 } from '@/constants/staffProfileDefaults.js'
 import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
@@ -124,13 +124,28 @@ async function uploadToSupabase(
 }
 
 /** Storage key prefix: `s3:` for AWS, plain path for Supabase bucket. */
-function storageRef(key: string): string {
+export function storageRef(key: string): string {
   return isS3Configured() ? `s3:${key}` : key
 }
 
+/** Normalize DB paths so S3-backed refs always include the `s3:` prefix. */
+export function normalizeStaffStorageRef(ref: string): string {
+  const trimmed = ref.trim()
+  if (!trimmed) return storageRef(DEFAULT_STAFF_PROFILE_STORAGE_PATH)
+  if (trimmed.startsWith('s3:')) return trimmed
+  if (isS3Configured()) return `s3:${trimmed}`
+  return trimmed
+}
+
+export function resolveStaffProfileStoragePath(imageUrl: string | null | undefined): string {
+  const trimmed = typeof imageUrl === 'string' ? imageUrl.trim() : ''
+  return normalizeStaffStorageRef(trimmed || DEFAULT_STAFF_PROFILE_STORAGE_PATH)
+}
+
 function parseStorageRef(ref: string): { backend: 's3' | 'supabase'; key: string } {
-  if (ref.startsWith('s3:')) return { backend: 's3', key: ref.slice(3) }
-  return { backend: 'supabase', key: ref }
+  const normalized = normalizeStaffStorageRef(ref)
+  if (normalized.startsWith('s3:')) return { backend: 's3', key: normalized.slice(3) }
+  return { backend: 'supabase', key: normalized }
 }
 
 export async function uploadStaffProfileImage(args: {
@@ -224,7 +239,7 @@ export async function signedUrlForStaffStorage(
   storagePath: string | null | undefined,
 ): Promise<string | null> {
   if (!storagePath) return null
-  const { backend, key } = parseStorageRef(storagePath)
+  const { backend, key } = parseStorageRef(normalizeStaffStorageRef(storagePath))
 
   if (backend === 's3') {
     if (!isS3Configured()) return null
@@ -255,7 +270,7 @@ export function staffStorageBackend(): 's3' | 'supabase' {
 export async function readStaffStorageObject(
   storagePath: string,
 ): Promise<{ data: Buffer; contentType: string } | null> {
-  const { backend, key } = parseStorageRef(storagePath)
+  const { backend, key } = parseStorageRef(normalizeStaffStorageRef(storagePath))
 
   if (backend === 's3') {
     if (!isS3Configured()) return null
@@ -307,7 +322,7 @@ export async function enrichStaffMediaUrls<T extends {
   }
 > {
   const profilePath = resolveStaffProfileStoragePath(row.image_url)
-  if (profilePath === DEFAULT_STAFF_PROFILE_STORAGE_PATH) {
+  if (isDefaultStaffProfilePath(profilePath)) {
     await ensureDefaultStaffProfileAsset()
   }
   const profile_image_url = await signedUrlForStaffStorage(profilePath)

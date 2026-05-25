@@ -16,8 +16,15 @@ import {
 import { sanitizeKycDocumentsForDb, type StaffKycDocument } from '@/types/staffDocuments.js'
 import {
   DEFAULT_STAFF_PROFILE_STORAGE_PATH,
-  resolveStaffProfileStoragePath,
+  isDefaultStaffProfilePath,
 } from '@/constants/staffProfileDefaults.js'
+import {
+  enrichStaffMediaUrls,
+  ensureDefaultStaffProfileAsset,
+  readStaffStorageObject,
+  resolveStaffProfileStoragePath,
+  storageRef,
+} from '@/services/staffStorageService.js'
 import {
   enrichStaffMediaUrls,
   ensureDefaultStaffProfileAsset,
