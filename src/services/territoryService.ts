@@ -80,6 +80,78 @@ export async function listOrgTerritories(orgId: string): Promise<TerritoryOption
   return (data ?? []) as TerritoryOption[]
 }
 
+function sanitizeTerritoryNamePattern(raw: string): string {
+  return raw
+    .replace(/[,()."'\\]/g, ' ')
+    .replace(/[%_]/g, '')
+    .trim()
+    .slice(0, 100)
+}
+
+/** Territory IDs whose name partially matches (case-insensitive). */
+export async function listTerritoryIdsByNamePattern(
+  orgId: string,
+  rawPattern: string,
+): Promise<string[]> {
+  const pattern = sanitizeTerritoryNamePattern(rawPattern)
+  if (!pattern) return []
+
+  const ilike = `%${pattern}%`
+
+  if (isPostgresMode()) {
+    const res = await dbQuery<{ id: string }>(
+      `SELECT id FROM territories
+       WHERE organization_id = $1 AND active = true AND name ILIKE $2`,
+      [orgId, ilike],
+    )
+    return res.rows.map((r) => r.id)
+  }
+
+  const supabase = createSupabaseServiceClient()
+  const safe = pattern.replace(/[%_]/g, '\\$&')
+  const { data } = await supabase
+    .from('territories')
+    .select('id')
+    .eq('organization_id', orgId)
+    .eq('active', true)
+    .ilike('name', `%${safe}%`)
+
+  return ((data ?? []) as Array<{ id: string }>).map((r) => r.id)
+}
+
+/** User IDs linked to any territory whose name partially matches. */
+export async function listUserIdsWithTerritoryNameMatch(
+  orgId: string,
+  rawPattern: string,
+): Promise<string[]> {
+  const pattern = sanitizeTerritoryNamePattern(rawPattern)
+  if (!pattern) return []
+
+  const ilike = `%${pattern}%`
+
+  if (isPostgresMode()) {
+    const res = await dbQuery<{ user_id: string }>(
+      `SELECT DISTINCT ut.user_id
+       FROM user_territories ut
+       INNER JOIN territories t ON t.id = ut.territory_id
+       WHERE t.organization_id = $1 AND t.active = true AND t.name ILIKE $2`,
+      [orgId, ilike],
+    )
+    return res.rows.map((r) => r.user_id)
+  }
+
+  const territoryIds = await listTerritoryIdsByNamePattern(orgId, pattern)
+  if (territoryIds.length === 0) return []
+
+  const supabase = createSupabaseServiceClient()
+  const { data } = await supabase
+    .from('user_territories')
+    .select('user_id')
+    .in('territory_id', territoryIds)
+
+  return [...new Set(((data ?? []) as Array<{ user_id: string }>).map((r) => r.user_id))]
+}
+
 export async function createOrgTerritory(
   actor: { organization_id: string; roles?: { name: string } | null },
   rawName: string,

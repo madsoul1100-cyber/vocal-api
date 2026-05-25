@@ -123,10 +123,11 @@ Paginated response: `{ bucket, items, pagination, filters }`.
 | `sort` | `name` (default), `created`, or `last_login` |
 | `order` | `asc` or `desc` (default `asc` for name, `desc` for dates) |
 | `active` | `true` / `false` — filter by account active flag |
-| `keyword` or `search` | Search `full_name`, `email`, `phone` |
+| `keyword` or `search` | Search `full_name`, `email`, `phone`, and linked **territory name** |
 | `role` | Filter by `roles.name` (e.g. `ground_worker`) |
 | `role_id` | Filter by role UUID |
-| `territory_id` | Users linked via `user_territories` |
+| `territory_id` | Filter to users linked to this territory UUID |
+| `territory` or `territory_name` | Filter by partial territory **name** (ignored if `territory_id` is set) |
 | `include_pending` | `false` to omit pending activation rows (default `true`) |
 | `pending_limit` | Pending table page size (default `20`, max `50`) |
 | `pending_offset` | Pending rows to skip |

@@ -24,7 +24,12 @@ import {
   readStaffStorageObject,
   resolveStaffProfileStoragePath,
 } from '@/services/staffStorageService.js'
-import { listOrgTerritories, validateTerritoryIdsForOrg } from '@/services/territoryService.js'
+import {
+  listOrgTerritories,
+  listTerritoryIdsByNamePattern,
+  listUserIdsWithTerritoryNameMatch,
+  validateTerritoryIdsForOrg,
+} from '@/services/territoryService.js'
 
 export type { StaffStatus, StaffCategoryCounts }
 
@@ -262,6 +267,8 @@ export interface WorkersListV2Options {
   role?: string
   roleId?: string
   territoryId?: string
+  /** Partial match on territory name (ignored when territoryId is set). */
+  territoryName?: string
   includePending: boolean
   pendingLimit: number
   pendingOffset: number
@@ -354,6 +361,12 @@ export function parseWorkersV2ListQuery(query: Record<string, unknown>): Workers
     typeof query.territory_id === 'string' && query.territory_id.trim()
       ? query.territory_id.trim()
       : undefined
+  const territoryRaw =
+    (typeof query.territory === 'string' && query.territory) ||
+    (typeof query.territory_name === 'string' && query.territory_name) ||
+    undefined
+  const territoryName =
+    !territoryId && territoryRaw ? sanitizeWorkersKeyword(territoryRaw) : undefined
 
   const sort = parseWorkersSort(query.sort)
   return {
@@ -366,6 +379,7 @@ export function parseWorkersV2ListQuery(query: Record<string, unknown>): Workers
     role,
     roleId,
     territoryId,
+    territoryName: territoryName || undefined,
     includePending: parseIncludePending(query.include_pending),
     pendingLimit,
     pendingOffset,
@@ -383,6 +397,7 @@ export function workersV2FiltersEcho(opts: WorkersListV2Options) {
     role: opts.role ?? null,
     role_id: opts.roleId ?? null,
     territory_id: opts.territoryId ?? null,
+    territory: opts.territoryName ?? null,
     include_pending: opts.includePending,
     pending_limit: opts.pendingLimit,
     pending_offset: opts.pendingOffset,
@@ -414,11 +429,23 @@ function workersV2OrderSql(sort: WorkersV2SortField, order: 'asc' | 'desc'): str
   return `u.full_name ${dir}`
 }
 
+function sqlUserTerritoryNameMatch(paramIndex: { i: number }, orgParam: string): string {
+  return `EXISTS (
+    SELECT 1 FROM user_territories ut
+    INNER JOIN territories t ON t.id = ut.territory_id
+    WHERE ut.user_id = u.id
+      AND t.organization_id = ${orgParam}
+      AND t.active = true
+      AND t.name ILIKE $${paramIndex.i}
+  )`
+}
+
 function appendWorkersV2Filters(
   where: string,
   params: unknown[],
   paramIndex: { i: number },
   opts: WorkersListV2Options,
+  orgParam = '$1',
 ): string {
   let clause = where
 
@@ -440,19 +467,83 @@ function appendWorkersV2Filters(
       WHERE ut.user_id = u.id AND ut.territory_id = $${paramIndex.i++}
     )`
     params.push(opts.territoryId)
+  } else if (opts.territoryName) {
+    const pattern = `%${opts.territoryName}%`
+    clause += ` AND ${sqlUserTerritoryNameMatch(paramIndex, orgParam)}`
+    params.push(pattern)
+    paramIndex.i++
   }
   if (opts.keyword) {
     const pattern = `%${opts.keyword}%`
+    const p = paramIndex.i
     clause += ` AND (
-      u.full_name ILIKE $${paramIndex.i}
-      OR u.email ILIKE $${paramIndex.i}
-      OR COALESCE(u.phone, '') ILIKE $${paramIndex.i}
+      u.full_name ILIKE $${p}
+      OR u.email ILIKE $${p}
+      OR COALESCE(u.phone, '') ILIKE $${p}
+      OR ${sqlUserTerritoryNameMatch({ i: p }, orgParam)}
     )`
     params.push(pattern)
     paramIndex.i++
   }
 
   return clause
+}
+
+function appendPendingWorkersV2Filters(
+  where: string,
+  params: unknown[],
+  paramIndex: { i: number },
+  opts: WorkersListV2Options,
+  orgParam = '$1',
+): string {
+  let clause = where
+
+  if (opts.territoryId) {
+    clause += ` AND war.territory_id = $${paramIndex.i++}`
+    params.push(opts.territoryId)
+  } else if (opts.territoryName) {
+    const pattern = `%${opts.territoryName}%`
+    clause += ` AND EXISTS (
+      SELECT 1 FROM territories t
+      WHERE t.id = war.territory_id
+        AND t.organization_id = ${orgParam}
+        AND t.active = true
+        AND t.name ILIKE $${paramIndex.i}
+    )`
+    params.push(pattern)
+    paramIndex.i++
+  }
+
+  if (opts.keyword) {
+    const pattern = `%${opts.keyword}%`
+    const p = paramIndex.i
+    clause += ` AND (
+      war.full_name ILIKE $${p}
+      OR COALESCE(war.email, '') ILIKE $${p}
+      OR COALESCE(war.phone, '') ILIKE $${p}
+      OR EXISTS (
+        SELECT 1 FROM territories t
+        WHERE t.id = war.territory_id
+          AND t.organization_id = ${orgParam}
+          AND t.name ILIKE $${p}
+      )
+    )`
+    params.push(pattern)
+    paramIndex.i++
+  }
+
+  return clause
+}
+
+function emptyWorkersV2ListPart(
+  opts: WorkersListV2Options,
+): Pick<WorkersListV2Result, 'workers' | 'pagination' | 'pending' | 'pending_pagination'> {
+  return {
+    workers: [],
+    pagination: buildWorkersV2Pagination(opts.offset, opts.limit, 0),
+    pending: [],
+    pending_pagination: buildWorkersV2Pagination(opts.pendingOffset, opts.pendingLimit, 0),
+  }
 }
 
 async function getWorkersOrgSummaryPg(orgId: string): Promise<WorkersOrgSummary> {
@@ -524,12 +615,19 @@ async function listWorkersV2Pg(
   let pending: PendingActivationRow[] = []
   let pendingTotal = 0
   if (opts.includePending) {
-    const pendingWhere = opts.pendingRequestedBy
+    const pendingBase = opts.pendingRequestedBy
       ? `war.organization_id = $1 AND war.status = 'pending' AND war.requested_by = $2`
       : `war.organization_id = $1 AND war.status = 'pending'`
-    const pendingCountParams = opts.pendingRequestedBy
+    const pendingCountParams: unknown[] = opts.pendingRequestedBy
       ? [orgId, opts.pendingRequestedBy]
       : [orgId]
+    const pendingParamIndex = { i: pendingCountParams.length + 1 }
+    const pendingWhere = appendPendingWorkersV2Filters(
+      pendingBase,
+      pendingCountParams,
+      pendingParamIndex,
+      opts,
+    )
 
     const pendingCountRes = await dbQuery<{ c: string }>(
       `SELECT COUNT(*)::text AS c FROM worker_activation_requests war WHERE ${pendingWhere}`,
@@ -537,8 +635,8 @@ async function listWorkersV2Pg(
     )
     pendingTotal = Number(pendingCountRes.rows[0]?.c ?? 0)
 
-    const pendingLimitParam = pendingCountParams.length + 1
-    const pendingOffsetParam = pendingCountParams.length + 2
+    const pendingLimitParam = pendingParamIndex.i++
+    const pendingOffsetParam = pendingParamIndex.i++
     const pendingRes = await dbQuery<PendingActivationRow & { image_url: string | null }>(
       `SELECT war.id, war.full_name, war.phone, war.email, war.status, war.created_at, war.image_url,
               CASE WHEN t.id IS NULL THEN NULL
@@ -581,6 +679,10 @@ async function listWorkersV2Pg(
   }
 }
 
+function workersV2NeedsTerritoryJoin(opts: WorkersListV2Options): boolean {
+  return !!(opts.territoryId || opts.territoryName)
+}
+
 function workersV2SupabaseSelect(opts: WorkersListV2Options): string {
   const rolesEmbed = opts.role
     ? 'roles!inner(name, display_name)'
@@ -589,7 +691,7 @@ function workersV2SupabaseSelect(opts: WorkersListV2Options): string {
     'id, full_name, phone, email, active, approved_at, last_login_at, created_at, image_url',
     rolesEmbed,
   ]
-  if (opts.territoryId) parts.push('user_territories!inner(territory_id)')
+  if (workersV2NeedsTerritoryJoin(opts)) parts.push('user_territories!inner(territory_id)')
   return parts.join(', ')
 }
 
@@ -598,6 +700,14 @@ async function listWorkersV2Supabase(
   opts: WorkersListV2Options,
 ): Promise<Pick<WorkersListV2Result, 'workers' | 'pagination' | 'pending' | 'pending_pagination'>> {
   const supabase = createSupabaseServiceClient()
+
+  let territoryFilterIds: string[] | undefined
+  if (opts.territoryName && !opts.territoryId) {
+    territoryFilterIds = await listTerritoryIdsByNamePattern(orgId, opts.territoryName)
+    if (territoryFilterIds.length === 0) {
+      return emptyWorkersV2ListPart(opts)
+    }
+  }
 
   let query = supabase
     .from('users')
@@ -609,11 +719,22 @@ async function listWorkersV2Supabase(
   if (opts.roleId) query = query.eq('role_id', opts.roleId)
   if (opts.role) query = query.eq('roles.name', opts.role)
   if (opts.territoryId) query = query.eq('user_territories.territory_id', opts.territoryId)
+  else if (territoryFilterIds?.length) {
+    query = query.in('user_territories.territory_id', territoryFilterIds)
+  }
+
   if (opts.keyword) {
     const safe = opts.keyword.replace(/[%_]/g, '\\$&')
-    query = query.or(
-      `full_name.ilike.%${safe}%,email.ilike.%${safe}%,phone.ilike.%${safe}%`,
-    )
+    const territoryUserIds = await listUserIdsWithTerritoryNameMatch(orgId, opts.keyword)
+    const orParts = [
+      `full_name.ilike.%${safe}%`,
+      `email.ilike.%${safe}%`,
+      `phone.ilike.%${safe}%`,
+    ]
+    if (territoryUserIds.length > 0) {
+      orParts.push(`id.in.(${territoryUserIds.join(',')})`)
+    }
+    query = query.or(orParts.join(','))
   }
 
   const ascending = opts.order === 'asc'
@@ -635,6 +756,7 @@ async function listWorkersV2Supabase(
   let pending: PendingActivationRow[] = []
   let pendingTotal = 0
   if (opts.includePending) {
+    let skipPendingQuery = false
     let pendingQuery = supabase
       .from('worker_activation_requests')
       .select(
@@ -643,29 +765,57 @@ async function listWorkersV2Supabase(
       )
       .eq('organization_id', orgId)
       .eq('status', 'pending')
+
     if (opts.pendingRequestedBy) {
       pendingQuery = pendingQuery.eq('requested_by', opts.pendingRequestedBy)
     }
-    pendingQuery = pendingQuery
-      .order('created_at', { ascending: false })
-      .range(opts.pendingOffset, opts.pendingOffset + opts.pendingLimit - 1)
-
-    const pendingRes = await pendingQuery
-    if (pendingRes.error) throw new Error(pendingRes.error.message)
-    pending = ((pendingRes.data ?? []) as Array<Record<string, unknown>>).map((row) => {
-      const requester = row.users as { full_name?: string } | { full_name?: string }[] | null
-      const requesterName = Array.isArray(requester)
-        ? requester[0]?.full_name
-        : requester?.full_name
-      return {
-        ...(row as unknown as PendingActivationRow),
-        staff_status: 'pending' as const,
-        image_url: (row.image_url as string | null) ?? null,
-        profile_image_url: null,
-        requested_by_user: requesterName ? { full_name: requesterName } : null,
+    if (opts.territoryId) {
+      pendingQuery = pendingQuery.eq('territory_id', opts.territoryId)
+    } else if (opts.territoryName) {
+      const pendingTerritoryIds = await listTerritoryIdsByNamePattern(orgId, opts.territoryName)
+      if (pendingTerritoryIds.length === 0) {
+        skipPendingQuery = true
+      } else {
+        pendingQuery = pendingQuery.in('territory_id', pendingTerritoryIds)
       }
-    })
-    pendingTotal = pendingRes.count ?? 0
+    }
+
+    if (!skipPendingQuery) {
+      if (opts.keyword) {
+        const safe = opts.keyword.replace(/[%_]/g, '\\$&')
+        const keywordTerritoryIds = await listTerritoryIdsByNamePattern(orgId, opts.keyword)
+        const orParts = [
+          `full_name.ilike.%${safe}%`,
+          `email.ilike.%${safe}%`,
+          `phone.ilike.%${safe}%`,
+        ]
+        if (keywordTerritoryIds.length > 0) {
+          orParts.push(`territory_id.in.(${keywordTerritoryIds.join(',')})`)
+        }
+        pendingQuery = pendingQuery.or(orParts.join(','))
+      }
+
+      pendingQuery = pendingQuery
+        .order('created_at', { ascending: false })
+        .range(opts.pendingOffset, opts.pendingOffset + opts.pendingLimit - 1)
+
+      const pendingRes = await pendingQuery
+      if (pendingRes.error) throw new Error(pendingRes.error.message)
+      pending = ((pendingRes.data ?? []) as Array<Record<string, unknown>>).map((row) => {
+        const requester = row.users as { full_name?: string } | { full_name?: string }[] | null
+        const requesterName = Array.isArray(requester)
+          ? requester[0]?.full_name
+          : requester?.full_name
+        return {
+          ...(row as unknown as PendingActivationRow),
+          staff_status: 'pending' as const,
+          image_url: (row.image_url as string | null) ?? null,
+          profile_image_url: null,
+          requested_by_user: requesterName ? { full_name: requesterName } : null,
+        }
+      })
+      pendingTotal = pendingRes.count ?? 0
+    }
   }
 
   const workersMapped = ((data ?? []) as unknown as Array<Record<string, unknown>>).map((row) =>
