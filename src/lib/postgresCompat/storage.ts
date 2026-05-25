@@ -13,8 +13,32 @@ export function localStorageRoot(): string {
   return ROOT
 }
 
+/** Canonical write path (flat under ROOT). */
 export function localStoragePath(bucket: string, objectPath: string): string {
+  if (bucket === 'ticket-attachments') {
+    return path.join(ROOT, objectPath)
+  }
   return path.join(ROOT, bucket, objectPath)
+}
+
+/** Resolve an object that may exist under flat or legacy `ROOT/bucket/key` layout. */
+export async function resolveExistingLocalObjectPath(
+  bucket: string,
+  objectPath: string,
+): Promise<string | null> {
+  const candidates =
+    bucket === 'ticket-attachments'
+      ? [path.join(ROOT, objectPath), path.join(ROOT, bucket, objectPath)]
+      : [path.join(ROOT, bucket, objectPath), path.join(ROOT, objectPath)]
+  for (const candidate of candidates) {
+    try {
+      await fs.access(candidate)
+      return candidate
+    } catch {
+      /* try next */
+    }
+  }
+  return null
 }
 
 export class LocalStorageBucket {
@@ -39,15 +63,13 @@ export class LocalStorageBucket {
     objectPath: string,
     _expiresIn: number,
   ): Promise<{ data: { signedUrl: string } | null; error: { message: string } | null }> {
-    try {
-      const full = localStoragePath(this.bucket, objectPath)
-      await fs.access(full)
-      // Local dev: serve via file URL; production should use S3 + presigned URLs.
-      const signedUrl = `file://${full}`
-      return { data: { signedUrl }, error: null }
-    } catch (err) {
-      return { error: { message: err instanceof Error ? err.message : String(err) }, data: null }
+    const full = await resolveExistingLocalObjectPath(this.bucket, objectPath)
+    if (!full) {
+      return { error: { message: 'Object not found on disk' }, data: null }
     }
+    // Browsers cannot load file:// from the web app — attachmentService uses HTTP media URLs instead.
+    const signedUrl = `file://${full}`
+    return { data: { signedUrl }, error: null }
   }
 }
 

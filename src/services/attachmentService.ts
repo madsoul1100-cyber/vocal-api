@@ -27,6 +27,7 @@ import { PutObjectCommand, S3Client, HeadObjectCommand, GetObjectCommand } from 
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
 import { isPostgresMode } from '@/lib/db.js'
+import { resolveExistingLocalObjectPath } from '@/lib/postgresCompat/storage.js'
 import crypto from 'node:crypto'
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? ''
@@ -123,6 +124,93 @@ export function isValidTicketAttachmentStoragePath(
 
 export function ticketAttachmentStorageBackend(): 's3' | 'supabase' {
   return isS3Configured() ? 's3' : 'supabase'
+}
+
+/** RDS/local disk mode without S3 — previews are served via vocal-api media routes. */
+export function usesLocalTicketAttachmentFiles(): boolean {
+  return isPostgresMode() && !isS3Configured()
+}
+
+/** Path relative to `/v2` mount — e.g. `${VITE_API_BASE_URL}${path}` → `http://localhost:3001/v2/tickets/.../media`. */
+export function ticketAttachmentMediaPath(ticketId: string, attachmentId: string): string {
+  return `/tickets/${ticketId}/attachments/${attachmentId}/media`
+}
+
+export async function readTicketAttachmentObject(
+  storagePath: string,
+): Promise<{ data: Buffer; contentType: string } | null> {
+  if (storagePath.startsWith('telegram:') || storagePath.startsWith('twilio:')) return null
+
+  const { backend, key } = parseTicketAttachmentStorageRef(storagePath)
+
+  if (backend === 's3') {
+    if (!isS3Configured()) return null
+    try {
+      const res = await s3Client().send(
+        new GetObjectCommand({ Bucket: process.env.AWS_S3_BUCKET!, Key: key }),
+      )
+      const body = res.Body
+      if (!body) return null
+      const bytes = await body.transformToByteArray()
+      return {
+        data: Buffer.from(bytes),
+        contentType: res.ContentType ?? 'application/octet-stream',
+      }
+    } catch {
+      return null
+    }
+  }
+
+  if (isS3Configured()) {
+    try {
+      await s3Client().send(
+        new HeadObjectCommand({ Bucket: process.env.AWS_S3_BUCKET!, Key: key }),
+      )
+      const res = await s3Client().send(
+        new GetObjectCommand({ Bucket: process.env.AWS_S3_BUCKET!, Key: key }),
+      )
+      const body = res.Body
+      if (!body) return null
+      const bytes = await body.transformToByteArray()
+      return {
+        data: Buffer.from(bytes),
+        contentType: res.ContentType ?? 'application/octet-stream',
+      }
+    } catch {
+      /* fall through to local / supabase */
+    }
+  }
+
+  const localFull = await resolveExistingLocalObjectPath(BUCKET_NAME, key)
+  if (localFull) {
+    const fs = await import('node:fs/promises')
+    const data = await fs.readFile(localFull)
+    const ext = key.split('.').pop()?.toLowerCase() ?? ''
+    const mimeByExt: Record<string, string> = {
+      jpg: 'image/jpeg',
+      jpeg: 'image/jpeg',
+      png: 'image/png',
+      webp: 'image/webp',
+      gif: 'image/gif',
+      mp4: 'video/mp4',
+      mov: 'video/quicktime',
+      ogg: 'audio/ogg',
+      mp3: 'audio/mpeg',
+      m4a: 'audio/mp4',
+      pdf: 'application/pdf',
+    }
+    return { data, contentType: mimeByExt[ext] ?? 'application/octet-stream' }
+  }
+
+  try {
+    const supabase = createSupabaseServiceClient()
+    const { data, error } = await supabase.storage.from(BUCKET_NAME).download(key)
+    if (error || !data) return null
+    const buf = Buffer.from(await data.arrayBuffer())
+    return { data: buf, contentType: data.type || 'application/octet-stream' }
+  } catch {
+    return null
+  }
 }
 
 export interface TicketAttachmentUploadUrlResult {
@@ -613,6 +701,15 @@ export async function signedUrlFor(storagePath: string | null | undefined): Prom
       console.warn('[attachmentService] S3 signed GET failed', key, err instanceof Error ? err.message : err)
       return null
     }
+  }
+
+  if (usesLocalTicketAttachmentFiles()) {
+    const localFull = await resolveExistingLocalObjectPath(BUCKET_NAME, key)
+    if (!localFull) {
+      console.warn('[attachmentService] local file missing for', key)
+      return null
+    }
+    return null
   }
 
   try {

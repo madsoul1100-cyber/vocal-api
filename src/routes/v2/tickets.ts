@@ -41,6 +41,7 @@ import {
   createTicketNotesAndAttachments,
   issueTicketAttachmentUploadUrl,
   listTicketNotesAndAttachments,
+  streamTicketAttachmentMedia,
   parseAttachmentsListQuery,
   ticketHasAttachments,
   ticketHasNotes,
@@ -189,6 +190,30 @@ router.post('/status', requireAuth, async (req, res) => {
     body.expires_at = result.expires_at
   }
   res.json(body)
+})
+
+/** Stream attachment bytes (local disk / S3 / Supabase). Use `preview_url` from list when on RDS without S3. */
+router.get('/:id/attachments/:attachmentId/media', requireAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> })
+    .vocalUser
+
+  const result = await streamTicketAttachmentMedia(
+    String(req.params.id),
+    String(req.params.attachmentId),
+    user.organization_id,
+    user.roles?.name,
+  )
+
+  if (!result.ok) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+
+  const safeName = result.fileName.replace(/[^\w.-]/g, '_')
+  res.setHeader('Content-Type', result.contentType)
+  res.setHeader('Content-Disposition', `inline; filename="${safeName}"`)
+  res.setHeader('Cache-Control', 'private, max-age=300')
+  res.send(result.data)
 })
 
 /** Presigned direct upload — step 1: issue PUT URL (v2). */

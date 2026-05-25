@@ -1,14 +1,20 @@
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
 import { isPostgresMode, dbQuery } from '@/lib/db.js'
 import {
+  BUCKET_NAME,
   createTicketAttachmentUploadUrl,
   isValidTicketAttachmentStoragePath,
+  parseTicketAttachmentStorageRef,
+  readTicketAttachmentObject,
   signedUrlFor,
   signedUrlsFor,
+  ticketAttachmentMediaPath,
   type TicketAttachmentUploadUrlResult,
   uploadWorkerAttachment,
+  usesLocalTicketAttachmentFiles,
   verifyTicketAttachmentObject,
 } from '@/services/attachmentService.js'
+import { resolveExistingLocalObjectPath } from '@/lib/postgresCompat/storage.js'
 
 function attachmentTypeFromMime(mime: string): TicketAttachmentItem['attachment_type'] {
   if (mime.startsWith('image/')) return 'image'
@@ -173,7 +179,7 @@ function mapNoteRow(r: {
   }
 }
 
-function mapAttachmentRows(
+async function mapAttachmentRows(
   rows: Array<{
     id: string
     ticket_id: string
@@ -186,21 +192,35 @@ function mapAttachmentRows(
   }>,
   can_preview_media: boolean,
   signed: Record<string, string>,
-): TicketAttachmentItem[] {
-  return rows.map((r) => {
-    const legacy = r.storage_path.startsWith('telegram:')
-    return {
-      id: r.id,
-      ticket_id: r.ticket_id,
-      file_name: r.file_name,
-      mime_type: r.mime_type,
-      file_size_bytes: r.file_size_bytes,
-      attachment_type: (r.attachment_type as TicketAttachmentItem['attachment_type']) ?? null,
-      created_at: r.created_at,
-      preview_url: can_preview_media && !legacy ? (signed[r.storage_path] ?? null) : null,
-      legacy_telegram: legacy,
-    }
-  })
+  useLocalMedia: boolean,
+): Promise<TicketAttachmentItem[]> {
+  return Promise.all(
+    rows.map(async (r) => {
+      const legacy =
+        r.storage_path.startsWith('telegram:') || r.storage_path.startsWith('twilio:')
+      let preview_url: string | null = null
+      if (can_preview_media && !legacy) {
+        if (useLocalMedia) {
+          const { key } = parseTicketAttachmentStorageRef(r.storage_path)
+          const onDisk = await resolveExistingLocalObjectPath(BUCKET_NAME, key)
+          preview_url = onDisk ? ticketAttachmentMediaPath(r.ticket_id, r.id) : null
+        } else {
+          preview_url = signed[r.storage_path] ?? null
+        }
+      }
+      return {
+        id: r.id,
+        ticket_id: r.ticket_id,
+        file_name: r.file_name,
+        mime_type: r.mime_type,
+        file_size_bytes: r.file_size_bytes,
+        attachment_type: (r.attachment_type as TicketAttachmentItem['attachment_type']) ?? null,
+        created_at: r.created_at,
+        preview_url,
+        legacy_telegram: legacy,
+      }
+    }),
+  )
 }
 
 async function listTicketNotesAndAttachmentsPg(
@@ -270,11 +290,20 @@ async function listTicketNotesAndAttachmentsPg(
     const notesTotal = Number(notesCountRes.rows[0]?.c ?? 0)
     const attachmentsTotal = Number(attachmentsCountRes.rows[0]?.c ?? 0)
     const paths = attachmentsRes.rows.map((r) => r.storage_path)
-    const signed = can_preview_media ? await signedUrlsFor(paths) : {}
+    const useLocalMedia = usesLocalTicketAttachmentFiles()
+    const signed =
+      can_preview_media && !useLocalMedia ? await signedUrlsFor(paths) : {}
+
+    const attachments = await mapAttachmentRows(
+      attachmentsRes.rows,
+      can_preview_media,
+      signed,
+      useLocalMedia,
+    )
 
     return {
       notes: notesRes.rows.map(mapNoteRow),
-      attachments: mapAttachmentRows(attachmentsRes.rows, can_preview_media, signed),
+      attachments,
       notesTotal,
       attachmentsTotal,
     }
@@ -330,7 +359,8 @@ async function listTicketNotesAndAttachmentsSupabase(
   if (attachmentsRes.error) return { error: attachmentsRes.error.message }
 
   const paths = (attachmentsRes.data ?? []).map((r) => r.storage_path as string)
-  const signed = can_preview_media ? await signedUrlsFor(paths) : {}
+  const useLocalMedia = usesLocalTicketAttachmentFiles()
+  const signed = can_preview_media && !useLocalMedia ? await signedUrlsFor(paths) : {}
 
   const notes = (notesRes.data ?? []).map((r) =>
     mapNoteRow({
@@ -345,7 +375,7 @@ async function listTicketNotesAndAttachmentsSupabase(
     }),
   )
 
-  const attachments = mapAttachmentRows(
+  const attachments = await mapAttachmentRows(
     (attachmentsRes.data ?? []).map((r) => ({
       id: r.id as string,
       ticket_id: r.ticket_id as string,
@@ -358,6 +388,7 @@ async function listTicketNotesAndAttachmentsSupabase(
     })),
     can_preview_media,
     signed,
+    useLocalMedia,
   )
 
   return {
@@ -545,7 +576,10 @@ export async function createTicketNotesAndAttachments(
       return { error: insErr?.message ?? 'Attachment insert failed', status: 500 }
     }
 
-    const preview_url = await signedUrlFor(stored.storage_path)
+    const useLocalMedia = usesLocalTicketAttachmentFiles()
+    const preview_url = useLocalMedia
+      ? ticketAttachmentMediaPath(ticketId, row.id as string)
+      : await signedUrlFor(stored.storage_path)
     attachment = {
       id: row.id as string,
       ticket_id: row.ticket_id as string,
@@ -560,6 +594,62 @@ export async function createTicketNotesAndAttachments(
   }
 
   return { note, attachment }
+}
+
+/** Stream bytes for GET .../attachments/:attachmentId/media (local/S3/Supabase). */
+export async function streamTicketAttachmentMedia(
+  ticketId: string,
+  attachmentId: string,
+  organizationId: string,
+  viewerRole?: string | null,
+): Promise<
+  | { ok: true; data: Buffer; contentType: string; fileName: string }
+  | { ok: false; error: string; status: number }
+> {
+  const ticketRes = await assertTicketInOrg(ticketId, organizationId)
+  if (!ticketRes.ok) {
+    return {
+      ok: false,
+      error: ticketRes.error,
+      status: ticketRes.error === 'Ticket not found' ? 404 : 500,
+    }
+  }
+
+  const can_preview = canPreviewAttachmentMedia(
+    viewerRole,
+    ticketRes.ticket.citizen_identity_revealed_at as string | null,
+  )
+  if (!can_preview) {
+    return { ok: false, error: 'Forbidden', status: 403 }
+  }
+
+  const supabase = createSupabaseServiceClient()
+  const { data: row, error } = await supabase
+    .from('ticket_attachments')
+    .select('id, ticket_id, file_name, storage_path, mime_type')
+    .eq('id', attachmentId)
+    .eq('ticket_id', ticketId)
+    .maybeSingle()
+
+  if (error) return { ok: false, error: error.message, status: 500 }
+  if (!row) return { ok: false, error: 'Attachment not found', status: 404 }
+
+  const storage_path = row.storage_path as string
+  if (storage_path.startsWith('telegram:') || storage_path.startsWith('twilio:')) {
+    return { ok: false, error: 'Legacy attachment not available for preview', status: 404 }
+  }
+
+  const blob = await readTicketAttachmentObject(storage_path)
+  if (!blob) {
+    return { ok: false, error: 'File not found in storage', status: 404 }
+  }
+
+  return {
+    ok: true,
+    data: blob.data,
+    contentType: (row.mime_type as string | null) ?? blob.contentType,
+    fileName: (row.file_name as string) || 'attachment',
+  }
 }
 
 export interface IssueTicketAttachmentUploadUrlInput {
@@ -691,7 +781,10 @@ export async function completeTicketAttachmentUpload(
     return { error: insErr?.message ?? 'Attachment insert failed', status: 500 }
   }
 
-  const preview_url = await signedUrlFor(storage_path)
+  const useLocalMedia = usesLocalTicketAttachmentFiles()
+  const preview_url = useLocalMedia
+    ? ticketAttachmentMediaPath(ticketId, row.id as string)
+    : await signedUrlFor(storage_path)
   attachment = {
     id: row.id as string,
     ticket_id: row.ticket_id as string,
