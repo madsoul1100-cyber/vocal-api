@@ -159,6 +159,8 @@ export interface WorkerRow {
   staff_status: StaffStatus
   last_login_at: string | null
   created_at: string
+  image_url: string | null
+  profile_image_url: string | null
   roles: { name: string; display_name: string | null } | null
 }
 
@@ -171,6 +173,7 @@ function mapWorkerRow(raw: {
   approved_at?: string | null
   last_login_at: string | null
   created_at: string
+  image_url?: string | null
   roles: WorkerRow['roles']
 }): WorkerRow {
   const approved_at = raw.approved_at ?? null
@@ -178,7 +181,35 @@ function mapWorkerRow(raw: {
     ...raw,
     approved_at,
     staff_status: deriveUserStaffStatus(raw.active === true, approved_at),
+    image_url: raw.image_url ?? null,
+    profile_image_url: null,
   }
+}
+
+async function enrichWorkerListRows<T extends { image_url?: string | null }>(
+  rows: T[],
+): Promise<(T & { image_url: string | null; profile_image_url: string | null })[]> {
+  if (rows.length === 0) return []
+
+  const needsDefaultAsset = rows.some((row) => {
+    const path = typeof row.image_url === 'string' ? row.image_url.trim() : ''
+    return !path || path === DEFAULT_STAFF_PROFILE_STORAGE_PATH || path.endsWith('staff-profile-placeholder.png')
+  })
+  if (needsDefaultAsset) {
+    await ensureDefaultStaffProfileAsset()
+  }
+
+  return Promise.all(
+    rows.map(async (row) => {
+      const image_url =
+        typeof row.image_url === 'string' && row.image_url.trim() ? row.image_url.trim() : null
+      const { profile_image_url } = await enrichStaffMediaUrls({
+        image_url,
+        kyc_documents: [],
+      })
+      return { ...row, image_url, profile_image_url }
+    }),
+  )
 }
 
 export interface WorkerTerritoryRef {
@@ -207,6 +238,8 @@ export interface PendingActivationRow {
   status: string
   staff_status: 'pending'
   created_at: string
+  image_url: string | null
+  profile_image_url: string | null
   territories: { name: string } | null
   roles: { name: string; display_name: string | null } | null
   requested_by_user: { full_name: string } | null
@@ -480,6 +513,7 @@ async function listWorkersV2Pg(
 
   const workersRes = await dbQuery<WorkerRow & { approved_at: string | null }>(
     `SELECT u.id, u.full_name, u.phone, u.email, u.active, u.approved_at, u.last_login_at, u.created_at,
+            u.image_url,
             jsonb_build_object('name', r.name, 'display_name', r.display_name) AS roles
      FROM users u
      INNER JOIN roles r ON r.id = u.role_id
@@ -507,8 +541,8 @@ async function listWorkersV2Pg(
 
     const pendingLimitParam = pendingCountParams.length + 1
     const pendingOffsetParam = pendingCountParams.length + 2
-    const pendingRes = await dbQuery<PendingActivationRow>(
-      `SELECT war.id, war.full_name, war.phone, war.email, war.status, war.created_at,
+    const pendingRes = await dbQuery<PendingActivationRow & { image_url: string | null }>(
+      `SELECT war.id, war.full_name, war.phone, war.email, war.status, war.created_at, war.image_url,
               CASE WHEN t.id IS NULL THEN NULL
                    ELSE jsonb_build_object('name', t.name)
               END AS territories,
@@ -527,13 +561,20 @@ async function listWorkersV2Pg(
        LIMIT $${pendingLimitParam} OFFSET $${pendingOffsetParam}`,
       [...pendingCountParams, opts.pendingLimit, opts.pendingOffset],
     )
-    pending = pendingRes.rows.map((row) => ({ ...row, staff_status: 'pending' as const }))
+    pending = pendingRes.rows.map((row) => ({
+      ...row,
+      staff_status: 'pending' as const,
+      profile_image_url: null,
+    }))
   }
 
+  const workers = await enrichWorkerListRows(workersRes.rows.map(mapWorkerRow))
+  const pendingEnriched = await enrichWorkerListRows(pending)
+
   return {
-    workers: workersRes.rows.map(mapWorkerRow),
+    workers,
     pagination: buildWorkersV2Pagination(opts.offset, opts.limit, total),
-    pending,
+    pending: pendingEnriched,
     pending_pagination: buildWorkersV2Pagination(
       opts.pendingOffset,
       opts.pendingLimit,
@@ -547,7 +588,7 @@ function workersV2SupabaseSelect(opts: WorkersListV2Options): string {
     ? 'roles!inner(name, display_name)'
     : 'roles(name, display_name)'
   const parts = [
-    'id, full_name, phone, email, active, approved_at, last_login_at, created_at',
+    'id, full_name, phone, email, active, approved_at, last_login_at, created_at, image_url',
     rolesEmbed,
   ]
   if (opts.territoryId) parts.push('user_territories!inner(territory_id)')
@@ -599,7 +640,7 @@ async function listWorkersV2Supabase(
     let pendingQuery = supabase
       .from('worker_activation_requests')
       .select(
-        'id, full_name, phone, email, status, created_at, territories(name), roles(name, display_name), users!requested_by(full_name)',
+        'id, full_name, phone, email, status, created_at, image_url, territories(name), roles(name, display_name), users!requested_by(full_name)',
         { count: 'exact' },
       )
       .eq('organization_id', orgId)
@@ -621,13 +662,15 @@ async function listWorkersV2Supabase(
       return {
         ...(row as unknown as PendingActivationRow),
         staff_status: 'pending' as const,
+        image_url: (row.image_url as string | null) ?? null,
+        profile_image_url: null,
         requested_by_user: requesterName ? { full_name: requesterName } : null,
       }
     })
     pendingTotal = pendingRes.count ?? 0
   }
 
-  const workers = ((data ?? []) as unknown as Array<Record<string, unknown>>).map((row) =>
+  const workersMapped = ((data ?? []) as unknown as Array<Record<string, unknown>>).map((row) =>
     mapWorkerRow({
       id: row.id as string,
       full_name: row.full_name as string,
@@ -637,14 +680,18 @@ async function listWorkersV2Supabase(
       approved_at: (row.approved_at as string | null) ?? null,
       last_login_at: (row.last_login_at as string | null) ?? null,
       created_at: row.created_at as string,
+      image_url: (row.image_url as string | null) ?? null,
       roles: row.roles as WorkerRow['roles'],
     }),
   )
 
+  const workers = await enrichWorkerListRows(workersMapped)
+  const pendingEnriched = await enrichWorkerListRows(pending)
+
   return {
     workers,
     pagination: buildWorkersV2Pagination(opts.offset, opts.limit, count ?? 0),
-    pending,
+    pending: pendingEnriched,
     pending_pagination: buildWorkersV2Pagination(
       opts.pendingOffset,
       opts.pendingLimit,

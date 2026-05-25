@@ -131,7 +131,7 @@ Paginated response: `{ bucket, items, pagination, filters }`.
 | `pending_limit` | Pending table page size (default `20`, max `50`) |
 | `pending_offset` | Pending rows to skip |
 
-Response: `workers`, `pagination`, `pending`, `pending_pagination`, `summary` (`active` / `inactive` / `total` for org), `territories`, `roles`, echoed `filters`.
+Response: `workers`, `pagination`, `pending`, `pending_pagination`, `summary` (`active` / `inactive` / `total` for org), `territories`, `roles`, echoed `filters`. Each worker (and pending row) includes `image_url` (storage path) and `profile_image_url` (presigned URL for the UI).
 
 | Endpoint | Description |
 |----------|-------------|
