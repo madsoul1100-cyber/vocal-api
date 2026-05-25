@@ -36,26 +36,32 @@ async function main() {
     ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
   })
 
+  const canonicalPath = asset.storage_path
+
   try {
-    const usersParams: unknown[] = [DEFAULT_STAFF_PROFILE_STORAGE_PATH]
+    const usersParams: unknown[] = [canonicalPath, DEFAULT_STAFF_PROFILE_STORAGE_PATH]
     let usersSql = `
       update users
       set image_url = $1, updated_at = now()
-      where image_url is null or trim(image_url) = ''`
+      where image_url is null
+         or trim(image_url) = ''
+         or image_url = $2`
     if (ORG_ID) {
       usersParams.push(ORG_ID)
-      usersSql += ` and organization_id = $2`
+      usersSql += ` and organization_id = $3`
     }
     usersSql += ' returning id'
 
     const usersRes = await pool.query<{ id: string }>(usersSql, usersParams)
-    console.log(`✓ Users backfilled: ${usersRes.rowCount ?? 0}`)
+    console.log(`✓ Users updated (canonical image_url): ${usersRes.rowCount ?? 0}`)
 
-    const pendingParams: unknown[] = [DEFAULT_STAFF_PROFILE_STORAGE_PATH]
+    const pendingParams: unknown[] = [canonicalPath, DEFAULT_STAFF_PROFILE_STORAGE_PATH]
     let pendingSql = `
       update worker_activation_requests
       set image_url = $1
-      where image_url is null or trim(image_url) = ''`
+      where image_url is null
+         or trim(image_url) = ''
+         or image_url = $2`
     if (ORG_ID) {
       pendingParams.push(ORG_ID)
       pendingSql += ` and organization_id = $2`
