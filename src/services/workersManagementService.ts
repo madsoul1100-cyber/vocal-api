@@ -25,11 +25,6 @@ import {
   resolveStaffProfileStoragePath,
   storageRef,
 } from '@/services/staffStorageService.js'
-import {
-  enrichStaffMediaUrls,
-  ensureDefaultStaffProfileAsset,
-  readStaffStorageObject,
-} from '@/services/staffStorageService.js'
 import { listOrgTerritories, validateTerritoryIdsForOrg } from '@/services/territoryService.js'
 
 export type { StaffStatus, StaffCategoryCounts }
@@ -198,10 +193,7 @@ async function enrichWorkerListRows<T extends { image_url?: string | null }>(
 ): Promise<(T & { image_url: string | null; profile_image_url: string | null })[]> {
   if (rows.length === 0) return []
 
-  const needsDefaultAsset = rows.some((row) => {
-    const path = typeof row.image_url === 'string' ? row.image_url.trim() : ''
-    return !path || path === DEFAULT_STAFF_PROFILE_STORAGE_PATH || path.endsWith('staff-profile-placeholder.png')
-  })
+  const needsDefaultAsset = rows.some((row) => isDefaultStaffProfilePath(row.image_url))
   if (needsDefaultAsset) {
     await ensureDefaultStaffProfileAsset()
   }
@@ -982,7 +974,7 @@ export async function createOrgUser(
     if (!asset.ok) {
       return { ok: false as const, status: 500, error: asset.error }
     }
-    profile.image_url = DEFAULT_STAFF_PROFILE_STORAGE_PATH
+    profile.image_url = asset.storage_path
   }
 
   const supabase = createSupabaseServiceClient()
@@ -1231,7 +1223,7 @@ export async function streamWorkerStaffMedia(
     contentType = doc.mime_type ?? undefined
   }
 
-  if (storagePath === DEFAULT_STAFF_PROFILE_STORAGE_PATH) {
+  if (isDefaultStaffProfilePath(storagePath)) {
     await ensureDefaultStaffProfileAsset()
   }
 
