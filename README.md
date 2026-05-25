@@ -74,7 +74,9 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 | `POST /v2/tickets/accept` | Worker accepts current offer; body `{ ticket_id }` |
 | `POST /v2/tickets/reject` | Worker rejects offer; body `{ ticket_id, reason }` |
 | `GET /v2/tickets/:id/attachments` | Paginated `notes` + `attachments` (same `limit`/`offset` each); `preview_url` when `can_preview_media` |
-| `POST /v2/tickets/:id/attachments` | Multipart: optional `content`, optional `file` (at least one); optional `note_type`; creates note and/or attachment |
+| `POST /v2/tickets/:id/attachments/upload-url` | **Presigned upload (step 1):** body `{ file_name, mime_type, file_size_bytes }` → `{ upload_url, storage_path, method: "PUT", headers, expires_in, storage_backend }`. Client `PUT`s the file to `upload_url`, then calls `complete`. Requires `AWS_S3_BUCKET` when using `DATABASE_URL`. |
+| `POST /v2/tickets/:id/attachments/complete` | **Presigned upload (step 2):** body `{ storage_path, file_name, mime_type, file_size_bytes, content?, note_type?, is_internal? }` → `{ note, attachment }` with `preview_url`. |
+| `POST /v2/tickets/:id/attachments` | Legacy multipart: optional `content`, optional `file` (at least one); optional `note_type` |
 | `GET /v2/tickets/:id/ai-suggestion` | Pending AI suggestion (`super_admin` / `central_support` only; latest completed, unconfirmed, or `null`) |
 | `POST /v2/tickets/confirm-ai` | Apply AI suggestion to empty ticket fields; body `{ ticket_id, suggestion_id }`; same roles only |
 
