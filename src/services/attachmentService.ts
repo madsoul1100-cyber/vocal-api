@@ -219,6 +219,9 @@ export interface TicketAttachmentUploadUrlResult {
   method: 'PUT'
   headers: Record<string, string>
   expires_in: number
+  /** Browser PUT needs S3 bucket CORS — see cors_setup_doc. */
+  cors_required?: boolean
+  cors_setup_doc?: string
 }
 
 /**
@@ -270,6 +273,8 @@ export async function createTicketAttachmentUploadUrl(args: {
         method: 'PUT',
         headers: { 'Content-Type': mime },
         expires_in: TICKET_UPLOAD_URL_TTL_SECONDS,
+        cors_required: true,
+        cors_setup_doc: 'docs/s3-cors-ticket-attachments.example.json',
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : 'Presigned upload URL failed'
@@ -683,32 +688,36 @@ export async function uploadWorkerAttachment(args: {
  * If `storage_path` still looks like an old `telegram:<file_id>` pointer
  * (pre-E1 migration), returns null so the caller can render a placeholder.
  */
+async function tryS3PresignedGetUrl(objectKey: string): Promise<string | null> {
+  if (!isS3Configured()) return null
+  try {
+    await s3Client().send(
+      new HeadObjectCommand({ Bucket: process.env.AWS_S3_BUCKET!, Key: objectKey }),
+    )
+    return await getSignedUrl(
+      s3Client(),
+      new GetObjectCommand({ Bucket: process.env.AWS_S3_BUCKET!, Key: objectKey }),
+      { expiresIn: SIGNED_URL_TTL_SECONDS },
+    )
+  } catch {
+    return null
+  }
+}
+
 export async function signedUrlFor(storagePath: string | null | undefined): Promise<string | null> {
   if (!storagePath) return null
   if (storagePath.startsWith('telegram:') || storagePath.startsWith('twilio:')) return null
 
   const { backend, key } = parseTicketAttachmentStorageRef(storagePath)
 
-  if (backend === 's3') {
-    if (!isS3Configured()) return null
-    try {
-      return await getSignedUrl(
-        s3Client(),
-        new GetObjectCommand({ Bucket: process.env.AWS_S3_BUCKET!, Key: key }),
-        { expiresIn: SIGNED_URL_TTL_SECONDS },
-      )
-    } catch (err) {
-      console.warn('[attachmentService] S3 signed GET failed', key, err instanceof Error ? err.message : err)
-      return null
-    }
+  // Prefer S3 when configured (DB paths may omit `s3:` prefix from older rows).
+  if (backend === 's3' || isS3Configured()) {
+    const s3Url = await tryS3PresignedGetUrl(key)
+    if (s3Url) return s3Url
+    if (backend === 's3') return null
   }
 
   if (usesLocalTicketAttachmentFiles()) {
-    const localFull = await resolveExistingLocalObjectPath(BUCKET_NAME, key)
-    if (!localFull) {
-      console.warn('[attachmentService] local file missing for', key)
-      return null
-    }
     return null
   }
 
@@ -721,7 +730,12 @@ export async function signedUrlFor(storagePath: string | null | undefined): Prom
       console.warn('[attachmentService] signed URL failed for', key, error?.message)
       return null
     }
-    return data.signedUrl
+    const url = data.signedUrl
+    if (url.startsWith('file://')) {
+      console.warn('[attachmentService] refusing file:// preview URL for', key)
+      return null
+    }
+    return url
   } catch (err) {
     console.warn('[attachmentService] signed URL exception:', err instanceof Error ? err.message : err)
     return null
