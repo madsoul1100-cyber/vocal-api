@@ -23,7 +23,6 @@ import {
   ensureDefaultStaffProfileAsset,
   readStaffStorageObject,
   resolveStaffProfileStoragePath,
-  storageRef,
 } from '@/services/staffStorageService.js'
 import { listOrgTerritories, validateTerritoryIdsForOrg } from '@/services/territoryService.js'
 
