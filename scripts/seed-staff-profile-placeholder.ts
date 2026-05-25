@@ -64,7 +64,7 @@ async function main() {
          or image_url = $2`
     if (ORG_ID) {
       pendingParams.push(ORG_ID)
-      pendingSql += ` and organization_id = $2`
+      pendingSql += ` and organization_id = $3`
     }
     pendingSql += ' returning id'
 
