@@ -140,12 +140,24 @@ Response: `workers`, `pagination`, `pending`, `pending_pagination`, `summary` (`
 | Endpoint | Description |
 |----------|-------------|
 | `GET /v2/workers/:id` | Staff detail (`role_id`, `territories`) |
-| `POST /v2/workers` | Create org user (email + password stored as bcrypt hash) |
-| `PATCH /v2/workers/:id` | Update staff (`full_name`, `phone`, `email`, `role_id`, `active`, `territory_id`, `metadata_json`, `password`) |
+| `POST /v2/workers/uploads/profile/upload-url` | **Profile presign (step 1)** — `{ file_name, mime_type, file_size_bytes }` (max 5 MB; JPEG/PNG/WebP) |
+| `POST /v2/workers/uploads/profile/complete` | **Profile presign (step 2)** — `{ storage_path, file_name, mime_type, file_size_bytes, apply_to_worker_id? }` → `{ image_url, profile_image_url }`. Omit `apply_to_worker_id` on create; pass `image_url` in `POST /v2/workers`. |
+| `POST /v2/workers/uploads/kyc/upload-url` | **KYC presign (step 1)** — max 10 MB; PDF/images/Word |
+| `POST /v2/workers/uploads/kyc/complete` | **KYC presign (step 2)** — returns `{ document }`; append to `kyc_documents` on create, or use `/:id/...` routes to auto-apply |
+| `POST /v2/workers/:id/uploads/profile/upload-url` | Profile presign for existing worker; `complete` auto-updates `image_url` |
+| `POST /v2/workers/:id/uploads/profile/complete` | Same body as org-level complete; `apply_to_worker_id` = `:id` |
+| `POST /v2/workers/:id/uploads/kyc/upload-url` | KYC presign for existing worker |
+| `POST /v2/workers/:id/uploads/kyc/complete` | Appends one KYC doc to worker (max 10) |
+| `GET /v2/workers/:id/media/profile` | Stream profile bytes (JWT) if presigned GET unavailable |
+| `GET /v2/workers/:id/media/kyc/:docIndex` | Stream KYC doc by index in `kyc_documents` |
+| `POST /v2/workers` | Create org user (legacy multipart `profile_image` / `kyc_documents` still supported) |
+| `PATCH /v2/workers/:id` | Update staff (legacy multipart still supported) |
 | `DELETE /v2/workers/:id` | Soft-deactivate (`active=false`) |
 | `POST /v2/workers/activation/:id` | Approve or reject pending activation (`{ action, note? }`) |
 
-`POST /v2/workers` body (create): `full_name`, `role_id`, `email`, `password` (min 8), optional `phone`, `active`, `territory_id`, `metadata_json`.
+**Presigned staff uploads** use the same S3 bucket CORS rules as ticket attachments — see [`docs/S3_CORS_SETUP.md`](docs/S3_CORS_SETUP.md).
+
+`POST /v2/workers` body (create): `full_name`, `role_id`, `email`, `password` (min 8), optional `phone`, `active`, `territory_id`, `metadata_json`, optional `image_url` (from profile complete), optional `kyc_documents` (array from KYC complete).
 
 AI suggestions are created asynchronously when a citizen files via Telegram (`telegramFlow` → OpenRouter → `ai_ticket_suggestions`). Clients should use these v2 endpoints rather than querying `ai_ticket_suggestions` directly.
 

@@ -1,6 +1,6 @@
-# S3 CORS for ticket attachment uploads (browser / Flutter web)
+# S3 CORS for presigned uploads (browser / Flutter web)
 
-Presigned `PUT` uploads go **directly from the browser to S3**. The API CORS settings do **not** apply to that request — the **S3 bucket** must allow your app origin.
+Presigned `PUT` uploads (ticket attachments **and** staff profile / KYC) go **directly from the browser to S3**. The API CORS settings do **not** apply to that request — the **S3 bucket** must allow your app origin.
 
 ## Symptoms
 
