@@ -73,8 +73,11 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 | `POST /v2/tickets/assign` | Offer to worker; body `{ ticket_id, worker_id }` (preferred for assign; `/status` with `worker_id` still supported) |
 | `POST /v2/tickets/accept` | Worker accepts current offer; body `{ ticket_id }` |
 | `POST /v2/tickets/reject` | Worker rejects offer; body `{ ticket_id, reason }` |
-| `GET /v2/tickets/:id/attachments` | Paginated `notes` + `attachments` (same `limit`/`offset` each); `preview_url` when `can_preview_media` |
-| `POST /v2/tickets/:id/attachments` | Multipart: optional `content`, optional `file` (at least one); optional `note_type`; creates note and/or attachment |
+| `GET /v2/tickets/:id/attachments` | Paginated `notes` + `attachments` (same `limit`/`offset` each); `preview_url` when `can_preview_media` (S3/Supabase signed URL, or `/v2/tickets/:id/attachments/:attachmentId/media` on local RDS) |
+| `GET /v2/tickets/:id/attachments/:attachmentId/media` | Stream attachment file (Bearer JWT). Use when `preview_url` is a `/tickets/.../media` path. |
+| `POST /v2/tickets/:id/attachments/upload-url` | **Presigned upload (step 1):** body `{ file_name, mime_type, file_size_bytes }` → `{ upload_url, storage_path, method: "PUT", headers, expires_in, storage_backend }`. Client `PUT`s the file to `upload_url`, then calls `complete`. **S3 bucket CORS required** for browser/Flutter web — see [`docs/S3_CORS_SETUP.md`](docs/S3_CORS_SETUP.md). |
+| `POST /v2/tickets/:id/attachments/complete` | **Presigned upload (step 2):** body `{ storage_path, file_name, mime_type, file_size_bytes, content?, note_type?, is_internal? }` → `{ note, attachment }` with `preview_url`. |
+| `POST /v2/tickets/:id/attachments` | Legacy multipart: optional `content`, optional `file` (at least one); optional `note_type` |
 | `GET /v2/tickets/:id/ai-suggestion` | Pending AI suggestion (`super_admin` / `central_support` only; latest completed, unconfirmed, or `null`) |
 | `POST /v2/tickets/confirm-ai` | Apply AI suggestion to empty ticket fields; body `{ ticket_id, suggestion_id }`; same roles only |
 
@@ -123,25 +126,38 @@ Paginated response: `{ bucket, items, pagination, filters }`.
 | `sort` | `name` (default), `created`, or `last_login` |
 | `order` | `asc` or `desc` (default `asc` for name, `desc` for dates) |
 | `active` | `true` / `false` — filter by account active flag |
-| `keyword` or `search` | Search `full_name`, `email`, `phone` |
+| `keyword` or `search` | Search `full_name`, `email`, `phone`, and linked **territory name** |
 | `role` | Filter by `roles.name` (e.g. `ground_worker`) |
 | `role_id` | Filter by role UUID |
-| `territory_id` | Users linked via `user_territories` |
+| `territory_id` | Filter to users linked to this territory UUID |
+| `territory` or `territory_name` | Filter by partial territory **name** (ignored if `territory_id` is set) |
 | `include_pending` | `false` to omit pending activation rows (default `true`) |
 | `pending_limit` | Pending table page size (default `20`, max `50`) |
 | `pending_offset` | Pending rows to skip |
 
-Response: `workers`, `pagination`, `pending`, `pending_pagination`, `summary` (`active` / `inactive` / `total` for org), `territories`, `roles`, echoed `filters`.
+Response: `workers`, `pagination`, `pending`, `pending_pagination`, `summary` (`active` / `inactive` / `total` for org), `territories`, `roles`, echoed `filters`. Each worker (and pending row) includes `image_url` (storage path) and `profile_image_url` (presigned URL for the UI).
 
 | Endpoint | Description |
 |----------|-------------|
 | `GET /v2/workers/:id` | Staff detail (`role_id`, `territories`) |
-| `POST /v2/workers` | Create org user (email + password stored as bcrypt hash) |
-| `PATCH /v2/workers/:id` | Update staff (`full_name`, `phone`, `email`, `role_id`, `active`, `territory_id`, `metadata_json`, `password`) |
+| `POST /v2/workers/uploads/profile/upload-url` | **Profile presign (step 1)** — `{ file_name, mime_type, file_size_bytes }` (max 5 MB; JPEG/PNG/WebP) |
+| `POST /v2/workers/uploads/profile/complete` | **Profile presign (step 2)** — `{ storage_path, file_name, mime_type, file_size_bytes, apply_to_worker_id? }` → `{ image_url, profile_image_url }`. Omit `apply_to_worker_id` on create; pass `image_url` in `POST /v2/workers`. |
+| `POST /v2/workers/uploads/kyc/upload-url` | **KYC presign (step 1)** — max 10 MB; PDF/images/Word |
+| `POST /v2/workers/uploads/kyc/complete` | **KYC presign (step 2)** — returns `{ document }`; append to `kyc_documents` on create, or use `/:id/...` routes to auto-apply |
+| `POST /v2/workers/:id/uploads/profile/upload-url` | Profile presign for existing worker; `complete` auto-updates `image_url` |
+| `POST /v2/workers/:id/uploads/profile/complete` | Same body as org-level complete; `apply_to_worker_id` = `:id` |
+| `POST /v2/workers/:id/uploads/kyc/upload-url` | KYC presign for existing worker |
+| `POST /v2/workers/:id/uploads/kyc/complete` | Appends one KYC doc to worker (max 10) |
+| `GET /v2/workers/:id/media/profile` | Stream profile bytes (JWT) if presigned GET unavailable |
+| `GET /v2/workers/:id/media/kyc/:docIndex` | Stream KYC doc by index in `kyc_documents` |
+| `POST /v2/workers` | Create org user (legacy multipart `profile_image` / `kyc_documents` still supported) |
+| `PATCH /v2/workers/:id` | Update staff (legacy multipart still supported) |
 | `DELETE /v2/workers/:id` | Soft-deactivate (`active=false`) |
 | `POST /v2/workers/activation/:id` | Approve or reject pending activation (`{ action, note? }`) |
 
-`POST /v2/workers` body (create): `full_name`, `role_id`, `email`, `password` (min 8), optional `phone`, `active`, `territory_id`, `metadata_json`.
+**Presigned staff uploads** use the same S3 bucket CORS rules as ticket attachments — see [`docs/S3_CORS_SETUP.md`](docs/S3_CORS_SETUP.md).
+
+`POST /v2/workers` body (create): `full_name`, `role_id`, `email`, `password` (min 8), optional `phone`, `active`, `territory_id`, `metadata_json`, optional `image_url` (from profile complete), optional `kyc_documents` (array from KYC complete).
 
 AI suggestions are created asynchronously when a citizen files via Telegram (`telegramFlow` → OpenRouter → `ai_ticket_suggestions`). Clients should use these v2 endpoints rather than querying `ai_ticket_suggestions` directly.
 
@@ -171,6 +187,7 @@ Set `JWT_SECRET` (min 32 characters) and `DATABASE_URL` in `.env.local`. Apply m
 
 ```bash
 npm run seed:passwords
+npm run seed:staff-profile-placeholder   # upload default avatar + backfill users without image_url
 ```
 
 Default test password: `Vocal!Test2026` (see `scripts/seed-passwords.ts`).

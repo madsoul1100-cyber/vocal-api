@@ -1,5 +1,28 @@
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
-import { signedUrlFor, signedUrlsFor, uploadWorkerAttachment } from '@/services/attachmentService.js'
+import { isPostgresMode, dbQuery } from '@/lib/db.js'
+import {
+  BUCKET_NAME,
+  createTicketAttachmentUploadUrl,
+  isValidTicketAttachmentStoragePath,
+  parseTicketAttachmentStorageRef,
+  readTicketAttachmentObject,
+  signedUrlFor,
+  signedUrlsFor,
+  ticketAttachmentMediaPath,
+  type TicketAttachmentUploadUrlResult,
+  uploadWorkerAttachment,
+  usesLocalTicketAttachmentFiles,
+  verifyTicketAttachmentObject,
+} from '@/services/attachmentService.js'
+import { resolveExistingLocalObjectPath } from '@/lib/postgresCompat/storage.js'
+
+function attachmentTypeFromMime(mime: string): TicketAttachmentItem['attachment_type'] {
+  if (mime.startsWith('image/')) return 'image'
+  if (mime.startsWith('video/')) return 'video'
+  if (mime.startsWith('audio/')) return 'audio'
+  if (mime === 'application/pdf' || mime.startsWith('application/')) return 'document'
+  return 'other'
+}
 import type { NoteType } from '@/types/database.js'
 
 const PRIVILEGED_ROLES = ['super_admin', 'central_support']
@@ -129,21 +152,181 @@ async function assertTicketInOrg(ticketId: string, organizationId: string): Prom
   return { ok: true, ticket: data }
 }
 
-/** Notes + attachments for one ticket (monolith page.tsx parity). */
-export async function listTicketNotesAndAttachments(
+function mapNoteRow(r: {
+  id: string
+  ticket_id: string
+  author_user_id: string | null
+  note_type: string
+  content: string
+  is_internal: boolean
+  created_at: string
+  author_full_name?: string | null
+  author?: { full_name?: string } | null
+}): TicketNoteItem {
+  const authorName =
+    r.author_full_name ??
+    (r.author && typeof r.author === 'object' ? r.author.full_name : null) ??
+    null
+  return {
+    id: r.id,
+    ticket_id: r.ticket_id,
+    author_user_id: r.author_user_id,
+    author_name: authorName ?? null,
+    note_type: r.note_type as NoteType,
+    content: r.content,
+    is_internal: r.is_internal,
+    created_at: r.created_at,
+  }
+}
+
+async function mapAttachmentRows(
+  rows: Array<{
+    id: string
+    ticket_id: string
+    file_name: string
+    storage_path: string
+    mime_type: string | null
+    file_size_bytes: number | null
+    attachment_type: string | null
+    created_at: string
+  }>,
+  can_preview_media: boolean,
+  signed: Record<string, string>,
+  useLocalMedia: boolean,
+): Promise<TicketAttachmentItem[]> {
+  return Promise.all(
+    rows.map(async (r) => {
+      const legacy =
+        r.storage_path.startsWith('telegram:') || r.storage_path.startsWith('twilio:')
+      let preview_url: string | null = null
+      if (can_preview_media && !legacy) {
+        if (useLocalMedia) {
+          const { key } = parseTicketAttachmentStorageRef(r.storage_path)
+          const onDisk = await resolveExistingLocalObjectPath(BUCKET_NAME, key)
+          preview_url = onDisk ? ticketAttachmentMediaPath(r.ticket_id, r.id) : null
+        } else {
+          preview_url = signed[r.storage_path] ?? null
+        }
+      }
+      return {
+        id: r.id,
+        ticket_id: r.ticket_id,
+        file_name: r.file_name,
+        mime_type: r.mime_type,
+        file_size_bytes: r.file_size_bytes,
+        attachment_type: (r.attachment_type as TicketAttachmentItem['attachment_type']) ?? null,
+        created_at: r.created_at,
+        preview_url,
+        legacy_telegram: legacy,
+      }
+    }),
+  )
+}
+
+async function listTicketNotesAndAttachmentsPg(
   ticketId: string,
-  organizationId: string,
-  opts: ListTicketNotesAttachmentsOpts = {},
-  viewerRole?: string | null,
-): Promise<ListTicketNotesAttachmentsResult | { error: string }> {
-  const ticketRes = await assertTicketInOrg(ticketId, organizationId)
-  if (!ticketRes.ok) return { error: ticketRes.error }
-  const ticket = ticketRes.ticket
+  limit: number,
+  offset: number,
+  can_preview_media: boolean,
+): Promise<
+  | {
+      notes: TicketNoteItem[]
+      attachments: TicketAttachmentItem[]
+      notesTotal: number
+      attachmentsTotal: number
+    }
+  | { error: string }
+> {
+  try {
+    const [notesCountRes, attachmentsCountRes, notesRes, attachmentsRes] = await Promise.all([
+      dbQuery<{ c: string }>(
+        `SELECT COUNT(*)::text AS c FROM ticket_notes
+         WHERE ticket_id = $1 AND soft_deleted = false`,
+        [ticketId],
+      ),
+      dbQuery<{ c: string }>(
+        `SELECT COUNT(*)::text AS c FROM ticket_attachments WHERE ticket_id = $1`,
+        [ticketId],
+      ),
+      dbQuery<{
+        id: string
+        ticket_id: string
+        author_user_id: string | null
+        note_type: string
+        content: string
+        is_internal: boolean
+        created_at: string
+        author_full_name: string | null
+      }>(
+        `SELECT tn.id, tn.ticket_id, tn.author_user_id, tn.note_type, tn.content, tn.is_internal,
+                tn.created_at, u.full_name AS author_full_name
+         FROM ticket_notes tn
+         LEFT JOIN users u ON u.id = tn.author_user_id
+         WHERE tn.ticket_id = $1 AND tn.soft_deleted = false
+         ORDER BY tn.created_at DESC
+         LIMIT $2 OFFSET $3`,
+        [ticketId, limit, offset],
+      ),
+      dbQuery<{
+        id: string
+        ticket_id: string
+        file_name: string
+        storage_path: string
+        mime_type: string | null
+        file_size_bytes: number | null
+        attachment_type: string | null
+        created_at: string
+      }>(
+        `SELECT id, ticket_id, file_name, storage_path, mime_type, file_size_bytes,
+                attachment_type, created_at
+         FROM ticket_attachments
+         WHERE ticket_id = $1
+         ORDER BY created_at ASC
+         LIMIT $2 OFFSET $3`,
+        [ticketId, limit, offset],
+      ),
+    ])
 
-  let limit = opts.limit ?? DEFAULT_LIMIT
-  limit = Math.min(MAX_LIMIT, Math.max(1, limit))
-  const offset = Math.max(0, opts.offset ?? 0)
+    const notesTotal = Number(notesCountRes.rows[0]?.c ?? 0)
+    const attachmentsTotal = Number(attachmentsCountRes.rows[0]?.c ?? 0)
+    const paths = attachmentsRes.rows.map((r) => r.storage_path)
+    const useLocalMedia = usesLocalTicketAttachmentFiles()
+    const signed =
+      can_preview_media && !useLocalMedia ? await signedUrlsFor(paths) : {}
 
+    const attachments = await mapAttachmentRows(
+      attachmentsRes.rows,
+      can_preview_media,
+      signed,
+      useLocalMedia,
+    )
+
+    return {
+      notes: notesRes.rows.map(mapNoteRow),
+      attachments,
+      notesTotal,
+      attachmentsTotal,
+    }
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Notes/attachments query failed'
+    return { error: message }
+  }
+}
+
+async function listTicketNotesAndAttachmentsSupabase(
+  ticketId: string,
+  limit: number,
+  offset: number,
+  can_preview_media: boolean,
+): Promise<
+  | {
+      notes: TicketNoteItem[]
+      attachments: TicketAttachmentItem[]
+      notesTotal: number
+      attachmentsTotal: number
+    }
+  | { error: string }
+> {
   const supabase = createSupabaseServiceClient()
 
   const notesQuery = supabase
@@ -175,49 +358,78 @@ export async function listTicketNotesAndAttachments(
   if (notesRes.error) return { error: notesRes.error.message }
   if (attachmentsRes.error) return { error: attachmentsRes.error.message }
 
+  const paths = (attachmentsRes.data ?? []).map((r) => r.storage_path as string)
+  const useLocalMedia = usesLocalTicketAttachmentFiles()
+  const signed = can_preview_media && !useLocalMedia ? await signedUrlsFor(paths) : {}
+
+  const notes = (notesRes.data ?? []).map((r) =>
+    mapNoteRow({
+      id: r.id as string,
+      ticket_id: r.ticket_id as string,
+      author_user_id: r.author_user_id as string | null,
+      note_type: r.note_type as string,
+      content: r.content as string,
+      is_internal: r.is_internal as boolean,
+      created_at: r.created_at as string,
+      author: r.author as { full_name?: string } | null,
+    }),
+  )
+
+  const attachments = await mapAttachmentRows(
+    (attachmentsRes.data ?? []).map((r) => ({
+      id: r.id as string,
+      ticket_id: r.ticket_id as string,
+      file_name: r.file_name as string,
+      storage_path: r.storage_path as string,
+      mime_type: (r.mime_type as string | null) ?? null,
+      file_size_bytes: (r.file_size_bytes as number | null) ?? null,
+      attachment_type: (r.attachment_type as string | null) ?? null,
+      created_at: r.created_at as string,
+    })),
+    can_preview_media,
+    signed,
+    useLocalMedia,
+  )
+
+  return {
+    notes,
+    attachments,
+    notesTotal: notesRes.count ?? 0,
+    attachmentsTotal: attachmentsRes.count ?? 0,
+  }
+}
+
+/** Notes + attachments for one ticket (monolith page.tsx parity). */
+export async function listTicketNotesAndAttachments(
+  ticketId: string,
+  organizationId: string,
+  opts: ListTicketNotesAttachmentsOpts = {},
+  viewerRole?: string | null,
+): Promise<ListTicketNotesAttachmentsResult | { error: string }> {
+  const ticketRes = await assertTicketInOrg(ticketId, organizationId)
+  if (!ticketRes.ok) return { error: ticketRes.error }
+  const ticket = ticketRes.ticket
+
+  let limit = opts.limit ?? DEFAULT_LIMIT
+  limit = Math.min(MAX_LIMIT, Math.max(1, limit))
+  const offset = Math.max(0, opts.offset ?? 0)
+
   const can_preview_media = canPreviewAttachmentMedia(
     viewerRole,
     ticket.citizen_identity_revealed_at as string | null,
   )
 
-  const paths = (attachmentsRes.data ?? []).map((r) => r.storage_path as string)
-  const signed = can_preview_media ? await signedUrlsFor(paths) : {}
+  const listRes = isPostgresMode()
+    ? await listTicketNotesAndAttachmentsPg(ticketId, limit, offset, can_preview_media)
+    : await listTicketNotesAndAttachmentsSupabase(ticketId, limit, offset, can_preview_media)
 
-  const notes: TicketNoteItem[] = (notesRes.data ?? []).map((r) => {
-    const author = r.author as { full_name?: string } | null
-    return {
-      id: r.id as string,
-      ticket_id: r.ticket_id as string,
-      author_user_id: r.author_user_id as string | null,
-      author_name: author?.full_name ?? null,
-      note_type: r.note_type as NoteType,
-      content: r.content as string,
-      is_internal: r.is_internal as boolean,
-      created_at: r.created_at as string,
-    }
-  })
-
-  const attachments: TicketAttachmentItem[] = (attachmentsRes.data ?? []).map((r) => {
-    const storagePath = r.storage_path as string
-    const legacy = storagePath.startsWith('telegram:')
-    return {
-      id: r.id as string,
-      ticket_id: r.ticket_id as string,
-      file_name: r.file_name as string,
-      mime_type: (r.mime_type as string | null) ?? null,
-      file_size_bytes: (r.file_size_bytes as number | null) ?? null,
-      attachment_type: (r.attachment_type as TicketAttachmentItem['attachment_type']) ?? null,
-      created_at: r.created_at as string,
-      preview_url: can_preview_media && !legacy ? (signed[storagePath] ?? null) : null,
-      legacy_telegram: legacy,
-    }
-  })
+  if ('error' in listRes) return { error: listRes.error }
 
   return {
-    notes,
-    attachments,
-    notes_pagination: buildPagination(offset, limit, notesRes.count ?? 0),
-    attachments_pagination: buildPagination(offset, limit, attachmentsRes.count ?? 0),
+    notes: listRes.notes,
+    attachments: listRes.attachments,
+    notes_pagination: buildPagination(offset, limit, listRes.notesTotal),
+    attachments_pagination: buildPagination(offset, limit, listRes.attachmentsTotal),
     can_preview_media,
   }
 }
@@ -264,37 +476,61 @@ export async function createTicketNotesAndAttachments(
   if (content) {
     const noteType = parseNoteType(input.note_type)
     const isInternal = input.is_internal !== false
-    const { data: row, error: noteErr } = await supabase
-      .from('ticket_notes')
-      .insert({
-        ticket_id: ticketId,
-        author_user_id: userId,
-        note_type: noteType,
-        content,
-        is_internal: isInternal,
-      })
-      .select(
-        `
-        id, ticket_id, author_user_id, note_type, content, is_internal, created_at,
-        author:users!ticket_notes_author_user_id_fkey(full_name)
-      `,
+
+    if (isPostgresMode()) {
+      const ins = await dbQuery<{
+        id: string
+        ticket_id: string
+        author_user_id: string | null
+        note_type: string
+        content: string
+        is_internal: boolean
+        created_at: string
+        author_full_name: string | null
+      }>(
+        `INSERT INTO ticket_notes (ticket_id, author_user_id, note_type, content, is_internal)
+         VALUES ($1, $2, $3, $4, $5)
+         RETURNING id, ticket_id, author_user_id, note_type, content, is_internal, created_at,
+           (SELECT full_name FROM users WHERE id = $2) AS author_full_name`,
+        [ticketId, userId, noteType, content, isInternal],
       )
-      .single()
+      const row = ins.rows[0]
+      if (!row) {
+        return { error: 'Note insert failed', status: 500 }
+      }
+      note = mapNoteRow(row)
+    } else {
+      const { data: row, error: noteErr } = await supabase
+        .from('ticket_notes')
+        .insert({
+          ticket_id: ticketId,
+          author_user_id: userId,
+          note_type: noteType,
+          content,
+          is_internal: isInternal,
+        })
+        .select(
+          `
+          id, ticket_id, author_user_id, note_type, content, is_internal, created_at,
+          author:users!ticket_notes_author_user_id_fkey(full_name)
+        `,
+        )
+        .single()
 
-    if (noteErr || !row) {
-      return { error: noteErr?.message ?? 'Note insert failed', status: 500 }
-    }
+      if (noteErr || !row) {
+        return { error: noteErr?.message ?? 'Note insert failed', status: 500 }
+      }
 
-    const author = row.author as { full_name?: string } | null
-    note = {
-      id: row.id as string,
-      ticket_id: row.ticket_id as string,
-      author_user_id: row.author_user_id as string | null,
-      author_name: author?.full_name ?? null,
-      note_type: row.note_type as NoteType,
-      content: row.content as string,
-      is_internal: row.is_internal as boolean,
-      created_at: row.created_at as string,
+      note = mapNoteRow({
+        id: row.id as string,
+        ticket_id: row.ticket_id as string,
+        author_user_id: row.author_user_id as string | null,
+        note_type: row.note_type as string,
+        content: row.content as string,
+        is_internal: row.is_internal as boolean,
+        created_at: row.created_at as string,
+        author: row.author as { full_name?: string } | null,
+      })
     }
 
     await supabase.from('audit_logs').insert({
@@ -340,7 +576,10 @@ export async function createTicketNotesAndAttachments(
       return { error: insErr?.message ?? 'Attachment insert failed', status: 500 }
     }
 
-    const preview_url = await signedUrlFor(stored.storage_path)
+    const useLocalMedia = usesLocalTicketAttachmentFiles()
+    const preview_url = useLocalMedia
+      ? ticketAttachmentMediaPath(ticketId, row.id as string)
+      : await signedUrlFor(stored.storage_path)
     attachment = {
       id: row.id as string,
       ticket_id: row.ticket_id as string,
@@ -355,6 +594,299 @@ export async function createTicketNotesAndAttachments(
   }
 
   return { note, attachment }
+}
+
+/** Stream bytes for GET .../attachments/:attachmentId/media (local/S3/Supabase). */
+export async function streamTicketAttachmentMedia(
+  ticketId: string,
+  attachmentId: string,
+  organizationId: string,
+  viewerRole?: string | null,
+): Promise<
+  | { ok: true; data: Buffer; contentType: string; fileName: string }
+  | { ok: false; error: string; status: number }
+> {
+  const ticketRes = await assertTicketInOrg(ticketId, organizationId)
+  if (!ticketRes.ok) {
+    return {
+      ok: false,
+      error: ticketRes.error,
+      status: ticketRes.error === 'Ticket not found' ? 404 : 500,
+    }
+  }
+
+  const can_preview = canPreviewAttachmentMedia(
+    viewerRole,
+    ticketRes.ticket.citizen_identity_revealed_at as string | null,
+  )
+  if (!can_preview) {
+    return { ok: false, error: 'Forbidden', status: 403 }
+  }
+
+  const supabase = createSupabaseServiceClient()
+  const { data: row, error } = await supabase
+    .from('ticket_attachments')
+    .select('id, ticket_id, file_name, storage_path, mime_type')
+    .eq('id', attachmentId)
+    .eq('ticket_id', ticketId)
+    .maybeSingle()
+
+  if (error) return { ok: false, error: error.message, status: 500 }
+  if (!row) return { ok: false, error: 'Attachment not found', status: 404 }
+
+  const storage_path = row.storage_path as string
+  if (storage_path.startsWith('telegram:') || storage_path.startsWith('twilio:')) {
+    return { ok: false, error: 'Legacy attachment not available for preview', status: 404 }
+  }
+
+  const blob = await readTicketAttachmentObject(storage_path)
+  if (!blob) {
+    return { ok: false, error: 'File not found in storage', status: 404 }
+  }
+
+  return {
+    ok: true,
+    data: blob.data,
+    contentType: (row.mime_type as string | null) ?? blob.contentType,
+    fileName: (row.file_name as string) || 'attachment',
+  }
+}
+
+export interface IssueTicketAttachmentUploadUrlInput {
+  file_name: string
+  mime_type: string
+  file_size_bytes: number
+}
+
+/** Step 1: presigned PUT URL for direct browser upload (v2). */
+export async function issueTicketAttachmentUploadUrl(
+  ticketId: string,
+  organizationId: string,
+  input: IssueTicketAttachmentUploadUrlInput,
+): Promise<TicketAttachmentUploadUrlResult | { error: string; status: number }> {
+  const file_name = input.file_name?.trim()
+  const mime_type = input.mime_type?.trim()
+  if (!file_name || !mime_type) {
+    return { error: 'file_name and mime_type required', status: 400 }
+  }
+  const file_size_bytes = Number(input.file_size_bytes)
+  if (!Number.isFinite(file_size_bytes)) {
+    return { error: 'file_size_bytes required', status: 400 }
+  }
+
+  const ticketRes = await assertTicketInOrg(ticketId, organizationId)
+  if (!ticketRes.ok) {
+    return {
+      error: ticketRes.error,
+      status: ticketRes.error === 'Ticket not found' ? 404 : 500,
+    }
+  }
+
+  const issued = await createTicketAttachmentUploadUrl({
+    org_id: organizationId,
+    ticket_id: ticketId,
+    file_name,
+    mime_type,
+    file_size_bytes,
+  })
+  if ('error' in issued) {
+    const status = issued.error.includes('DATABASE_URL') ? 503 : 400
+    return { error: issued.error, status }
+  }
+  return issued
+}
+
+export interface CompleteTicketAttachmentUploadInput {
+  storage_path: string
+  file_name: string
+  mime_type: string
+  file_size_bytes: number
+  content?: string
+  note_type?: string
+  is_internal?: boolean
+}
+
+/** Step 2: register DB row after client PUT to presigned URL. */
+export async function completeTicketAttachmentUpload(
+  ticketId: string,
+  organizationId: string,
+  userId: string,
+  input: CompleteTicketAttachmentUploadInput,
+): Promise<
+  | { note: TicketNoteItem | null; attachment: TicketAttachmentItem | null }
+  | { error: string; status: number }
+> {
+  const storage_path = input.storage_path?.trim()
+  const file_name = input.file_name?.trim()
+  const mime_type = input.mime_type?.trim().toLowerCase()
+  if (!storage_path || !file_name || !mime_type) {
+    return { error: 'storage_path, file_name, and mime_type required', status: 400 }
+  }
+  const file_size_bytes = Number(input.file_size_bytes)
+  if (!Number.isFinite(file_size_bytes) || file_size_bytes < 1) {
+    return { error: 'file_size_bytes required', status: 400 }
+  }
+
+  const ticketRes = await assertTicketInOrg(ticketId, organizationId)
+  if (!ticketRes.ok) {
+    return {
+      error: ticketRes.error,
+      status: ticketRes.error === 'Ticket not found' ? 404 : 500,
+    }
+  }
+
+  if (!isValidTicketAttachmentStoragePath(storage_path, organizationId, ticketId)) {
+    return { error: 'Invalid storage_path for this ticket', status: 400 }
+  }
+
+  const exists = await verifyTicketAttachmentObject(storage_path)
+  if (!exists) {
+    return { error: 'File not found in storage — upload may have failed or expired', status: 400 }
+  }
+
+  const supabase = createSupabaseServiceClient()
+  let note: TicketNoteItem | null = null
+  let attachment: TicketAttachmentItem | null = null
+
+  const content = input.content?.trim()
+  if (content) {
+    const noteResult = await insertTicketNote({
+      ticketId,
+      organizationId,
+      userId,
+      content,
+      note_type: input.note_type,
+      is_internal: input.is_internal,
+    })
+    if ('error' in noteResult) return noteResult
+    note = noteResult.note
+  }
+
+  const attType = attachmentTypeFromMime(mime_type)
+  const { data: row, error: insErr } = await supabase
+    .from('ticket_attachments')
+    .insert({
+      ticket_id: ticketId,
+      file_name,
+      storage_path,
+      mime_type,
+      file_size_bytes,
+      attachment_type: attType,
+      uploaded_by: userId,
+    })
+    .select('id, ticket_id, file_name, mime_type, file_size_bytes, attachment_type, created_at')
+    .single()
+
+  if (insErr || !row) {
+    return { error: insErr?.message ?? 'Attachment insert failed', status: 500 }
+  }
+
+  const useLocalMedia = usesLocalTicketAttachmentFiles()
+  const preview_url = useLocalMedia
+    ? ticketAttachmentMediaPath(ticketId, row.id as string)
+    : await signedUrlFor(storage_path)
+  attachment = {
+    id: row.id as string,
+    ticket_id: row.ticket_id as string,
+    file_name: row.file_name as string,
+    mime_type: (row.mime_type as string | null) ?? null,
+    file_size_bytes: (row.file_size_bytes as number | null) ?? null,
+    attachment_type: (row.attachment_type as TicketAttachmentItem['attachment_type']) ?? null,
+    created_at: row.created_at as string,
+    preview_url,
+    legacy_telegram: false,
+  }
+
+  return { note, attachment }
+}
+
+async function insertTicketNote(args: {
+  ticketId: string
+  organizationId: string
+  userId: string
+  content: string
+  note_type?: string
+  is_internal?: boolean
+}): Promise<{ note: TicketNoteItem } | { error: string; status: number }> {
+  const noteType = parseNoteType(args.note_type)
+  const isInternal = args.is_internal !== false
+  const supabase = createSupabaseServiceClient()
+
+  if (isPostgresMode()) {
+    const ins = await dbQuery<{
+      id: string
+      ticket_id: string
+      author_user_id: string | null
+      note_type: string
+      content: string
+      is_internal: boolean
+      created_at: string
+      author_full_name: string | null
+    }>(
+      `INSERT INTO ticket_notes (ticket_id, author_user_id, note_type, content, is_internal)
+       VALUES ($1, $2, $3, $4, $5)
+       RETURNING id, ticket_id, author_user_id, note_type, content, is_internal, created_at,
+         (SELECT full_name FROM users WHERE id = $2) AS author_full_name`,
+      [args.ticketId, args.userId, noteType, args.content, isInternal],
+    )
+    const row = ins.rows[0]
+    if (!row) return { error: 'Note insert failed', status: 500 }
+    const note = mapNoteRow(row)
+    await supabase.from('audit_logs').insert({
+      organization_id: args.organizationId,
+      event_type: 'ticket_note_added',
+      entity_type: 'ticket',
+      entity_id: args.ticketId,
+      actor_type: 'user',
+      actor_user_id: args.userId,
+      new_value_json: { note_id: note.id, note_type: noteType, is_internal: isInternal },
+    })
+    return { note }
+  }
+
+  const { data: row, error: noteErr } = await supabase
+    .from('ticket_notes')
+    .insert({
+      ticket_id: args.ticketId,
+      author_user_id: args.userId,
+      note_type: noteType,
+      content: args.content,
+      is_internal: isInternal,
+    })
+    .select(
+      `
+      id, ticket_id, author_user_id, note_type, content, is_internal, created_at,
+      author:users!ticket_notes_author_user_id_fkey(full_name)
+    `,
+    )
+    .single()
+
+  if (noteErr || !row) {
+    return { error: noteErr?.message ?? 'Note insert failed', status: 500 }
+  }
+
+  const note = mapNoteRow({
+    id: row.id as string,
+    ticket_id: row.ticket_id as string,
+    author_user_id: row.author_user_id as string | null,
+    note_type: row.note_type as string,
+    content: row.content as string,
+    is_internal: row.is_internal as boolean,
+    created_at: row.created_at as string,
+    author: row.author as { full_name?: string } | null,
+  })
+
+  await supabase.from('audit_logs').insert({
+    organization_id: args.organizationId,
+    event_type: 'ticket_note_added',
+    entity_type: 'ticket',
+    entity_id: args.ticketId,
+    actor_type: 'user',
+    actor_user_id: args.userId,
+    new_value_json: { note_id: note.id, note_type: noteType, is_internal: isInternal },
+  })
+
+  return { note }
 }
 
 // Back-compat aliases

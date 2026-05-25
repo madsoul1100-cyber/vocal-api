@@ -50,13 +50,19 @@ Then run `npm run seed:passwords` in vocal-api (`DATABASE_URL` in `.env.local`, 
 
 ## 5. Attachments
 
-Without Supabase Storage, files are stored on disk:
+**v2 presigned upload (dashboard):** set `AWS_S3_BUCKET` + `AWS_REGION` (and credentials). Flow:
+
+1. `POST /v2/tickets/:id/attachments/upload-url` — get presigned PUT URL + `storage_path`
+2. Browser `PUT` file to `upload_url` with `Content-Type` header from response
+3. `POST /v2/tickets/:id/attachments/complete` — register `ticket_attachments` row
+
+Without S3 when `DATABASE_URL` is set, presigned upload returns `503`; use legacy `POST .../attachments` multipart or configure S3.
+
+Citizen webhook media still uses server-side upload (Telegram/WhatsApp). Local disk fallback for server uploads only:
 
 ```bash
 ATTACHMENT_STORAGE_PATH=./data/ticket-attachments
 ```
-
-For production, plan S3 (or keep Supabase Storage only for files).
 
 ## Notes
 

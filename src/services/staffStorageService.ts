@@ -5,11 +5,17 @@
 
 import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
-import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import {
+  DEFAULT_STAFF_PROFILE_STORAGE_PATH,
+  isDefaultStaffProfilePath,
+} from '@/constants/staffProfileDefaults.js'
+import { PutObjectCommand, S3Client, HeadObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
-import { GetObjectCommand } from '@aws-sdk/client-s3'
-import { localStoragePath } from '@/lib/postgresCompat/storage.js'
+import { localStoragePath, resolveExistingLocalObjectPath } from '@/lib/postgresCompat/storage.js'
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
+import { isPostgresMode } from '@/lib/db.js'
 import {
   STAFF_KYC_FILE_MAX_BYTES,
   STAFF_PROFILE_IMAGE_MAX_BYTES,
@@ -18,6 +24,22 @@ import {
 
 const SUPABASE_BUCKET = process.env.STAFF_STORAGE_BUCKET ?? 'staff-documents'
 const SIGNED_URL_TTL_SECONDS = 60 * 60
+/** Presigned PUT TTL for browser direct upload (profile / KYC). */
+export const STAFF_UPLOAD_URL_TTL_SECONDS = 15 * 60
+
+export type StaffUploadKind = 'profile' | 'kyc'
+
+export interface StaffPresignedUploadResult {
+  upload_url: string
+  storage_path: string
+  method: 'PUT'
+  headers: Record<string, string>
+  expires_in: number
+  kind: StaffUploadKind
+  storage_backend: 's3' | 'supabase'
+  cors_required?: boolean
+  cors_setup_doc?: string
+}
 
 const IMAGE_MIMES = new Set([
   'image/jpeg',
@@ -69,9 +91,13 @@ function s3Client(): S3Client {
   })
 }
 
-function buildObjectKey(
+export function staffStoragePathPrefix(orgId: string, kind: StaffUploadKind): string {
+  return `org/${orgId}/staff/${kind}/`
+}
+
+export function buildStaffObjectKey(
   orgId: string,
-  kind: 'profile' | 'kyc',
+  kind: StaffUploadKind,
   mime: string,
   originalName: string,
 ): string {
@@ -118,13 +144,28 @@ async function uploadToSupabase(
 }
 
 /** Storage key prefix: `s3:` for AWS, plain path for Supabase bucket. */
-function storageRef(key: string): string {
+export function storageRef(key: string): string {
   return isS3Configured() ? `s3:${key}` : key
 }
 
+/** Normalize DB paths so S3-backed refs always include the `s3:` prefix. */
+export function normalizeStaffStorageRef(ref: string): string {
+  const trimmed = ref.trim()
+  if (!trimmed) return storageRef(DEFAULT_STAFF_PROFILE_STORAGE_PATH)
+  if (trimmed.startsWith('s3:')) return trimmed
+  if (isS3Configured()) return `s3:${trimmed}`
+  return trimmed
+}
+
+export function resolveStaffProfileStoragePath(imageUrl: string | null | undefined): string {
+  const trimmed = typeof imageUrl === 'string' ? imageUrl.trim() : ''
+  return normalizeStaffStorageRef(trimmed || DEFAULT_STAFF_PROFILE_STORAGE_PATH)
+}
+
 function parseStorageRef(ref: string): { backend: 's3' | 'supabase'; key: string } {
-  if (ref.startsWith('s3:')) return { backend: 's3', key: ref.slice(3) }
-  return { backend: 'supabase', key: ref }
+  const normalized = normalizeStaffStorageRef(ref)
+  if (normalized.startsWith('s3:')) return { backend: 's3', key: normalized.slice(3) }
+  return { backend: 'supabase', key: normalized }
 }
 
 export async function uploadStaffProfileImage(args: {
@@ -140,7 +181,7 @@ export async function uploadStaffProfileImage(args: {
     return { error: 'Profile image must be under 5 MB' }
   }
 
-  const key = buildObjectKey(args.orgId, 'profile', args.mime, args.originalName)
+  const key = buildStaffObjectKey(args.orgId, 'profile', args.mime, args.originalName)
   const up = isS3Configured()
     ? await uploadToS3(key, args.buffer, args.mime)
     : await uploadToSupabase(key, args.buffer, args.mime)
@@ -170,7 +211,7 @@ export async function uploadStaffKycDocument(args: {
     return { error: 'Each KYC document must be under 10 MB' }
   }
 
-  const key = buildObjectKey(args.orgId, 'kyc', mime, args.originalName)
+  const key = buildStaffObjectKey(args.orgId, 'kyc', mime, args.originalName)
   const up = isS3Configured()
     ? await uploadToS3(key, args.buffer, mime)
     : await uploadToSupabase(key, args.buffer, mime)
@@ -185,11 +226,40 @@ export async function uploadStaffKycDocument(args: {
   }
 }
 
+const DEFAULT_PROFILE_ASSET = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../../assets/default-staff-profile.png',
+)
+
+/** Upload the bundled placeholder PNG if it is not already in storage. */
+export async function ensureDefaultStaffProfileAsset(): Promise<
+  { ok: true; storage_path: string } | { ok: false; error: string }
+> {
+  const key = DEFAULT_STAFF_PROFILE_STORAGE_PATH
+  const storage_path = storageRef(key)
+  const existing = await readStaffStorageObject(storage_path)
+  if (existing) return { ok: true, storage_path }
+
+  let buffer: Buffer
+  try {
+    buffer = await fs.readFile(DEFAULT_PROFILE_ASSET)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Could not read default profile asset'
+    return { ok: false, error: msg }
+  }
+
+  const up = isS3Configured()
+    ? await uploadToS3(key, buffer, 'image/png')
+    : await uploadToSupabase(key, buffer, 'image/png')
+  if (!up.ok) return { ok: false, error: up.error }
+  return { ok: true, storage_path }
+}
+
 export async function signedUrlForStaffStorage(
   storagePath: string | null | undefined,
 ): Promise<string | null> {
   if (!storagePath) return null
-  const { backend, key } = parseStorageRef(storagePath)
+  const { backend, key } = parseStorageRef(normalizeStaffStorageRef(storagePath))
 
   if (backend === 's3') {
     if (!isS3Configured()) return null
@@ -220,7 +290,7 @@ export function staffStorageBackend(): 's3' | 'supabase' {
 export async function readStaffStorageObject(
   storagePath: string,
 ): Promise<{ data: Buffer; contentType: string } | null> {
-  const { backend, key } = parseStorageRef(storagePath)
+  const { backend, key } = parseStorageRef(normalizeStaffStorageRef(storagePath))
 
   if (backend === 's3') {
     if (!isS3Configured()) return null
@@ -262,6 +332,160 @@ export async function readStaffStorageObject(
   }
 }
 
+export function isValidStaffStoragePathForOrg(
+  storagePath: string,
+  orgId: string,
+  kind: StaffUploadKind,
+): boolean {
+  const normalized = normalizeStaffStorageRef(storagePath.trim())
+  const key = normalized.startsWith('s3:') ? normalized.slice(3) : normalized
+  const prefix = staffStoragePathPrefix(orgId, kind)
+  if (!key.startsWith(prefix)) return false
+  const tail = key.slice(prefix.length)
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.[\w-]+--.+$/i.test(
+    tail,
+  )
+}
+
+export async function verifyStaffStorageObject(storagePath: string): Promise<boolean> {
+  const { backend, key } = parseStorageRef(normalizeStaffStorageRef(storagePath))
+  if (backend === 's3') {
+    if (!isS3Configured()) return false
+    try {
+      await s3Client().send(
+        new HeadObjectCommand({ Bucket: process.env.AWS_S3_BUCKET!, Key: key }),
+      )
+      return true
+    } catch {
+      return false
+    }
+  }
+  if (isS3Configured()) {
+    try {
+      await s3Client().send(
+        new HeadObjectCommand({ Bucket: process.env.AWS_S3_BUCKET!, Key: key }),
+      )
+      return true
+    } catch {
+      /* local / supabase */
+    }
+  }
+  const local = await resolveExistingLocalObjectPath(SUPABASE_BUCKET, key)
+  if (local) return true
+  try {
+    const supabase = createSupabaseServiceClient()
+    const { data, error } = await supabase.storage.from(SUPABASE_BUCKET).download(key)
+    return !error && !!data
+  } catch {
+    return false
+  }
+}
+
+function inferKycMime(mime: string, originalName: string): string {
+  let resolved = mime === 'application/octet-stream' ? 'application/pdf' : mime
+  const lowerName = originalName.toLowerCase()
+  if (resolved === 'application/octet-stream') {
+    if (lowerName.endsWith('.pdf')) resolved = 'application/pdf'
+    else if (lowerName.endsWith('.doc')) resolved = 'application/msword'
+    else if (lowerName.endsWith('.docx')) {
+      resolved = 'application/vnd.openxmlformats-officedocument.wordprocessingml.document'
+    }
+  }
+  return resolved
+}
+
+export async function createStaffPresignedUploadUrl(args: {
+  orgId: string
+  kind: StaffUploadKind
+  file_name: string
+  mime_type: string
+  file_size_bytes: number
+}): Promise<StaffPresignedUploadResult | { error: string }> {
+  const file_name = args.file_name.trim()
+  const mime_type = args.mime_type.trim().toLowerCase()
+  const size = args.file_size_bytes
+
+  if (!file_name || !mime_type) {
+    return { error: 'file_name and mime_type required' }
+  }
+
+  if (args.kind === 'profile') {
+    if (!IMAGE_MIMES.has(mime_type)) {
+      return { error: 'Profile image must be JPEG, PNG, or WebP' }
+    }
+    if (size < 1 || size > STAFF_PROFILE_IMAGE_MAX_BYTES) {
+      return { error: `file_size_bytes must be 1–${STAFF_PROFILE_IMAGE_MAX_BYTES}` }
+    }
+  } else {
+    const kycMime = inferKycMime(mime_type, file_name)
+    if (!KYC_MIMES.has(kycMime)) {
+      return { error: `File type not allowed: ${args.mime_type}` }
+    }
+    if (size < 1 || size > STAFF_KYC_FILE_MAX_BYTES) {
+      return { error: `file_size_bytes must be 1–${STAFF_KYC_FILE_MAX_BYTES}` }
+    }
+  }
+
+  if (isPostgresMode() && !isS3Configured()) {
+    return {
+      error:
+        'Direct staff upload requires AWS_S3_BUCKET when using DATABASE_URL, or use multipart POST/PATCH /workers.',
+    }
+  }
+
+  const mimeForKey =
+    args.kind === 'kyc' ? inferKycMime(mime_type, file_name) : mime_type
+  const objectKey = buildStaffObjectKey(args.orgId, args.kind, mimeForKey, file_name)
+  const storage_path = storageRef(objectKey)
+  const contentType = mimeForKey
+
+  if (isS3Configured()) {
+    try {
+      const upload_url = await getSignedUrl(
+        s3Client(),
+        new PutObjectCommand({
+          Bucket: process.env.AWS_S3_BUCKET!,
+          Key: objectKey,
+          ContentType: contentType,
+          ContentLength: size,
+        }),
+        { expiresIn: STAFF_UPLOAD_URL_TTL_SECONDS },
+      )
+      return {
+        upload_url,
+        storage_path,
+        method: 'PUT',
+        headers: { 'Content-Type': contentType },
+        expires_in: STAFF_UPLOAD_URL_TTL_SECONDS,
+        kind: args.kind,
+        storage_backend: 's3',
+        cors_required: true,
+        cors_setup_doc: 'docs/s3-cors-ticket-attachments.example.json',
+      }
+    } catch (err) {
+      return { error: err instanceof Error ? err.message : 'Presigned upload URL failed' }
+    }
+  }
+
+  const supabase = createSupabaseServiceClient()
+  const { data, error } = await supabase.storage
+    .from(SUPABASE_BUCKET)
+    .createSignedUploadUrl(objectKey, { upsert: false })
+  if (error || !data?.signedUrl) {
+    return { error: error?.message ?? 'Presigned upload URL failed' }
+  }
+
+  return {
+    upload_url: data.signedUrl,
+    storage_path,
+    method: 'PUT',
+    headers: { 'Content-Type': contentType },
+    expires_in: STAFF_UPLOAD_URL_TTL_SECONDS,
+    kind: args.kind,
+    storage_backend: 'supabase',
+  }
+}
+
 export async function enrichStaffMediaUrls<T extends {
   image_url: string | null
   kyc_documents: StaffKycDocument[]
@@ -271,7 +495,11 @@ export async function enrichStaffMediaUrls<T extends {
     kyc_documents: (StaffKycDocument & { download_url: string | null })[]
   }
 > {
-  const profile_image_url = await signedUrlForStaffStorage(row.image_url)
+  const profilePath = resolveStaffProfileStoragePath(row.image_url)
+  if (isDefaultStaffProfilePath(profilePath)) {
+    await ensureDefaultStaffProfileAsset()
+  }
+  const profile_image_url = await signedUrlForStaffStorage(profilePath)
   const kyc_documents = await Promise.all(
     row.kyc_documents.map(async (doc) => ({
       ...doc,
