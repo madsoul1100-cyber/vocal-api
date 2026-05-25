@@ -15,7 +15,12 @@ import {
 } from '@/lib/staffStatus.js'
 import { sanitizeKycDocumentsForDb, type StaffKycDocument } from '@/types/staffDocuments.js'
 import {
+  DEFAULT_STAFF_PROFILE_STORAGE_PATH,
+  resolveStaffProfileStoragePath,
+} from '@/constants/staffProfileDefaults.js'
+import {
   enrichStaffMediaUrls,
+  ensureDefaultStaffProfileAsset,
   readStaffStorageObject,
 } from '@/services/staffStorageService.js'
 import { listOrgTerritories, validateTerritoryIdsForOrg } from '@/services/territoryService.js'
@@ -918,6 +923,13 @@ export async function createOrgUser(
   const territory_id = resolvePrimaryTerritoryId(body, territory_ids)
 
   const profile = parseStaffProfileFromBody(body)
+  if (!profile.image_url) {
+    const asset = await ensureDefaultStaffProfileAsset()
+    if (!asset.ok) {
+      return { ok: false as const, status: 500, error: asset.error }
+    }
+    profile.image_url = DEFAULT_STAFF_PROFILE_STORAGE_PATH
+  }
 
   const supabase = createSupabaseServiceClient()
   const now = new Date().toISOString()
@@ -1152,8 +1164,8 @@ export async function streamWorkerStaffMedia(
   let contentType: string | undefined
 
   if (kind === 'profile') {
-    storagePath = row.image_url
-    fileName = 'profile.jpg'
+    storagePath = resolveStaffProfileStoragePath(row.image_url)
+    fileName = 'profile.png'
   } else {
     const idx = docIndex ?? -1
     const doc = row.kyc_documents[idx]
@@ -1165,8 +1177,8 @@ export async function streamWorkerStaffMedia(
     contentType = doc.mime_type ?? undefined
   }
 
-  if (!storagePath) {
-    return { ok: false, status: 404, error: 'No file on record' }
+  if (storagePath === DEFAULT_STAFF_PROFILE_STORAGE_PATH) {
+    await ensureDefaultStaffProfileAsset()
   }
 
   const file = await readStaffStorageObject(storagePath)

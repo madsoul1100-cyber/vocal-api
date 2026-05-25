@@ -171,6 +171,7 @@ Set `JWT_SECRET` (min 32 characters) and `DATABASE_URL` in `.env.local`. Apply m
 
 ```bash
 npm run seed:passwords
+npm run seed:staff-profile-placeholder   # upload default avatar + backfill users without image_url
 ```
 
 Default test password: `Vocal!Test2026` (see `scripts/seed-passwords.ts`).

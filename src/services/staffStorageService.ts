@@ -5,6 +5,12 @@
 
 import crypto from 'node:crypto'
 import fs from 'node:fs/promises'
+import path from 'node:path'
+import { fileURLToPath } from 'node:url'
+import {
+  DEFAULT_STAFF_PROFILE_STORAGE_PATH,
+  resolveStaffProfileStoragePath,
+} from '@/constants/staffProfileDefaults.js'
 import { PutObjectCommand, S3Client } from '@aws-sdk/client-s3'
 import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { GetObjectCommand } from '@aws-sdk/client-s3'
@@ -185,6 +191,35 @@ export async function uploadStaffKycDocument(args: {
   }
 }
 
+const DEFAULT_PROFILE_ASSET = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  '../../assets/default-staff-profile.png',
+)
+
+/** Upload the bundled placeholder PNG if it is not already in storage. */
+export async function ensureDefaultStaffProfileAsset(): Promise<
+  { ok: true; storage_path: string } | { ok: false; error: string }
+> {
+  const key = DEFAULT_STAFF_PROFILE_STORAGE_PATH
+  const storage_path = storageRef(key)
+  const existing = await readStaffStorageObject(storage_path)
+  if (existing) return { ok: true, storage_path }
+
+  let buffer: Buffer
+  try {
+    buffer = await fs.readFile(DEFAULT_PROFILE_ASSET)
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : 'Could not read default profile asset'
+    return { ok: false, error: msg }
+  }
+
+  const up = isS3Configured()
+    ? await uploadToS3(key, buffer, 'image/png')
+    : await uploadToSupabase(key, buffer, 'image/png')
+  if (!up.ok) return { ok: false, error: up.error }
+  return { ok: true, storage_path }
+}
+
 export async function signedUrlForStaffStorage(
   storagePath: string | null | undefined,
 ): Promise<string | null> {
@@ -271,7 +306,11 @@ export async function enrichStaffMediaUrls<T extends {
     kyc_documents: (StaffKycDocument & { download_url: string | null })[]
   }
 > {
-  const profile_image_url = await signedUrlForStaffStorage(row.image_url)
+  const profilePath = resolveStaffProfileStoragePath(row.image_url)
+  if (profilePath === DEFAULT_STAFF_PROFILE_STORAGE_PATH) {
+    await ensureDefaultStaffProfileAsset()
+  }
+  const profile_image_url = await signedUrlForStaffStorage(profilePath)
   const kyc_documents = await Promise.all(
     row.kyc_documents.map(async (doc) => ({
       ...doc,
