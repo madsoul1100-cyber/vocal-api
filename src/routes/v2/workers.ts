@@ -20,8 +20,21 @@ import {
   workersV2FiltersEcho,
 } from '@/services/workersManagementService.js'
 import { createOrgTerritory } from '@/services/territoryService.js'
+import {
+  completeStaffKycUpload,
+  completeStaffProfileUpload,
+  issueStaffUploadUrl,
+} from '@/services/staffPresignService.js'
 
 const router = Router()
+
+function parseUploadMeta(body: Record<string, unknown>) {
+  return {
+    file_name: String(body.file_name ?? ''),
+    mime_type: String(body.mime_type ?? ''),
+    file_size_bytes: Number(body.file_size_bytes),
+  }
+}
 
 type VocalUser = {
   id: string
@@ -66,6 +79,119 @@ router.post('/territories', requireAuth, async (req, res) => {
     return
   }
   res.status(201).json({ ok: true, territory: result.territory })
+})
+
+/** Presigned profile upload (create worker — no worker id yet). */
+router.post('/uploads/profile/upload-url', requireAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
+  const result = await issueStaffUploadUrl(user, 'profile', parseUploadMeta(req.body ?? {}))
+  if ('error' in result) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+  res.json(result)
+})
+
+router.post('/uploads/profile/complete', requireAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
+  const body = req.body ?? {}
+  const result = await completeStaffProfileUpload(user, {
+    storage_path: String(body.storage_path ?? ''),
+    file_name: String(body.file_name ?? ''),
+    mime_type: String(body.mime_type ?? ''),
+    file_size_bytes: Number(body.file_size_bytes),
+    apply_to_worker_id:
+      typeof body.apply_to_worker_id === 'string' ? body.apply_to_worker_id : undefined,
+  })
+  if ('error' in result) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+  res.status(201).json(result)
+})
+
+/** Presigned KYC upload (create or batch before POST /workers). */
+router.post('/uploads/kyc/upload-url', requireAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
+  const result = await issueStaffUploadUrl(user, 'kyc', parseUploadMeta(req.body ?? {}))
+  if ('error' in result) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+  res.json(result)
+})
+
+router.post('/uploads/kyc/complete', requireAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
+  const body = req.body ?? {}
+  const result = await completeStaffKycUpload(user, {
+    storage_path: String(body.storage_path ?? ''),
+    file_name: String(body.file_name ?? ''),
+    mime_type: String(body.mime_type ?? ''),
+    file_size_bytes: Number(body.file_size_bytes),
+    apply_to_worker_id:
+      typeof body.apply_to_worker_id === 'string' ? body.apply_to_worker_id : undefined,
+  })
+  if ('error' in result) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+  res.status(201).json(result)
+})
+
+/** Presigned profile upload for existing worker (auto-applies on complete). */
+router.post('/:id/uploads/profile/upload-url', requireAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
+  const result = await issueStaffUploadUrl(user, 'profile', parseUploadMeta(req.body ?? {}))
+  if ('error' in result) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+  res.json(result)
+})
+
+router.post('/:id/uploads/profile/complete', requireAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
+  const body = req.body ?? {}
+  const result = await completeStaffProfileUpload(user, {
+    storage_path: String(body.storage_path ?? ''),
+    file_name: String(body.file_name ?? ''),
+    mime_type: String(body.mime_type ?? ''),
+    file_size_bytes: Number(body.file_size_bytes),
+    apply_to_worker_id: String(req.params.id),
+  })
+  if ('error' in result) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+  res.status(201).json(result)
+})
+
+router.post('/:id/uploads/kyc/upload-url', requireAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
+  const result = await issueStaffUploadUrl(user, 'kyc', parseUploadMeta(req.body ?? {}))
+  if ('error' in result) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+  res.json(result)
+})
+
+router.post('/:id/uploads/kyc/complete', requireAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
+  const body = req.body ?? {}
+  const result = await completeStaffKycUpload(user, {
+    storage_path: String(body.storage_path ?? ''),
+    file_name: String(body.file_name ?? ''),
+    mime_type: String(body.mime_type ?? ''),
+    file_size_bytes: Number(body.file_size_bytes),
+    apply_to_worker_id: String(req.params.id),
+  })
+  if ('error' in result) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+  res.status(201).json(result)
 })
 
 router.post('/', requireAuth, workersCreateUpload, async (req, res) => {

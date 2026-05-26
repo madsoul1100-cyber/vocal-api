@@ -23,7 +23,11 @@
  * exists, and let the backfill script try again later).
  */
 
+import { PutObjectCommand, S3Client, HeadObjectCommand, GetObjectCommand } from '@aws-sdk/client-s3'
+import { getSignedUrl } from '@aws-sdk/s3-request-presigner'
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
+import { isPostgresMode } from '@/lib/db.js'
+import { resolveExistingLocalObjectPath } from '@/lib/postgresCompat/storage.js'
 import crypto from 'node:crypto'
 
 const TELEGRAM_BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN ?? ''
@@ -43,6 +47,285 @@ const TELEGRAM_DOWNLOAD_TIMEOUT_MS = 20_000
 // enough for the user to scroll the page, short enough that leaked
 // URLs expire quickly.
 const SIGNED_URL_TTL_SECONDS = 60 * 60
+
+/** Presigned PUT for dashboard direct-to-storage uploads (v2). */
+export const TICKET_UPLOAD_URL_TTL_SECONDS = 15 * 60
+
+export const TICKET_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
+
+const ALLOWED_TICKET_UPLOAD_MIMES = new Set([
+  'image/jpeg',
+  'image/png',
+  'image/webp',
+  'image/heic',
+  'image/heif',
+  'image/gif',
+  'video/mp4',
+  'video/quicktime',
+  'audio/mpeg',
+  'audio/ogg',
+  'audio/mp4',
+  'application/pdf',
+])
+
+function isS3Configured(): boolean {
+  return !!(process.env.AWS_S3_BUCKET?.trim() && process.env.AWS_REGION?.trim())
+}
+
+function s3Client(): S3Client {
+  return new S3Client({
+    region: process.env.AWS_REGION,
+    credentials:
+      process.env.AWS_ACCESS_KEY_ID && process.env.AWS_SECRET_ACCESS_KEY
+        ? {
+            accessKeyId: process.env.AWS_ACCESS_KEY_ID,
+            secretAccessKey: process.env.AWS_SECRET_ACCESS_KEY,
+          }
+        : undefined,
+  })
+}
+
+/** DB value: `s3:<key>` when using AWS, else plain object key for Supabase/local. */
+export function ticketAttachmentStorageRef(objectKey: string): string {
+  return isS3Configured() ? `s3:${objectKey}` : objectKey
+}
+
+export function parseTicketAttachmentStorageRef(ref: string): {
+  backend: 's3' | 'supabase'
+  key: string
+} {
+  const trimmed = ref.trim()
+  if (trimmed.startsWith('s3:')) return { backend: 's3', key: trimmed.slice(3) }
+  return { backend: 'supabase', key: trimmed }
+}
+
+export function isAllowedTicketUploadMime(mime: string): boolean {
+  return ALLOWED_TICKET_UPLOAD_MIMES.has(mime.trim().toLowerCase())
+}
+
+export function ticketUploadPathPrefix(orgId: string, ticketId: string): string {
+  return `org/${orgId}/ticket/${ticketId}/`
+}
+
+/** Validates path returned from upload-url was issued for this org/ticket. */
+export function isValidTicketAttachmentStoragePath(
+  storagePath: string,
+  orgId: string,
+  ticketId: string,
+): boolean {
+  const { key } = parseTicketAttachmentStorageRef(storagePath)
+  const prefix = ticketUploadPathPrefix(orgId, ticketId)
+  if (!key.startsWith(prefix)) return false
+  const tail = key.slice(prefix.length)
+  return /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\.[a-z0-9]+$/i.test(
+    tail,
+  )
+}
+
+export function ticketAttachmentStorageBackend(): 's3' | 'supabase' {
+  return isS3Configured() ? 's3' : 'supabase'
+}
+
+/** RDS/local disk mode without S3 — previews are served via vocal-api media routes. */
+export function usesLocalTicketAttachmentFiles(): boolean {
+  return isPostgresMode() && !isS3Configured()
+}
+
+/** Path relative to `/v2` mount — e.g. `${VITE_API_BASE_URL}${path}` → `http://localhost:3001/v2/tickets/.../media`. */
+export function ticketAttachmentMediaPath(ticketId: string, attachmentId: string): string {
+  return `/tickets/${ticketId}/attachments/${attachmentId}/media`
+}
+
+export async function readTicketAttachmentObject(
+  storagePath: string,
+): Promise<{ data: Buffer; contentType: string } | null> {
+  if (storagePath.startsWith('telegram:') || storagePath.startsWith('twilio:')) return null
+
+  const { backend, key } = parseTicketAttachmentStorageRef(storagePath)
+
+  if (backend === 's3') {
+    if (!isS3Configured()) return null
+    try {
+      const res = await s3Client().send(
+        new GetObjectCommand({ Bucket: process.env.AWS_S3_BUCKET!, Key: key }),
+      )
+      const body = res.Body
+      if (!body) return null
+      const bytes = await body.transformToByteArray()
+      return {
+        data: Buffer.from(bytes),
+        contentType: res.ContentType ?? 'application/octet-stream',
+      }
+    } catch {
+      return null
+    }
+  }
+
+  if (isS3Configured()) {
+    try {
+      await s3Client().send(
+        new HeadObjectCommand({ Bucket: process.env.AWS_S3_BUCKET!, Key: key }),
+      )
+      const res = await s3Client().send(
+        new GetObjectCommand({ Bucket: process.env.AWS_S3_BUCKET!, Key: key }),
+      )
+      const body = res.Body
+      if (!body) return null
+      const bytes = await body.transformToByteArray()
+      return {
+        data: Buffer.from(bytes),
+        contentType: res.ContentType ?? 'application/octet-stream',
+      }
+    } catch {
+      /* fall through to local / supabase */
+    }
+  }
+
+  const localFull = await resolveExistingLocalObjectPath(BUCKET_NAME, key)
+  if (localFull) {
+    const fs = await import('node:fs/promises')
+    const data = await fs.readFile(localFull)
+    const ext = key.split('.').pop()?.toLowerCase() ?? ''
+    const mimeByExt: Record<string, string> = {
+      jpg: 'image/jpeg',
+      jpeg: 'image/jpeg',
+      png: 'image/png',
+      webp: 'image/webp',
+      gif: 'image/gif',
+      mp4: 'video/mp4',
+      mov: 'video/quicktime',
+      ogg: 'audio/ogg',
+      mp3: 'audio/mpeg',
+      m4a: 'audio/mp4',
+      pdf: 'application/pdf',
+    }
+    return { data, contentType: mimeByExt[ext] ?? 'application/octet-stream' }
+  }
+
+  try {
+    const supabase = createSupabaseServiceClient()
+    const { data, error } = await supabase.storage.from(BUCKET_NAME).download(key)
+    if (error || !data) return null
+    const buf = Buffer.from(await data.arrayBuffer())
+    return { data: buf, contentType: data.type || 'application/octet-stream' }
+  } catch {
+    return null
+  }
+}
+
+export interface TicketAttachmentUploadUrlResult {
+  upload_url: string
+  storage_path: string
+  method: 'PUT'
+  headers: Record<string, string>
+  expires_in: number
+  /** Browser PUT needs S3 bucket CORS — see cors_setup_doc. */
+  cors_required?: boolean
+  cors_setup_doc?: string
+}
+
+/**
+ * Issue a presigned URL so the browser uploads directly to S3 or Supabase Storage.
+ * Requires S3 env vars when DATABASE_URL is set (local disk cannot accept browser PUT).
+ */
+export async function createTicketAttachmentUploadUrl(args: {
+  org_id: string
+  ticket_id: string
+  file_name: string
+  mime_type: string
+  file_size_bytes: number
+}): Promise<TicketAttachmentUploadUrlResult | { error: string }> {
+  const mime = args.mime_type.trim().toLowerCase()
+  if (!isAllowedTicketUploadMime(mime)) {
+    return { error: `File type not allowed: ${args.mime_type}` }
+  }
+  if (args.file_size_bytes < 1 || args.file_size_bytes > TICKET_UPLOAD_MAX_BYTES) {
+    return {
+      error: `file_size_bytes must be between 1 and ${TICKET_UPLOAD_MAX_BYTES}`,
+    }
+  }
+
+  if (isPostgresMode() && !isS3Configured()) {
+    return {
+      error:
+        'Direct upload requires AWS_S3_BUCKET and AWS_REGION when using DATABASE_URL. Configure S3 or use POST .../attachments multipart.',
+    }
+  }
+
+  const objectKey = buildPath({ org_id: args.org_id, ticket_id: args.ticket_id, mime })
+  const storage_path = ticketAttachmentStorageRef(objectKey)
+
+  if (isS3Configured()) {
+    try {
+      const upload_url = await getSignedUrl(
+        s3Client(),
+        new PutObjectCommand({
+          Bucket: process.env.AWS_S3_BUCKET!,
+          Key: objectKey,
+          ContentType: mime,
+          ContentLength: args.file_size_bytes,
+        }),
+        { expiresIn: TICKET_UPLOAD_URL_TTL_SECONDS },
+      )
+      return {
+        upload_url,
+        storage_path,
+        method: 'PUT',
+        headers: { 'Content-Type': mime },
+        expires_in: TICKET_UPLOAD_URL_TTL_SECONDS,
+        cors_required: true,
+        cors_setup_doc: 'docs/s3-cors-ticket-attachments.example.json',
+      }
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Presigned upload URL failed'
+      return { error: msg }
+    }
+  }
+
+  const supabase = createSupabaseServiceClient()
+  const { data, error } = await supabase.storage
+    .from(BUCKET_NAME)
+    .createSignedUploadUrl(objectKey, { upsert: false })
+
+  if (error || !data?.signedUrl) {
+    return { error: error?.message ?? 'Presigned upload URL failed' }
+  }
+
+  return {
+    upload_url: data.signedUrl,
+    storage_path,
+    method: 'PUT',
+    headers: { 'Content-Type': mime },
+    expires_in: TICKET_UPLOAD_URL_TTL_SECONDS,
+  }
+}
+
+/** Confirm the object exists before inserting ticket_attachments. */
+export async function verifyTicketAttachmentObject(storagePath: string): Promise<boolean> {
+  if (storagePath.startsWith('telegram:') || storagePath.startsWith('twilio:')) return false
+
+  const { backend, key } = parseTicketAttachmentStorageRef(storagePath)
+
+  if (backend === 's3') {
+    if (!isS3Configured()) return false
+    try {
+      await s3Client().send(
+        new HeadObjectCommand({ Bucket: process.env.AWS_S3_BUCKET!, Key: key }),
+      )
+      return true
+    } catch {
+      return false
+    }
+  }
+
+  try {
+    const supabase = createSupabaseServiceClient()
+    const { data, error } = await supabase.storage.from(BUCKET_NAME).download(key)
+    return !error && !!data
+  } catch {
+    return false
+  }
+}
 
 export interface StoredAttachment {
   storage_path: string
@@ -351,19 +634,40 @@ export async function uploadWorkerAttachment(args: {
     }))
   }
   try {
-    const supabase = createSupabaseServiceClient()
-    const storagePath = buildPath({ org_id: args.org_id, ticket_id: args.ticket_id, mime: args.mime })
+    const objectKey = buildPath({ org_id: args.org_id, ticket_id: args.ticket_id, mime: args.mime })
     const buffer = args.bytes instanceof Buffer ? args.bytes : Buffer.from(args.bytes)
+
+    if (isS3Configured()) {
+      await s3Client().send(
+        new PutObjectCommand({
+          Bucket: process.env.AWS_S3_BUCKET!,
+          Key: objectKey,
+          Body: buffer,
+          ContentType: args.mime,
+        }),
+      )
+      const storage_path = ticketAttachmentStorageRef(objectKey)
+      log('OK: uploaded to S3', { path: storage_path, size: buffer.length })
+      return {
+        storage_path,
+        mime_type: args.mime,
+        size_bytes: buffer.length,
+        attachment_type: attachmentTypeFromMime(args.mime),
+        telegram_file_id: '',
+      }
+    }
+
+    const supabase = createSupabaseServiceClient()
     const { error: upErr } = await supabase.storage
       .from(BUCKET_NAME)
-      .upload(storagePath, buffer, { contentType: args.mime, upsert: false })
+      .upload(objectKey, buffer, { contentType: args.mime, upsert: false })
     if (upErr) {
       log('FAIL: upload error', { error: upErr.message, mime: args.mime, size: buffer.length })
       return null
     }
-    log('OK: uploaded', { path: storagePath, size: buffer.length })
+    log('OK: uploaded', { path: objectKey, size: buffer.length })
     return {
-      storage_path: storagePath,
+      storage_path: objectKey,
       mime_type: args.mime,
       size_bytes: buffer.length,
       attachment_type: attachmentTypeFromMime(args.mime),
@@ -384,20 +688,54 @@ export async function uploadWorkerAttachment(args: {
  * If `storage_path` still looks like an old `telegram:<file_id>` pointer
  * (pre-E1 migration), returns null so the caller can render a placeholder.
  */
+async function tryS3PresignedGetUrl(objectKey: string): Promise<string | null> {
+  if (!isS3Configured()) return null
+  try {
+    await s3Client().send(
+      new HeadObjectCommand({ Bucket: process.env.AWS_S3_BUCKET!, Key: objectKey }),
+    )
+    return await getSignedUrl(
+      s3Client(),
+      new GetObjectCommand({ Bucket: process.env.AWS_S3_BUCKET!, Key: objectKey }),
+      { expiresIn: SIGNED_URL_TTL_SECONDS },
+    )
+  } catch {
+    return null
+  }
+}
+
 export async function signedUrlFor(storagePath: string | null | undefined): Promise<string | null> {
   if (!storagePath) return null
   if (storagePath.startsWith('telegram:') || storagePath.startsWith('twilio:')) return null
+
+  const { backend, key } = parseTicketAttachmentStorageRef(storagePath)
+
+  // Prefer S3 when configured (DB paths may omit `s3:` prefix from older rows).
+  if (backend === 's3' || isS3Configured()) {
+    const s3Url = await tryS3PresignedGetUrl(key)
+    if (s3Url) return s3Url
+    if (backend === 's3') return null
+  }
+
+  if (usesLocalTicketAttachmentFiles()) {
+    return null
+  }
 
   try {
     const supabase = createSupabaseServiceClient()
     const { data, error } = await supabase.storage
       .from(BUCKET_NAME)
-      .createSignedUrl(storagePath, SIGNED_URL_TTL_SECONDS)
+      .createSignedUrl(key, SIGNED_URL_TTL_SECONDS)
     if (error || !data?.signedUrl) {
-      console.warn('[attachmentService] signed URL failed for', storagePath, error?.message)
+      console.warn('[attachmentService] signed URL failed for', key, error?.message)
       return null
     }
-    return data.signedUrl
+    const url = data.signedUrl
+    if (url.startsWith('file://')) {
+      console.warn('[attachmentService] refusing file:// preview URL for', key)
+      return null
+    }
+    return url
   } catch (err) {
     console.warn('[attachmentService] signed URL exception:', err instanceof Error ? err.message : err)
     return null

@@ -37,12 +37,16 @@ import { loadCitizenIdentityForTicket } from '@/services/ticketCitizenIdentity.j
 import {
   canPreviewAttachmentMedia,
   canUploadTicketNotesOrAttachments,
+  completeTicketAttachmentUpload,
   createTicketNotesAndAttachments,
+  issueTicketAttachmentUploadUrl,
   listTicketNotesAndAttachments,
+  streamTicketAttachmentMedia,
   parseAttachmentsListQuery,
   ticketHasAttachments,
   ticketHasNotes,
 } from '@/services/ticketAttachmentService.js'
+import { ticketAttachmentStorageBackend } from '@/services/attachmentService.js'
 import { listTicketStageHistory } from '@/services/ticketStageHistoryService.js'
 
 const router = Router()
@@ -188,7 +192,95 @@ router.post('/status', requireAuth, async (req, res) => {
   res.json(body)
 })
 
-/** Notes + attachments: list (GET) or create note and/or file (POST multipart). */
+/** Stream attachment bytes (local disk / S3 / Supabase). Use `preview_url` from list when on RDS without S3. */
+router.get('/:id/attachments/:attachmentId/media', requireAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> })
+    .vocalUser
+
+  const result = await streamTicketAttachmentMedia(
+    String(req.params.id),
+    String(req.params.attachmentId),
+    user.organization_id,
+    user.roles?.name,
+  )
+
+  if (!result.ok) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+
+  const safeName = result.fileName.replace(/[^\w.-]/g, '_')
+  res.setHeader('Content-Type', result.contentType)
+  res.setHeader('Content-Disposition', `inline; filename="${safeName}"`)
+  res.setHeader('Cache-Control', 'private, max-age=300')
+  res.send(result.data)
+})
+
+/** Presigned direct upload — step 1: issue PUT URL (v2). */
+router.post('/:id/attachments/upload-url', requireAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> })
+    .vocalUser
+
+  if (!canUploadTicketNotesOrAttachments(user.roles?.name)) {
+    res.status(403).json({ error: 'Forbidden' })
+    return
+  }
+
+  const ticketId = String(req.params.id)
+  const body = req.body ?? {}
+  const result = await issueTicketAttachmentUploadUrl(ticketId, user.organization_id, {
+    file_name: String(body.file_name ?? ''),
+    mime_type: String(body.mime_type ?? ''),
+    file_size_bytes: Number(body.file_size_bytes),
+  })
+
+  if ('error' in result) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+
+  res.json({
+    ...result,
+    storage_backend: ticketAttachmentStorageBackend(),
+  })
+})
+
+/** Presigned direct upload — step 2: register attachment after client PUT. */
+router.post('/:id/attachments/complete', requireAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> })
+    .vocalUser
+
+  if (!canUploadTicketNotesOrAttachments(user.roles?.name)) {
+    res.status(403).json({ error: 'Forbidden' })
+    return
+  }
+
+  const ticketId = String(req.params.id)
+  const body = req.body ?? {}
+  const result = await completeTicketAttachmentUpload(
+    ticketId,
+    user.organization_id,
+    user.id,
+    {
+      storage_path: String(body.storage_path ?? ''),
+      file_name: String(body.file_name ?? ''),
+      mime_type: String(body.mime_type ?? ''),
+      file_size_bytes: Number(body.file_size_bytes),
+      content: typeof body.content === 'string' ? body.content : undefined,
+      note_type: typeof body.note_type === 'string' ? body.note_type : undefined,
+      is_internal: body.is_internal !== 'false' && body.is_internal !== false,
+    },
+  )
+
+  if ('error' in result) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+
+  res.status(201).json({ note: result.note, attachment: result.attachment })
+})
+
+/** Notes + attachments: list (GET) or create note and/or file (POST multipart, legacy). */
 router.post(
   '/:id/attachments',
   requireAuth,
