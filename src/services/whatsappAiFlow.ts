@@ -30,8 +30,8 @@ import {
 } from './whatsappLocale.js'
 import { createTicket } from './ticketService.js'
 import { generateTicketSuggestions } from './aiService.js'
-import { findNearestAvailableWorker, offerTicketToWorker } from './assignmentService.js'
 import { downloadFromTwilioAndStore } from './attachmentService.js'
+import { maskWhatsAppUserId, waLog, waLogError, whatsappAutoOfferWorker } from '@/lib/whatsappFlowLog.js'
 import type { Draft, DraftMedia, IncomingMessage } from './whatsappFlow.js'
 
 const MAX_HISTORY_TURNS = 24
@@ -285,6 +285,14 @@ async function finalizeTicket(ctx: AiFlowContext, aiDraft: AiDraftState) {
     (aiDraft.issue_text_native ?? aiDraft.issue_text ?? '').trim() ||
     (ctx.msg.text ?? '').trim()
 
+  waLog('ai.file', 'finalize ticket', {
+    conversationId: ctx.conversationId,
+    citizenId: ctx.citizenId,
+    issueChars: issueText.length,
+    hasLocation: !!(aiDraft.location_text || (aiDraft.latitude && aiDraft.longitude)),
+    mediaCount: aiDraft.media?.length ?? 0,
+  })
+
   if (!issueText) {
     await sendWhatsAppMessage(
       ctx.msg.chat_id,
@@ -307,12 +315,22 @@ async function finalizeTicket(ctx: AiFlowContext, aiDraft: AiDraftState) {
   })
 
   if (!result.success) {
+    waLog('ai.file', 'createTicket failed', {
+      conversationId: ctx.conversationId,
+      error: result.error,
+    })
     await sendWhatsAppMessage(
       ctx.msg.chat_id,
       'Something went wrong while saving your report. Please try again in a moment.',
     )
     return
   }
+
+  waLog('ai.file', 'ticket created', {
+    conversationId: ctx.conversationId,
+    ticketId: result.ticketId,
+    ticketNumber: result.ticketNumber,
+  })
 
   if (aiDraft.media?.length) {
     try {
@@ -345,21 +363,17 @@ async function finalizeTicket(ctx: AiFlowContext, aiDraft: AiDraftState) {
         }),
       )
       await ctx.supabase.from('ticket_attachments').insert(rows)
+      waLog('ai.media', 'attachments saved', { ticketId: result.ticketId, count: rows.length })
     } catch (err) {
-      console.error('[whatsappAiFlow] media upload error:', err instanceof Error ? err.message : String(err))
+      waLogError('ai.media', 'attachment upload failed', err, { ticketId: result.ticketId })
     }
   }
 
-  findNearestAvailableWorker(result.ticketId).then(async (worker) => {
-    if (worker) {
-      await offerTicketToWorker({
-        ticketId: result.ticketId,
-        workerId: worker.id,
-        assignedByUserId: null,
-        reason: 'Auto-assigned at ticket creation',
-      })
-    }
-  }).catch(() => {})
+  void whatsappAutoOfferWorker({
+    ticketId: result.ticketId,
+    ticketNumber: result.ticketNumber,
+    intake: 'ai',
+  })
 
   generateTicketSuggestions(issueText).then(async (s) => {
     if (s.error) return
@@ -397,11 +411,27 @@ async function finalizeTicket(ctx: AiFlowContext, aiDraft: AiDraftState) {
     ctx.msg.chat_id,
     statusCopy(lang).filed(result.ticketNumber),
   )
+  waLog('ai.reply', 'sent filed confirmation to citizen', {
+    ticketNumber: result.ticketNumber,
+    from: maskWhatsAppUserId(ctx.msg.chat_id),
+  })
 }
 
 export async function handleInboundMessageAi(ctx: AiFlowContext): Promise<void> {
   ctx.meta = hydrateConversationMeta(ctx.meta)
   const text = (ctx.msg.text ?? '').trim()
+
+  waLog('ai.dispatch', 'handle message', {
+    conversationId: ctx.conversationId,
+    citizenId: ctx.citizenId,
+    from: maskWhatsAppUserId(ctx.msg.chat_id),
+    step: ctx.currentStep,
+    messageId: ctx.msg.message_id,
+    textPreview: text ? text.slice(0, 80) : null,
+    hasMedia: !!ctx.msg.media,
+    hasLocation: !!ctx.msg.location,
+    historyTurns: ctx.meta.history?.length ?? 0,
+  })
 
   if (isCommand(text, '/cancel') || words.isNo(text)) {
     await persistMeta(ctx, 'ai_intake', { history: [], aiDraft: {}, draft: {} })
@@ -462,16 +492,22 @@ export async function handleInboundMessageAi(ctx: AiFlowContext): Promise<void> 
     existingDraft: (ctx.meta.aiDraft ?? {}) as Record<string, unknown>,
   })
 
+  waLog('ai.turn', 'intake model response', {
+    conversationId: ctx.conversationId,
+    intent: response.intent,
+    scope: response.scopeAssessment,
+    readyToFile: response.readyToFile,
+    fallback: !!response._meta?.fallback,
+  })
+
   if (response._meta?.fallback) {
     const err = response._meta.error ?? 'unknown'
-    console.error(
-      '[whatsappAiFlow] OpenRouter fallback:',
-      err,
-      '| model:',
-      process.env.OPENROUTER_MODEL ?? '(default)',
-      '| history turns:',
-      history.length,
-    )
+    waLog('ai.turn', 'OpenRouter fallback — using local intake', {
+      conversationId: ctx.conversationId,
+      error: err,
+      model: process.env.OPENROUTER_MODEL ?? '(default)',
+      historyTurns: history.length,
+    })
     const local = localIntakeFallback(userContent, ctx.meta.aiDraft ?? {})
     response = {
       ...response,
@@ -531,6 +567,7 @@ export async function handleInboundMessageAi(ctx: AiFlowContext): Promise<void> 
   await sendWhatsAppMessage(ctx.msg.chat_id, assistantText)
 
   if (response.readyToFile) {
+    waLog('ai.turn', 'readyToFile — filing ticket', { conversationId: ctx.conversationId })
     await persistMeta(ctx, 'ai_intake', {
       ...ctx.meta,
       history: updatedHistory,

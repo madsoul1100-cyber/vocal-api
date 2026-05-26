@@ -91,14 +91,14 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 | `GET /v2/worker/assignments` (no query) | Legacy: `{ offered, activeTickets, telegramLinked }` |
 | `GET /v2/worker/assignments/summary` | Tab counts: `{ counts: { offered, active, closed }, telegramLinked }` |
 | `GET /v2/worker/assignments?bucket=…` | Paginated tab list (see below) |
-| `GET /v2/worker/current-offer` | Poll single pending offer |
+| `GET /v2/worker/current-offer` | Poll single pending offer (`offered_at`, `expires_at`, ticket with `category` / `category_name`, `critical_flag`) |
 | `POST /v2/tickets/accept` / `reject` / `status` | Accept offer, reject, update sub-status |
 
 **Buckets** (`bucket` required for paginated list):
 
 | `bucket` | Rows |
 |----------|------|
-| `offered` | Current assignment offer (`status=offered`, not expired); items `{ id, expires_at, ticket }` |
+| `offered` | Current assignment offer (`status=offered`, not expired); items `{ id, offered_at, expires_at, ticket }` — ticket includes `category` (`{ id, name, source: confirmed \| ai_suggestion }`), `category_name`, `critical_flag` |
 | `active` | Owned tickets `in_progress` or `on_hold`, excluding `assigned_awaiting_acceptance` |
 | `closed` | Owned tickets with `stage=closed` **or** `sub_status=pending_closure_approval` (`closure_pending: true` on pending items) |
 
@@ -113,7 +113,7 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 | `sla_first_contact_overdue` | `true` |
 | `sla_resolution_overdue` | `true` |
 | `sla_at_risk` | `true` — due within 24h |
-| `sort` | `offered`: `expires_at` (default). `active`: `accepted_at` (default). `closed`: `closed_at` (default). Also `updated_at`, `created_at` |
+| `sort` | `offered`: `expires_at` (default), `offered_at`. `active`: `accepted_at` (default). `closed`: `closed_at` (default). Also `updated_at`, `created_at` |
 | `order` | `asc` or `desc` (default `desc` for closed, `asc` for offered/active) |
 
 Paginated response: `{ bucket, items, pagination, filters }`.
