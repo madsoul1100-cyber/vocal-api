@@ -523,13 +523,16 @@ async function listOfferedPg(
   const phoneMap = await loadCitizenPhones(
     res.rows as Array<{ citizen_id: string | null; citizen_identity_revealed_at: string | null }>,
   )
+  const nameMap = await loadCitizenDisplayNames(
+    res.rows as Array<{ citizen_id: string | null; citizen_identity_revealed_at: string | null }>,
+  )
   const ticketIds = res.rows.map((r) => String(r.ticket_id))
   const aiLabels = await loadAiSuggestedCategoryLabels(ticketIds)
   const items: WorkerOfferedListItem[] = res.rows.map((row) => ({
     id: String(row.id),
     offered_at: String(row.offered_at),
     expires_at: String(row.expires_at),
-    ticket: mapOfferedTicketRow(row, phoneMap, aiLabels),
+    ticket: mapOfferedTicketRow(row, phoneMap, nameMap, aiLabels),
   }))
 
   return {
@@ -585,7 +588,10 @@ async function listOwnedTicketsPg(
   const phoneMap = await loadCitizenPhones(
     res.rows as Array<{ citizen_id: string | null; citizen_identity_revealed_at: string | null }>,
   )
-  const items = res.rows.map((row) => mapTicketRow(row, phoneMap, bucket === 'closed'))
+  const nameMap = await loadCitizenDisplayNames(
+    res.rows as Array<{ citizen_id: string | null; citizen_identity_revealed_at: string | null }>,
+  )
+  const items = res.rows.map((row) => mapTicketRow(row, phoneMap, nameMap, bucket === 'closed'))
 
   return {
     bucket,
@@ -665,6 +671,9 @@ async function listOfferedSupabase(
   const phoneMap = await loadCitizenPhones(
     rows.map((r) => (r.ticket ?? {}) as { citizen_id: string | null; citizen_identity_revealed_at: string | null }),
   )
+  const nameMap = await loadCitizenDisplayNames(
+    rows.map((r) => (r.ticket ?? {}) as { citizen_id: string | null; citizen_identity_revealed_at: string | null }),
+  )
 
   const ticketIds = rows.map((r) => (r.ticket ? String(r.ticket.id) : '')).filter(Boolean)
   const aiLabels = await loadAiSuggestedCategoryLabels(ticketIds)
@@ -686,7 +695,7 @@ async function listOfferedSupabase(
       (cat?.name as string | null) ?? null,
       aiLabels,
     )
-    const mapped = mapTicketRow(ticket, phoneMap, false)
+    const mapped = mapTicketRow(ticket, phoneMap, nameMap, false)
     return {
       id: raw.id as string,
       offered_at: raw.offered_at as string,
@@ -771,8 +780,9 @@ async function listOwnedTicketsSupabase(
   if (error) throw new Error(error.message)
 
   const phoneMap = await loadCitizenPhones(data ?? [])
+  const nameMap = await loadCitizenDisplayNames(data ?? [])
   const items = (data ?? []).map((row) =>
-    mapTicketRow(row as Record<string, unknown>, phoneMap, bucket === 'closed'),
+    mapTicketRow(row as Record<string, unknown>, phoneMap, nameMap, bucket === 'closed'),
   )
 
   const total = count ?? 0
