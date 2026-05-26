@@ -1,5 +1,6 @@
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
 import { isPostgresMode, dbQuery } from '@/lib/db.js'
+import { PENDING_CLOSURE_SUB_STATUS } from '@/lib/ticketStatusCatalog.js'
 import { TICKETS_V2_SLA_AT_RISK_HOURS } from '@/services/ticketQueries.js'
 
 export type WorkerAssignmentBucket = 'offered' | 'active' | 'closed'
@@ -47,6 +48,8 @@ export interface WorkerTicketListItem {
   accepted_at: string | null
   closed_at?: string | null
   outcome?: string | null
+  /** True when worker requested closure; awaiting central support approval. */
+  closure_pending?: boolean
   sla_first_contact_due_at: string | null
   sla_resolution_due_at: string | null
   citizen_phone: string | null
@@ -133,7 +136,8 @@ export function parseWorkerAssignmentsListQuery(
       ? query.sub_status.trim()
       : undefined
 
-  const orderExplicit = typeof query.order === 'string' && query.order.trim()
+  const orderExplicit =
+    typeof query.order === 'string' && query.order.trim() ? query.order.trim() : undefined
   const defaultOrder: 'asc' | 'desc' =
     bucket === 'closed' ? 'desc' : bucket === 'offered' ? 'asc' : 'asc'
   const order =
@@ -372,6 +376,7 @@ function mapTicketRow(
   if (includeClosedFields) {
     item.closed_at = (t.closed_at as string | null) ?? null
     item.outcome = (t.outcome as string | null) ?? null
+    item.closure_pending = String(t.sub_status) === PENDING_CLOSURE_SUB_STATUS
   }
   return item
 }
@@ -466,8 +471,10 @@ async function listOwnedTicketsPg(
     bucket === 'active'
       ? `t.owner_user_id = $1
          AND t.stage IN ('in_progress', 'on_hold')
-         AND t.sub_status <> 'assigned_awaiting_acceptance'`
-      : `t.owner_user_id = $1 AND t.stage = 'closed'`
+         AND t.sub_status <> 'assigned_awaiting_acceptance'
+         AND t.sub_status <> '${PENDING_CLOSURE_SUB_STATUS}'`
+      : `t.owner_user_id = $1
+         AND (t.stage = 'closed' OR t.sub_status = '${PENDING_CLOSURE_SUB_STATUS}')`
 
   where = appendTicketFilters(where, params, paramIndex, opts)
 
@@ -611,9 +618,12 @@ async function listOwnedTicketsSupabase(
     .eq('owner_user_id', workerId)
 
   if (bucket === 'active') {
-    query = query.in('stage', ['in_progress', 'on_hold']).neq('sub_status', 'assigned_awaiting_acceptance')
+    query = query
+      .in('stage', ['in_progress', 'on_hold'])
+      .neq('sub_status', 'assigned_awaiting_acceptance')
+      .neq('sub_status', PENDING_CLOSURE_SUB_STATUS)
   } else {
-    query = query.eq('stage', 'closed')
+    query = query.or(`stage.eq.closed,sub_status.eq.${PENDING_CLOSURE_SUB_STATUS}`)
   }
 
   if (opts.severity) query = query.eq('severity', opts.severity)
@@ -692,8 +702,9 @@ async function countActivePg(workerId: string): Promise<number> {
     `SELECT COUNT(*)::text AS c FROM tickets t
      WHERE t.owner_user_id = $1
        AND t.stage IN ('in_progress', 'on_hold')
-       AND t.sub_status <> 'assigned_awaiting_acceptance'`,
-    [workerId],
+       AND t.sub_status <> 'assigned_awaiting_acceptance'
+       AND t.sub_status <> $2`,
+    [workerId, PENDING_CLOSURE_SUB_STATUS],
   )
   return Number(res.rows[0]?.c ?? 0)
 }
@@ -701,8 +712,9 @@ async function countActivePg(workerId: string): Promise<number> {
 async function countClosedPg(workerId: string): Promise<number> {
   const res = await dbQuery<{ c: string }>(
     `SELECT COUNT(*)::text AS c FROM tickets t
-     WHERE t.owner_user_id = $1 AND t.stage = 'closed'`,
-    [workerId],
+     WHERE t.owner_user_id = $1
+       AND (t.stage = 'closed' OR t.sub_status = $2)`,
+    [workerId, PENDING_CLOSURE_SUB_STATUS],
   )
   return Number(res.rows[0]?.c ?? 0)
 }
@@ -741,12 +753,13 @@ export async function getWorkerAssignmentsSummary(workerId: string): Promise<Wor
       .select('id', { count: 'exact', head: true })
       .eq('owner_user_id', workerId)
       .in('stage', ['in_progress', 'on_hold'])
-      .neq('sub_status', 'assigned_awaiting_acceptance'),
+      .neq('sub_status', 'assigned_awaiting_acceptance')
+      .neq('sub_status', PENDING_CLOSURE_SUB_STATUS),
     supabase
       .from('tickets')
       .select('id', { count: 'exact', head: true })
       .eq('owner_user_id', workerId)
-      .eq('stage', 'closed'),
+      .or(`stage.eq.closed,sub_status.eq.${PENDING_CLOSURE_SUB_STATUS}`),
     supabase.from('users').select('metadata_json').eq('id', workerId).single(),
   ])
 

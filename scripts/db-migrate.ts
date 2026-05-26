@@ -2,7 +2,8 @@
  * Apply SQL migrations from supabase/migrations/ to DATABASE_URL (RDS / local Postgres).
  *
  * Usage:
- *   DATABASE_URL=postgresql://... npm run db:migrate
+ *   npm run db:migrate
+ *   npm run db:migrate -- 012_ticket_closure_review.sql   # single file only
  */
 import fs from 'node:fs'
 import path from 'node:path'
@@ -35,10 +36,21 @@ async function main() {
     )
   `)
 
-  const files = fs
+  const onlyFile = process.argv[2]?.trim()
+  let files = fs
     .readdirSync(migrationsDir)
     .filter((f) => f.endsWith('.sql'))
     .sort()
+
+  if (onlyFile) {
+    if (!files.includes(onlyFile)) {
+      console.error(`Migration not found: ${onlyFile}`)
+      console.error(`Available: ${files.join(', ')}`)
+      process.exit(1)
+    }
+    files = [onlyFile]
+    console.log(`Running single migration: ${onlyFile}`)
+  }
 
   const { rows: applied } = await pool.query<{ filename: string }>(
     'SELECT filename FROM schema_migrations',

@@ -1,4 +1,5 @@
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
+import { applyCriticalSeveritySideEffects } from '@/services/ticketService.js'
 import { stripTicketAiMirrorFields } from '@/services/ticketQueries.js'
 import { loadCitizenIdentityForTicket } from '@/services/ticketCitizenIdentity.js'
 import type { AiTicketSuggestion } from '@/types/database.js'
@@ -142,6 +143,11 @@ export async function confirmAiSuggestion(
   if (updateErr) {
     console.error('[confirmAiSuggestion] ticket update', updateErr)
     return { ok: false as const, status: 500, error: updateErr.message }
+  }
+
+  const appliedSeverity = patch.severity as string | undefined
+  if (appliedSeverity) {
+    await applyCriticalSeveritySideEffects(ticketId, appliedSeverity).catch(() => {})
   }
 
   // Confirm chosen row and any other pending rows (e.g. from --force backfills).
