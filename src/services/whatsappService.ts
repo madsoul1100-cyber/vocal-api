@@ -5,6 +5,7 @@
 
 import { getTwilioClient, getWhatsAppFrom, toWhatsAppAddress } from '@/lib/twilio.js'
 import { tenantApp } from '@/config/tenant.config.js'
+import { isWhatsAppFlowLogEnabled, maskWhatsAppUserId, waLog } from '@/lib/whatsappFlowLog.js'
 
 export const MENU_HINT = `
 Reply with a number:
@@ -19,12 +20,23 @@ export async function sendWhatsAppMessage(
 ): Promise<void> {
   const client = getTwilioClient()
   const from = getWhatsAppFrom()
-  if (!client || !from) return
+  if (!client || !from) {
+    if (isWhatsAppFlowLogEnabled()) {
+      waLog('outbound.skip', 'Twilio client not configured', { to: maskWhatsAppUserId(channelUserId) })
+    }
+    return
+  }
   try {
-    await client.messages.create({
+    const msg = await client.messages.create({
       from,
       to: toWhatsAppAddress(channelUserId),
       body: text,
+    })
+    waLog('outbound.sent', 'Twilio message created', {
+      to: maskWhatsAppUserId(channelUserId),
+      sid: msg.sid,
+      bodyChars: text.length,
+      preview: text.slice(0, 60).replace(/\n/g, ' '),
     })
   } catch (err) {
     console.error('[whatsappService] send failed:', err instanceof Error ? err.message : String(err))

@@ -54,6 +54,7 @@ export interface DashboardRecentTicket {
 export interface DashboardStats {
   action_required: {
     awaiting_triage: DashboardCountLink
+    pending_closure_review: DashboardCountLink
     critical_open: DashboardCountLink
     sla_breaches: DashboardCountLink
   }
@@ -119,6 +120,7 @@ async function getDashboardStatsPg(orgId: string): Promise<DashboardStats> {
   const base = 'organization_id = $1'
   const [
     triageRes,
+    closureReviewRes,
     criticalRes,
     slaBreachRes,
     stageRes,
@@ -132,6 +134,10 @@ async function getDashboardStatsPg(orgId: string): Promise<DashboardStats> {
   ] = await Promise.all([
     dbQuery<{ c: string }>(
       `SELECT COUNT(*)::text AS c FROM tickets WHERE ${base} AND needs_triage = true`,
+      [orgId],
+    ),
+    dbQuery<{ c: string }>(
+      `SELECT COUNT(*)::text AS c FROM tickets WHERE ${base} AND needs_closure_review = true`,
       [orgId],
     ),
     dbQuery<{ c: string }>(
@@ -210,6 +216,7 @@ async function getDashboardStatsPg(orgId: string): Promise<DashboardStats> {
 
   return assembleDashboard(orgId, {
     awaitingTriage: Number(triageRes.rows[0]?.c ?? 0),
+    pendingClosureReview: Number(closureReviewRes.rows[0]?.c ?? 0),
     criticalOpen: Number(criticalRes.rows[0]?.c ?? 0),
     slaBreaches: Number(slaBreachRes.rows[0]?.c ?? 0),
     pipeline: pipelineFromStageCounts(stage_counts),
@@ -235,6 +242,7 @@ async function getDashboardStatsSupabase(orgId: string): Promise<DashboardStats>
 
   const [
     triageRes,
+    closureReviewRes,
     criticalRes,
     slaBreachRes,
     stageRowsRes,
@@ -251,6 +259,11 @@ async function getDashboardStatsSupabase(orgId: string): Promise<DashboardStats>
       .select('id', { count: 'exact', head: true })
       .eq('organization_id', orgId)
       .eq('needs_triage', true),
+    supabase
+      .from('tickets')
+      .select('id', { count: 'exact', head: true })
+      .eq('organization_id', orgId)
+      .eq('needs_closure_review', true),
     supabase
       .from('tickets')
       .select('id', { count: 'exact', head: true })
@@ -343,6 +356,7 @@ async function getDashboardStatsSupabase(orgId: string): Promise<DashboardStats>
 
   return assembleDashboard(orgId, {
     awaitingTriage: triageRes.count ?? 0,
+    pendingClosureReview: closureReviewRes.count ?? 0,
     criticalOpen: criticalRes.count ?? 0,
     slaBreaches: slaBreachRes.count ?? 0,
     pipeline: pipelineFromStageCounts(stage_counts),
@@ -367,6 +381,7 @@ function assembleDashboard(
   orgId: string,
   data: {
     awaitingTriage: number
+    pendingClosureReview: number
     criticalOpen: number
     slaBreaches: number
     pipeline: DashboardPipeline
@@ -389,6 +404,10 @@ function assembleDashboard(
   return {
     action_required: {
       awaiting_triage: { count: data.awaitingTriage, href: '/triage' },
+      pending_closure_review: {
+        count: data.pendingClosureReview,
+        href: '/tickets?needs_closure_review=true',
+      },
       critical_open: { count: data.criticalOpen, href: '/tickets?severity=critical' },
       sla_breaches: { count: data.slaBreaches, href: '/tickets?stage=on_hold' },
     },

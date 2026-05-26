@@ -15,6 +15,11 @@
  */
 
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
+import {
+  applyDevOfferWorkerPin,
+  isDevOfferWorkerPinEnabled,
+  resolveDevPinnedWorkerId,
+} from '@/lib/devOfferWorker.js'
 import { notifyCitizenOfTicketUpdate } from './citizenNotifier'
 import { notifyWorkerOfAssignment, notifyWorkerOfReassignment } from './workerNotifier'
 
@@ -127,6 +132,15 @@ export async function listCandidateWorkers(ticketId: string): Promise<CandidateW
     }
   }
 
+  if (isDevOfferWorkerPinEnabled()) {
+    const pinId = await resolveDevPinnedWorkerId(ticket.organization_id)
+    if (pinId) {
+      const pinned = (workers as { id: string }[]).find((w) => w.id === pinId)
+      if (pinned) return [buildCandidate(pinned)]
+      return []
+    }
+  }
+
   function sortCandidates(list: CandidateWorker[]): CandidateWorker[] {
     return list.sort((a, b) => {
       // Primary: fewer active tickets first (load balance)
@@ -206,6 +220,12 @@ export async function offerTicketToWorker(args: {
     .single()
   if (!ticket) return { ok: false, error: 'ticket_not_found' }
 
+  const workerId = await applyDevOfferWorkerPin({
+    ticketId: args.ticketId,
+    workerId: args.workerId,
+    organizationId: ticket.organization_id,
+  })
+
   const slaMinutes = await getAcceptanceSlaMinutes(ticket.organization_id)
   const now = new Date()
   const expiresAt = new Date(now.getTime() + slaMinutes * 60 * 1000).toISOString()
@@ -221,7 +241,7 @@ export async function offerTicketToWorker(args: {
     .from('ticket_assignments')
     .insert({
       ticket_id: args.ticketId,
-      worker_user_id: args.workerId,
+      worker_user_id: workerId,
       assigned_by: args.assignedByUserId ?? null,
       status: 'offered',
       expires_at: expiresAt,
@@ -234,12 +254,12 @@ export async function offerTicketToWorker(args: {
   if (error || !assignment) return { ok: false, error: error?.message ?? 'insert_failed' }
 
   const offeredList = new Set<string>(((ticket.offered_worker_ids as string[] | null) ?? []))
-  offeredList.add(args.workerId)
+  offeredList.add(workerId)
 
   await supabase
     .from('tickets')
     .update({
-      owner_user_id: args.workerId,
+      owner_user_id: workerId,
       needs_triage: false,
       stage: 'in_progress',
       sub_status: 'assigned_awaiting_acceptance',
@@ -268,7 +288,7 @@ export async function offerTicketToWorker(args: {
     actor_type: args.assignedByUserId ? 'user' : 'system',
     actor_user_id: args.assignedByUserId ?? null,
     new_value_json: {
-      worker_id: args.workerId,
+      worker_id: workerId,
       assignment_id: assignment.id,
       expires_at: expiresAt,
       sla_minutes: slaMinutes,
@@ -281,14 +301,14 @@ export async function offerTicketToWorker(args: {
     prevSubStatus: ticket.sub_status as any,
     newSubStatus: 'assigned_awaiting_acceptance',
     newStage: 'in_progress',
-    workerUserId: args.workerId,
+    workerUserId: workerId,
     key: 'assigned_awaiting_acceptance',
   }).catch(() => {})
 
   // CRITICAL: await the worker notification so serverless functions don't
   // terminate the in-flight Telegram POST when the parent function returns.
   // notifyWorkerOfAssignment swallows its own errors, so awaiting is safe.
-  await notifyWorkerOfAssignment(args.ticketId, args.workerId)
+  await notifyWorkerOfAssignment(args.ticketId, workerId)
 
   return { ok: true, assignmentId: assignment.id, expiresAt }
 }

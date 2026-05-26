@@ -20,6 +20,7 @@ import {
   type WhatsAppAiStep,
   type WhatsAppConversationMeta,
 } from '@/services/whatsappAiFlow.js'
+import { maskWhatsAppUserId, waLog, waLogError } from '@/lib/whatsappFlowLog.js'
 
 const router = Router()
 router.use(express.urlencoded({ extended: false }))
@@ -90,20 +91,33 @@ router.post('/', async (req, res) => {
   const url = `${proto}://${host}${req.originalUrl}`
 
   if (!validateTwilioWebhook({ signature, url, params })) {
+    waLog('webhook.auth', 'rejected invalid Twilio signature')
     res.status(403).send('Invalid signature')
     return
   }
 
   if (!body.From || !body.MessageSid) {
+    waLog('webhook.skip', 'missing From or MessageSid')
     res.type('text/xml').send('<Response></Response>')
     return
   }
 
+  const t0 = Date.now()
   const supabase = createSupabaseServiceClient()
   const channelUserId = parseWhatsAppUserId(body.From)
   const rawText = body.Body?.trim() || null
   const messageType = detectMessageType(body)
   const media = pickMedia(body)
+
+  waLog('webhook.inbound', 'Twilio POST received', {
+    messageSid: body.MessageSid,
+    from: maskWhatsAppUserId(channelUserId),
+    messageType,
+    hasText: !!rawText,
+    textPreview: rawText ? rawText.slice(0, 80) : null,
+    hasMedia: !!media,
+    hasLocation: !!(body.Latitude && body.Longitude),
+  })
 
   try {
     const { citizenId } = await upsertCitizenFromWhatsApp(
@@ -126,6 +140,15 @@ router.post('/', async (req, res) => {
       .single()
 
     const useAi = isWhatsAppAiIntakeEnabled()
+    waLog('webhook.context', 'conversation loaded', {
+      messageSid: body.MessageSid,
+      conversationId,
+      citizenId,
+      intakeMode: useAi ? 'ai' : 'script',
+      currentStep: conv?.current_step ?? 'idle',
+      conversationState: conv?.state ?? null,
+    })
+
     const metaJson = hydrateConversationMeta(
       (conv?.metadata_json ?? {}) as WhatsAppConversationMeta & { draft?: Draft },
     )
@@ -139,7 +162,11 @@ router.post('/', async (req, res) => {
       .eq('channel_message_id', body.MessageSid)
       .maybeSingle()
 
-    if (!dup) {
+    if (dup) {
+      waLog('webhook.dedup', 'duplicate MessageSid — still running handler', {
+        messageSid: body.MessageSid,
+      })
+    } else {
       await supabase.from('channel_messages').insert({
         conversation_id: conversationId,
         organization_id: ORG_ID,
@@ -155,6 +182,7 @@ router.post('/', async (req, res) => {
         longitude: body.Longitude ? parseFloat(body.Longitude) : null,
         processed: false,
       })
+      waLog('webhook.stored', 'inbound message persisted', { messageSid: body.MessageSid })
     }
 
     const incoming: IncomingMessage = {
@@ -171,6 +199,7 @@ router.post('/', async (req, res) => {
     if (useAi) {
       const aiStep: WhatsAppAiStep =
         conv?.current_step === 'post_ticket' ? 'post_ticket' : 'ai_intake'
+      waLog('webhook.handler', 'dispatch AI intake', { messageSid: body.MessageSid, aiStep })
       await handleInboundMessageAi({
         supabase,
         organizationId: ORG_ID,
@@ -188,6 +217,10 @@ router.post('/', async (req, res) => {
         msg: incoming,
       })
     } else {
+      waLog('webhook.handler', 'dispatch script intake', {
+        messageSid: body.MessageSid,
+        step: currentStep,
+      })
       await handleInboundMessage({
         supabase,
         organizationId: ORG_ID,
@@ -206,8 +239,18 @@ router.post('/', async (req, res) => {
         .eq('channel', 'whatsapp')
         .eq('channel_message_id', body.MessageSid)
     }
+
+    waLog('webhook.done', 'handler finished', {
+      messageSid: body.MessageSid,
+      intakeMode: useAi ? 'ai' : 'script',
+      ms: Date.now() - t0,
+    })
   } catch (err) {
-    console.error('[WhatsApp webhook error]', err)
+    waLogError('webhook.error', 'handler failed', err, {
+      messageSid: body.MessageSid,
+      from: maskWhatsAppUserId(channelUserId),
+      ms: Date.now() - t0,
+    })
     await supabase
       .from('audit_logs')
       .insert({

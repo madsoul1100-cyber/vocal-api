@@ -1,6 +1,13 @@
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
 import { isPostgresMode, dbQuery } from '@/lib/db.js'
+import { PENDING_CLOSURE_SUB_STATUS } from '@/lib/ticketStatusCatalog.js'
 import { TICKETS_V2_SLA_AT_RISK_HOURS } from '@/services/ticketQueries.js'
+import {
+  categoryNameFromOfferCategory,
+  loadAiSuggestedCategoryLabels,
+  resolveOfferCategory,
+  type WorkerOfferCategory,
+} from '@/services/workerOfferFields.js'
 
 export type WorkerAssignmentBucket = 'offered' | 'active' | 'closed'
 
@@ -21,7 +28,7 @@ export interface WorkerAssignmentsListOptions {
   slaResolutionOverdue?: boolean
   slaAtRisk?: boolean
   critical?: boolean
-  sort: 'expires_at' | 'accepted_at' | 'updated_at' | 'closed_at' | 'created_at'
+  sort: 'expires_at' | 'offered_at' | 'accepted_at' | 'updated_at' | 'closed_at' | 'created_at'
   order: 'asc' | 'desc'
 }
 
@@ -47,13 +54,19 @@ export interface WorkerTicketListItem {
   accepted_at: string | null
   closed_at?: string | null
   outcome?: string | null
+  /** True when worker requested closure; awaiting central support approval. */
+  closure_pending?: boolean
   sla_first_contact_due_at: string | null
   sla_resolution_due_at: string | null
   citizen_phone: string | null
+  critical_flag?: boolean
+  category?: WorkerOfferCategory | null
+  category_name?: string | null
 }
 
 export interface WorkerOfferedListItem {
   id: string
+  offered_at: string
   expires_at: string
   ticket: WorkerTicketListItem | null
 }
@@ -100,6 +113,7 @@ function parseSort(
 ): WorkerAssignmentsListOptions['sort'] {
   const s = typeof raw === 'string' ? raw.trim().toLowerCase() : ''
   if (s === 'expires' || s === 'expires_at') return 'expires_at'
+  if (s === 'offered' || s === 'offered_at') return 'offered_at'
   if (s === 'accepted' || s === 'accepted_at') return 'accepted_at'
   if (s === 'updated' || s === 'updated_at') return 'updated_at'
   if (s === 'closed' || s === 'closed_at') return 'closed_at'
@@ -133,6 +147,8 @@ export function parseWorkerAssignmentsListQuery(
       ? query.sub_status.trim()
       : undefined
 
+  const orderExplicit =
+    typeof query.order === 'string' && query.order.trim() ? query.order.trim() : undefined
   const orderExplicit = typeof query.order === 'string' ? query.order.trim() : ''
   const defaultOrder: 'asc' | 'desc' =
     bucket === 'closed' ? 'desc' : bucket === 'offered' ? 'asc' : 'asc'
@@ -298,6 +314,9 @@ function orderSql(
   if (bucket === 'offered' && sort === 'expires_at') {
     return `${assignmentAlias}.expires_at ${dir}`
   }
+  if (bucket === 'offered' && sort === 'offered_at') {
+    return `${assignmentAlias}.offered_at ${dir}`
+  }
   if (sort === 'accepted_at') {
     return `${ticketAlias}.accepted_at ${dir} NULLS LAST, ${ticketAlias}.updated_at DESC`
   }
@@ -372,8 +391,47 @@ function mapTicketRow(
   if (includeClosedFields) {
     item.closed_at = (t.closed_at as string | null) ?? null
     item.outcome = (t.outcome as string | null) ?? null
+    item.closure_pending = String(t.sub_status) === PENDING_CLOSURE_SUB_STATUS
   }
   return item
+}
+
+function mapOfferedTicketRow(
+  row: Record<string, unknown>,
+  phoneMap: Record<string, string>,
+  aiLabels: Map<string, string>,
+): WorkerTicketListItem {
+  const ticketId = String(row.ticket_id ?? row.id)
+  const catId = row.category_id as string | null | undefined
+  const catName = row.category_name as string | null | undefined
+  const category = resolveOfferCategory(ticketId, catId, catName, aiLabels)
+  const base = mapTicketRow(
+    {
+      id: ticketId,
+      ticket_number: row.ticket_number,
+      title: row.title,
+      original_issue_text: row.original_issue_text,
+      location_text: row.location_text,
+      latitude: row.latitude,
+      longitude: row.longitude,
+      severity: row.severity,
+      stage: row.stage,
+      sub_status: row.sub_status,
+      accepted_at: row.accepted_at,
+      sla_first_contact_due_at: row.sla_first_contact_due_at,
+      sla_resolution_due_at: row.sla_resolution_due_at,
+      citizen_id: row.citizen_id,
+      citizen_identity_revealed_at: row.citizen_identity_revealed_at,
+    },
+    phoneMap,
+    false,
+  )
+  return {
+    ...base,
+    critical_flag: row.critical_flag === true,
+    category,
+    category_name: categoryNameFromOfferCategory(category),
+  }
 }
 
 async function listOfferedPg(
@@ -404,13 +462,15 @@ async function listOfferedPg(
   const order = orderSql('offered', opts.sort, opts.order)
 
   const res = await dbQuery<Record<string, unknown>>(
-    `SELECT ta.id, ta.expires_at,
+    `SELECT ta.id, ta.offered_at, ta.expires_at,
             t.id AS ticket_id, t.ticket_number, t.title, t.original_issue_text,
             t.location_text, t.latitude, t.longitude, t.severity, t.stage, t.sub_status,
             t.accepted_at, t.sla_first_contact_due_at, t.sla_resolution_due_at,
-            t.citizen_id, t.citizen_identity_revealed_at
+            t.citizen_id, t.citizen_identity_revealed_at, t.critical_flag,
+            ic.id AS category_id, ic.name AS category_name
      FROM ticket_assignments ta
      INNER JOIN tickets t ON t.id = ta.ticket_id
+     LEFT JOIN issue_categories ic ON ic.id = t.category_id
      WHERE ${where}
      ORDER BY ${order}
      LIMIT $${limitParam} OFFSET $${offsetParam}`,
@@ -420,30 +480,13 @@ async function listOfferedPg(
   const phoneMap = await loadCitizenPhones(
     res.rows as Array<{ citizen_id: string | null; citizen_identity_revealed_at: string | null }>,
   )
+  const ticketIds = res.rows.map((r) => String(r.ticket_id))
+  const aiLabels = await loadAiSuggestedCategoryLabels(ticketIds)
   const items: WorkerOfferedListItem[] = res.rows.map((row) => ({
     id: String(row.id),
+    offered_at: String(row.offered_at),
     expires_at: String(row.expires_at),
-    ticket: mapTicketRow(
-      {
-        id: row.ticket_id,
-        ticket_number: row.ticket_number,
-        title: row.title,
-        original_issue_text: row.original_issue_text,
-        location_text: row.location_text,
-        latitude: row.latitude,
-        longitude: row.longitude,
-        severity: row.severity,
-        stage: row.stage,
-        sub_status: row.sub_status,
-        accepted_at: row.accepted_at,
-        sla_first_contact_due_at: row.sla_first_contact_due_at,
-        sla_resolution_due_at: row.sla_resolution_due_at,
-        citizen_id: row.citizen_id,
-        citizen_identity_revealed_at: row.citizen_identity_revealed_at,
-      },
-      phoneMap,
-      false,
-    ),
+    ticket: mapOfferedTicketRow(row, phoneMap, aiLabels),
   }))
 
   return {
@@ -466,8 +509,10 @@ async function listOwnedTicketsPg(
     bucket === 'active'
       ? `t.owner_user_id = $1
          AND t.stage IN ('in_progress', 'on_hold')
-         AND t.sub_status <> 'assigned_awaiting_acceptance'`
-      : `t.owner_user_id = $1 AND t.stage = 'closed'`
+         AND t.sub_status <> 'assigned_awaiting_acceptance'
+         AND t.sub_status <> '${PENDING_CLOSURE_SUB_STATUS}'`
+      : `t.owner_user_id = $1
+         AND (t.stage = 'closed' OR t.sub_status = '${PENDING_CLOSURE_SUB_STATUS}')`
 
   where = appendTicketFilters(where, params, paramIndex, opts)
 
@@ -524,13 +569,13 @@ async function listOfferedSupabase(
     .from('ticket_assignments')
     .select(
       `
-      id, expires_at,
+      id, offered_at, expires_at,
       tickets(
         id, ticket_number, title, original_issue_text,
         location_text, latitude, longitude, severity, stage, sub_status,
         accepted_at, sla_first_contact_due_at, sla_resolution_due_at,
         citizen_id, citizen_identity_revealed_at, critical_flag,
-        sla_breached_flag, first_contacted_at, closed_at
+        category:issue_categories!tickets_category_id_fkey(id, name)
       )
     `,
       { count: 'exact' },
@@ -558,6 +603,8 @@ async function listOfferedSupabase(
   const ascending = opts.order === 'asc'
   if (opts.sort === 'expires_at') {
     query = query.order('expires_at', { ascending })
+  } else if (opts.sort === 'offered_at') {
+    query = query.order('offered_at', { ascending })
   }
 
   const from = opts.offset
@@ -576,11 +623,39 @@ async function listOfferedSupabase(
     rows.map((r) => (r.ticket ?? {}) as { citizen_id: string | null; citizen_identity_revealed_at: string | null }),
   )
 
-  const items: WorkerOfferedListItem[] = rows.map(({ raw, ticket }) => ({
-    id: raw.id as string,
-    expires_at: raw.expires_at as string,
-    ticket: ticket ? mapTicketRow(ticket, phoneMap, false) : null,
-  }))
+  const ticketIds = rows.map((r) => (r.ticket ? String(r.ticket.id) : '')).filter(Boolean)
+  const aiLabels = await loadAiSuggestedCategoryLabels(ticketIds)
+
+  const items: WorkerOfferedListItem[] = rows.map(({ raw, ticket }) => {
+    if (!ticket) {
+      return {
+        id: raw.id as string,
+        offered_at: raw.offered_at as string,
+        expires_at: raw.expires_at as string,
+        ticket: null,
+      }
+    }
+    const cat = normalizeTicketJoin(ticket.category)
+    const ticketId = String(ticket.id)
+    const category = resolveOfferCategory(
+      ticketId,
+      cat?.id as string | null,
+      (cat?.name as string | null) ?? null,
+      aiLabels,
+    )
+    const mapped = mapTicketRow(ticket, phoneMap, false)
+    return {
+      id: raw.id as string,
+      offered_at: raw.offered_at as string,
+      expires_at: raw.expires_at as string,
+      ticket: {
+        ...mapped,
+        critical_flag: ticket.critical_flag === true,
+        category,
+        category_name: categoryNameFromOfferCategory(category),
+      },
+    }
+  })
 
   const total = count ?? 0
   return {
@@ -611,9 +686,12 @@ async function listOwnedTicketsSupabase(
     .eq('owner_user_id', workerId)
 
   if (bucket === 'active') {
-    query = query.in('stage', ['in_progress', 'on_hold']).neq('sub_status', 'assigned_awaiting_acceptance')
+    query = query
+      .in('stage', ['in_progress', 'on_hold'])
+      .neq('sub_status', 'assigned_awaiting_acceptance')
+      .neq('sub_status', PENDING_CLOSURE_SUB_STATUS)
   } else {
-    query = query.eq('stage', 'closed')
+    query = query.or(`stage.eq.closed,sub_status.eq.${PENDING_CLOSURE_SUB_STATUS}`)
   }
 
   if (opts.severity) query = query.eq('severity', opts.severity)
@@ -692,8 +770,9 @@ async function countActivePg(workerId: string): Promise<number> {
     `SELECT COUNT(*)::text AS c FROM tickets t
      WHERE t.owner_user_id = $1
        AND t.stage IN ('in_progress', 'on_hold')
-       AND t.sub_status <> 'assigned_awaiting_acceptance'`,
-    [workerId],
+       AND t.sub_status <> 'assigned_awaiting_acceptance'
+       AND t.sub_status <> $2`,
+    [workerId, PENDING_CLOSURE_SUB_STATUS],
   )
   return Number(res.rows[0]?.c ?? 0)
 }
@@ -701,8 +780,9 @@ async function countActivePg(workerId: string): Promise<number> {
 async function countClosedPg(workerId: string): Promise<number> {
   const res = await dbQuery<{ c: string }>(
     `SELECT COUNT(*)::text AS c FROM tickets t
-     WHERE t.owner_user_id = $1 AND t.stage = 'closed'`,
-    [workerId],
+     WHERE t.owner_user_id = $1
+       AND (t.stage = 'closed' OR t.sub_status = $2)`,
+    [workerId, PENDING_CLOSURE_SUB_STATUS],
   )
   return Number(res.rows[0]?.c ?? 0)
 }
@@ -741,12 +821,13 @@ export async function getWorkerAssignmentsSummary(workerId: string): Promise<Wor
       .select('id', { count: 'exact', head: true })
       .eq('owner_user_id', workerId)
       .in('stage', ['in_progress', 'on_hold'])
-      .neq('sub_status', 'assigned_awaiting_acceptance'),
+      .neq('sub_status', 'assigned_awaiting_acceptance')
+      .neq('sub_status', PENDING_CLOSURE_SUB_STATUS),
     supabase
       .from('tickets')
       .select('id', { count: 'exact', head: true })
       .eq('owner_user_id', workerId)
-      .eq('stage', 'closed'),
+      .or(`stage.eq.closed,sub_status.eq.${PENDING_CLOSURE_SUB_STATUS}`),
     supabase.from('users').select('metadata_json').eq('id', workerId).single(),
   ])
 

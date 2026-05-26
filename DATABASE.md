@@ -19,7 +19,10 @@ Also set `JWT_SECRET` (min 32 characters) and `ORG_ID`.
 cd vocal-api
 npm install
 npm run db:check      # test connection
-npm run db:migrate    # applies supabase/migrations/*.sql
+npm run db:migrate    # applies supabase/migrations/*.sql (skips already recorded)
+
+# One migration only (e.g. DB already has schema but schema_migrations is empty):
+npm run db:migrate:one -- 012_ticket_closure_review.sql
 ```
 
 ## 3. Migrate data from old Supabase

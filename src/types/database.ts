@@ -31,6 +31,7 @@ export type TicketSubStatus =
   | 'suspected_fake_spam_review'
   | 'reassignment_pending'
   | 'sla_breach_escalation_queue'
+  | 'pending_closure_approval'
   // Closed
   | 'resolved_by_organization'
   | 'resolved_by_external_party'
@@ -262,6 +263,7 @@ export interface Ticket {
   incomplete_information_flag: boolean
   needs_location_validation_flag: boolean
   needs_triage: boolean
+  needs_closure_review: boolean
   public_use_consent_status: 'unknown' | 'granted' | 'denied'
 
   next_action_due_at: string | null
@@ -426,6 +428,7 @@ export const SUB_STATUS_LABELS: Record<TicketSubStatus, string> = {
   suspected_fake_spam_review: 'Suspected Fake / Spam Review',
   reassignment_pending: 'Reassignment Pending',
   sla_breach_escalation_queue: 'SLA Breach – Escalation Queue',
+  pending_closure_approval: 'Closed — Pending Central Support Approval',
   resolved_by_organization: 'Resolved by Organization',
   resolved_by_external_party: 'Resolved by External Party',
   unable_to_support: 'Unable to Support',

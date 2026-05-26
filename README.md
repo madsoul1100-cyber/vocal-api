@@ -51,6 +51,8 @@ Response includes `pagination` (`limit`, `offset`, `total`, `hasNextPage`, `hasP
 | `stage` | `to_do`, `in_progress`, `on_hold`, `closed` |
 | `severity` | `critical`, `high`, `medium`, `low` |
 | `needs_triage` | `true` / `false` |
+| `needs_closure_review` | `true` / `false` — worker-requested closure queue for central support |
+| `sub_status` | Filter by sub-status code (e.g. `pending_closure_approval`) |
 | `has_location` | `true` / `false` |
 | `critical` | `true` / `false` |
 | `owner_id` | Filter by owner user UUID |
@@ -70,6 +72,7 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 | `POST /v2/tickets/auto-assign` | Auto-pick nearest eligible worker; body `{ ticket_id }` → `{ ok, assignment_id, expires_at, worker }` or `409` if none |
 | `GET /v2/tickets/status-options` | Status picker catalog for current role (`groups`, `sub_statuses_requiring_worker`, `worker_allowed_sub_statuses`) |
 | `POST /v2/tickets/status` | Update sub-status; body `{ ticket_id, sub_status }`. For `assigned_awaiting_acceptance` also send `worker_id` (same as assign). Close requires `citizen_contacted` in history + closure note (422) |
+| `POST /v2/tickets/request-closure` | Worker soft-close: body `{ ticket_id, note }` → `pending_closure_approval` + closure note; `stage` stays non-`closed` until CS approves via `/status` |
 | `POST /v2/tickets/assign` | Offer to worker; body `{ ticket_id, worker_id }` (preferred for assign; `/status` with `worker_id` still supported) |
 | `POST /v2/tickets/accept` | Worker accepts current offer; body `{ ticket_id }` |
 | `POST /v2/tickets/reject` | Worker rejects offer; body `{ ticket_id, reason }` |
@@ -88,16 +91,16 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 | `GET /v2/worker/assignments` (no query) | Legacy: `{ offered, activeTickets, telegramLinked }` |
 | `GET /v2/worker/assignments/summary` | Tab counts: `{ counts: { offered, active, closed }, telegramLinked }` |
 | `GET /v2/worker/assignments?bucket=…` | Paginated tab list (see below) |
-| `GET /v2/worker/current-offer` | Poll single pending offer |
+| `GET /v2/worker/current-offer` | Poll single pending offer (`offered_at`, `expires_at`, ticket with `category` / `category_name`, `critical_flag`) |
 | `POST /v2/tickets/accept` / `reject` / `status` | Accept offer, reject, update sub-status |
 
 **Buckets** (`bucket` required for paginated list):
 
 | `bucket` | Rows |
 |----------|------|
-| `offered` | Current assignment offer (`status=offered`, not expired); items `{ id, expires_at, ticket }` |
+| `offered` | Current assignment offer (`status=offered`, not expired); items `{ id, offered_at, expires_at, ticket }` — ticket includes `category` (`{ id, name, source: confirmed \| ai_suggestion }`), `category_name`, `critical_flag` |
 | `active` | Owned tickets `in_progress` or `on_hold`, excluding `assigned_awaiting_acceptance` |
-| `closed` | Owned tickets with `stage=closed` (includes `closed_at`, `outcome`) |
+| `closed` | Owned tickets with `stage=closed` **or** `sub_status=pending_closure_approval` (`closure_pending: true` on pending items) |
 
 | Query param | Description |
 |-------------|-------------|
@@ -110,7 +113,7 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 | `sla_first_contact_overdue` | `true` |
 | `sla_resolution_overdue` | `true` |
 | `sla_at_risk` | `true` — due within 24h |
-| `sort` | `offered`: `expires_at` (default). `active`: `accepted_at` (default). `closed`: `closed_at` (default). Also `updated_at`, `created_at` |
+| `sort` | `offered`: `expires_at` (default), `offered_at`. `active`: `accepted_at` (default). `closed`: `closed_at` (default). Also `updated_at`, `created_at` |
 | `order` | `asc` or `desc` (default `desc` for closed, `asc` for offered/active) |
 
 Paginated response: `{ bucket, items, pagination, filters }`.
