@@ -149,7 +149,6 @@ export function parseWorkerAssignmentsListQuery(
 
   const orderExplicit =
     typeof query.order === 'string' && query.order.trim() ? query.order.trim() : undefined
-  const orderExplicit = typeof query.order === 'string' ? query.order.trim() : ''
   const defaultOrder: 'asc' | 'desc' =
     bucket === 'closed' ? 'desc' : bucket === 'offered' ? 'asc' : 'asc'
   const order =
