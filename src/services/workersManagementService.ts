@@ -17,6 +17,7 @@ import { sanitizeKycDocumentsForDb, type StaffKycDocument } from '@/types/staffD
 import {
   enrichStaffMediaUrls,
   readStaffStorageObject,
+  signedUrlForStaffStorage,
 } from '@/services/staffStorageService.js'
 import { listOrgTerritories, validateTerritoryIdsForOrg } from '@/services/territoryService.js'
 
@@ -202,9 +203,37 @@ export interface PendingActivationRow {
   status: string
   staff_status: 'pending'
   created_at: string
+  notes: string | null
+  image_url: string | null
+  profile_image_url: string | null
+  kyc_documents: StaffKycDocumentWithUrl[]
+  active_requested: boolean
   territories: { name: string } | null
   roles: { name: string; display_name: string | null } | null
   requested_by_user: { full_name: string } | null
+}
+
+async function enrichPendingActivationMedia(
+  row: Omit<PendingActivationRow, 'profile_image_url' | 'kyc_documents'> & {
+    kyc_documents?: StaffKycDocument[] | null
+  },
+): Promise<PendingActivationRow> {
+  const kycDocuments = sanitizeKycDocumentsForDb(row.kyc_documents ?? [])
+  const [profileImageUrl, kyc_documents] = await Promise.all([
+    signedUrlForStaffStorage(row.image_url),
+    Promise.all(
+      kycDocuments.map(async (doc) => ({
+        ...doc,
+        download_url: await signedUrlForStaffStorage(doc.storage_path),
+      })),
+    ),
+  ])
+
+  return {
+    ...row,
+    profile_image_url: profileImageUrl,
+    kyc_documents,
+  }
 }
 
 // --- v2 list (pagination, sort, filters) ---
@@ -502,8 +531,9 @@ async function listWorkersV2Pg(
 
     const pendingLimitParam = pendingCountParams.length + 1
     const pendingOffsetParam = pendingCountParams.length + 2
-    const pendingRes = await dbQuery<PendingActivationRow>(
+    const pendingRes = await dbQuery<Omit<PendingActivationRow, 'profile_image_url'>>(
       `SELECT war.id, war.full_name, war.phone, war.email, war.status, war.created_at,
+              war.notes, war.image_url, war.kyc_documents, war.active_requested,
               CASE WHEN t.id IS NULL THEN NULL
                    ELSE jsonb_build_object('name', t.name)
               END AS territories,
@@ -522,7 +552,15 @@ async function listWorkersV2Pg(
        LIMIT $${pendingLimitParam} OFFSET $${pendingOffsetParam}`,
       [...pendingCountParams, opts.pendingLimit, opts.pendingOffset],
     )
-    pending = pendingRes.rows.map((row) => ({ ...row, staff_status: 'pending' as const }))
+    pending = await Promise.all(
+      pendingRes.rows.map((row) => enrichPendingActivationMedia({
+        ...row,
+        staff_status: 'pending' as const,
+        notes: row.notes ?? null,
+        image_url: row.image_url ?? null,
+        active_requested: row.active_requested === true,
+      })),
+    )
   }
 
   return {
@@ -594,7 +632,7 @@ async function listWorkersV2Supabase(
     let pendingQuery = supabase
       .from('worker_activation_requests')
       .select(
-        'id, full_name, phone, email, status, created_at, territories(name), roles(name, display_name), users!requested_by(full_name)',
+        'id, full_name, phone, email, status, created_at, notes, image_url, kyc_documents, active_requested, territories(name), roles(name, display_name), users!requested_by(full_name)',
         { count: 'exact' },
       )
       .eq('organization_id', orgId)
@@ -608,17 +646,37 @@ async function listWorkersV2Supabase(
 
     const pendingRes = await pendingQuery
     if (pendingRes.error) throw new Error(pendingRes.error.message)
-    pending = ((pendingRes.data ?? []) as Array<Record<string, unknown>>).map((row) => {
-      const requester = row.users as { full_name?: string } | { full_name?: string }[] | null
-      const requesterName = Array.isArray(requester)
-        ? requester[0]?.full_name
-        : requester?.full_name
-      return {
-        ...(row as unknown as PendingActivationRow),
-        staff_status: 'pending' as const,
-        requested_by_user: requesterName ? { full_name: requesterName } : null,
-      }
-    })
+    pending = await Promise.all(
+      ((pendingRes.data ?? []) as Array<Record<string, unknown>>).map((row) => {
+        const requester = row.users as { full_name?: string } | { full_name?: string }[] | null
+        const requesterName = Array.isArray(requester)
+          ? requester[0]?.full_name
+          : requester?.full_name
+        const territory = row.territories as { name: string } | { name: string }[] | null
+        const role = row.roles as
+          | { name: string; display_name: string | null }
+          | { name: string; display_name: string | null }[]
+          | null
+        return enrichPendingActivationMedia({
+          id: row.id as string,
+          full_name: row.full_name as string,
+          phone: (row.phone as string | null) ?? null,
+          email: (row.email as string | null) ?? null,
+          status: row.status as string,
+          staff_status: 'pending' as const,
+          created_at: row.created_at as string,
+          notes: (row.notes as string | null) ?? null,
+          image_url: (row.image_url as string | null) ?? null,
+          kyc_documents: Array.isArray(row.kyc_documents)
+            ? (row.kyc_documents as StaffKycDocument[])
+            : [],
+          active_requested: row.active_requested === true,
+          territories: Array.isArray(territory) ? (territory[0] ?? null) : territory,
+          roles: Array.isArray(role) ? (role[0] ?? null) : role,
+          requested_by_user: requesterName ? { full_name: requesterName } : null,
+        })
+      }),
+    )
     pendingTotal = pendingRes.count ?? 0
   }
 
@@ -1157,6 +1215,70 @@ export async function streamWorkerStaffMedia(
   } else {
     const idx = docIndex ?? -1
     const doc = row.kyc_documents[idx]
+    if (!doc) {
+      return { ok: false, status: 404, error: 'KYC document not found' }
+    }
+    storagePath = doc.storage_path
+    fileName = doc.file_name
+    contentType = doc.mime_type ?? undefined
+  }
+
+  if (!storagePath) {
+    return { ok: false, status: 404, error: 'No file on record' }
+  }
+
+  const file = await readStaffStorageObject(storagePath)
+  if (!file) {
+    return { ok: false, status: 404, error: 'File could not be read from storage' }
+  }
+
+  return {
+    ok: true,
+    data: file.data,
+    contentType: contentType ?? file.contentType,
+    fileName,
+  }
+}
+
+export async function streamWorkerActivationMedia(
+  actor: { id: string; organization_id: string; roles?: { name: string } | null },
+  requestId: string,
+  kind: 'profile' | 'kyc',
+  docIndex?: number,
+): Promise<
+  | { ok: true; data: Buffer; contentType: string; fileName?: string }
+  | { ok: false; status: number; error: string }
+> {
+  if (!canAccessWorkersPage(actor.roles?.name)) {
+    return { ok: false, status: 403, error: 'Insufficient role' }
+  }
+
+  const supabase = createSupabaseServiceClient()
+  const { data: request } = await supabase
+    .from('worker_activation_requests')
+    .select('id, organization_id, requested_by, image_url, kyc_documents')
+    .eq('id', requestId)
+    .maybeSingle()
+
+  if (!request || request.organization_id !== actor.organization_id) {
+    return { ok: false, status: 404, error: 'Request not found' }
+  }
+
+  if (!canApproveStaffCreation(actor.roles?.name) && request.requested_by !== actor.id) {
+    return { ok: false, status: 403, error: 'Insufficient role' }
+  }
+
+  let storagePath: string | null = null
+  let fileName: string | undefined
+  let contentType: string | undefined
+
+  if (kind === 'profile') {
+    storagePath = (request.image_url as string | null) ?? null
+    fileName = 'profile.jpg'
+  } else {
+    const idx = docIndex ?? -1
+    const docs = sanitizeKycDocumentsForDb(request.kyc_documents)
+    const doc = docs[idx]
     if (!doc) {
       return { ok: false, status: 404, error: 'KYC document not found' }
     }

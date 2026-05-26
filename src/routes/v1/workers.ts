@@ -13,6 +13,7 @@ import {
   getOrgUserById,
   getWorkersPageData,
   processActivationRequest,
+  streamWorkerActivationMedia,
   streamWorkerStaffMedia,
   updateOrgUser,
 } from '@/services/workersManagementService.js'
@@ -103,6 +104,42 @@ router.post('/activation/:id', requireAuth, async (req, res) => {
     return
   }
   res.json({ ok: true })
+})
+
+router.get('/activation/:id/media/profile', requireAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
+  const result = await streamWorkerActivationMedia(user, String(req.params.id), 'profile')
+  if (!result.ok) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+  res.setHeader('Content-Type', result.contentType)
+  res.setHeader('Cache-Control', 'private, max-age=300')
+  res.send(result.data)
+})
+
+router.get('/activation/:id/media/kyc/:docIndex', requireAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
+  const docIndex = parseInt(String(req.params.docIndex), 10)
+  if (!Number.isFinite(docIndex) || docIndex < 0) {
+    res.status(400).json({ error: 'Invalid document index' })
+    return
+  }
+  const result = await streamWorkerActivationMedia(
+    user,
+    String(req.params.id),
+    'kyc',
+    docIndex,
+  )
+  if (!result.ok) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+  const safeName = (result.fileName ?? 'document').replace(/[^\w.-]/g, '_')
+  res.setHeader('Content-Type', result.contentType)
+  res.setHeader('Content-Disposition', `inline; filename="${safeName}"`)
+  res.setHeader('Cache-Control', 'private, max-age=300')
+  res.send(result.data)
 })
 
 router.get('/:id/media/profile', requireAuth, async (req, res) => {
