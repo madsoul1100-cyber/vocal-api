@@ -198,11 +198,15 @@ router.post('/status', requireAuth, async (req, res) => {
   const ticketId = req.body?.ticket_id as string | undefined
   const subStatus = req.body?.sub_status as string | undefined
   const workerId = req.body?.worker_id as string | undefined
+  const contactChannel =
+    typeof req.body?.contact_channel === 'string' ? req.body.contact_channel : undefined
   if (!ticketId || !subStatus) {
     res.status(400).json({ error: 'ticket_id and sub_status required' })
     return
   }
-  const result = await updateTicketStatus(user as any, ticketId, subStatus, workerId)
+  const result = await updateTicketStatus(user as any, ticketId, subStatus, workerId, {
+    contact_channel: contactChannel,
+  })
   if (!result.ok) {
     res.status(result.status).json({ error: result.error })
     return

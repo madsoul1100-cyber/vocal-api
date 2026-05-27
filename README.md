@@ -92,14 +92,14 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 | `GET /v2/worker/assignments/summary` | Tab counts: `{ counts: { offered, active, closed }, telegramLinked }` |
 | `GET /v2/worker/assignments?bucket=…` | Paginated tab list (see below) |
 | `GET /v2/worker/current-offer` | Poll single pending offer (`offered_at`, `expires_at`, ticket with `category` / `category_name`, `critical_flag`) |
-| `POST /v2/tickets/accept` / `reject` / `status` | Accept offer, reject, update sub-status |
+| `POST /v2/tickets/accept` / `reject` / `status` | Accept offer, reject, update sub-status (`status` optional `contact_channel`: `call`, `sms`, `in_person`, `visit`, `other`) |
 
 **Buckets** (`bucket` required for paginated list):
 
 | `bucket` | Rows |
 |----------|------|
 | `offered` | Current assignment offer (`status=offered`, not expired); items `{ id, offered_at, expires_at, ticket }` — ticket includes `category` (`{ id, name, source: confirmed \| ai_suggestion }`), `category_name`, `critical_flag` |
-| `active` | Owned tickets `in_progress` or `on_hold`, excluding `assigned_awaiting_acceptance` |
+| `active` | Owned tickets `in_progress` or `on_hold`, excluding `assigned_awaiting_acceptance`. Each item includes `sub_status_label`, `citizen_display_name`, `citizen_phone`, `category` / `category_name`, `sla_first_contact` (timer footer), `primary_action` (suggested card button), `can_request_closure` |
 | `closed` | Owned tickets with `stage=closed` **or** `sub_status=pending_closure_approval` (`closure_pending: true` on pending items) |
 
 | Query param | Description |
