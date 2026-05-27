@@ -59,6 +59,8 @@ export interface WorkerTicketListItem {
   sla_first_contact_due_at: string | null
   sla_resolution_due_at: string | null
   citizen_phone: string | null
+  /** Shown only when citizen identity is revealed (same gating as citizen_phone). */
+  citizen_display_name: string | null
   critical_flag?: boolean
   category?: WorkerOfferCategory | null
   category_name?: string | null
@@ -363,9 +365,48 @@ async function loadCitizenPhones(
   return phoneMap
 }
 
+async function loadCitizenDisplayNames(
+  rows: Array<{ citizen_id: string | null; citizen_identity_revealed_at: string | null }>,
+): Promise<Record<string, string>> {
+  const revealedIds = rows
+    .filter((t) => t.citizen_id && t.citizen_identity_revealed_at)
+    .map((t) => t.citizen_id as string)
+
+  const nameMap: Record<string, string> = {}
+  if (revealedIds.length === 0) return nameMap
+
+  if (isPostgresMode()) {
+    const names = await dbQuery<{ citizen_id: string; display_name: string | null }>(
+      `SELECT id AS citizen_id, display_name
+       FROM citizens
+       WHERE id = ANY($1::uuid[])
+         AND display_name IS NOT NULL`,
+      [revealedIds],
+    )
+    for (const row of names.rows) {
+      if (!nameMap[row.citizen_id] && row.display_name) nameMap[row.citizen_id] = row.display_name
+    }
+    return nameMap
+  }
+
+  const supabase = createSupabaseServiceClient()
+  const { data: identities } = await supabase
+    .from('citizens')
+    .select('id, display_name')
+    .in('id', revealedIds)
+    .not('display_name', 'is', null)
+
+  for (const row of identities ?? []) {
+    if (!nameMap[row.id] && row.display_name) nameMap[row.id] = row.display_name
+  }
+
+  return nameMap
+}
+
 function mapTicketRow(
   t: Record<string, unknown>,
   phoneMap: Record<string, string>,
+  nameMap: Record<string, string>,
   includeClosedFields: boolean,
 ): WorkerTicketListItem {
   const citizenId = t.citizen_id as string | null
@@ -382,6 +423,7 @@ function mapTicketRow(
     sla_first_contact_due_at: (t.sla_first_contact_due_at as string | null) ?? null,
     sla_resolution_due_at: (t.sla_resolution_due_at as string | null) ?? null,
     citizen_phone: citizenId ? (phoneMap[citizenId] ?? null) : null,
+    citizen_display_name: citizenId ? (nameMap[citizenId] ?? null) : null,
   }
   if (t.latitude !== undefined) {
     item.latitude = (t.latitude as number | null) ?? null
@@ -398,6 +440,7 @@ function mapTicketRow(
 function mapOfferedTicketRow(
   row: Record<string, unknown>,
   phoneMap: Record<string, string>,
+  nameMap: Record<string, string>,
   aiLabels: Map<string, string>,
 ): WorkerTicketListItem {
   const ticketId = String(row.ticket_id ?? row.id)
@@ -423,6 +466,7 @@ function mapOfferedTicketRow(
       citizen_identity_revealed_at: row.citizen_identity_revealed_at,
     },
     phoneMap,
+    nameMap,
     false,
   )
   return {
@@ -479,13 +523,16 @@ async function listOfferedPg(
   const phoneMap = await loadCitizenPhones(
     res.rows as Array<{ citizen_id: string | null; citizen_identity_revealed_at: string | null }>,
   )
+  const nameMap = await loadCitizenDisplayNames(
+    res.rows as Array<{ citizen_id: string | null; citizen_identity_revealed_at: string | null }>,
+  )
   const ticketIds = res.rows.map((r) => String(r.ticket_id))
   const aiLabels = await loadAiSuggestedCategoryLabels(ticketIds)
   const items: WorkerOfferedListItem[] = res.rows.map((row) => ({
     id: String(row.id),
     offered_at: String(row.offered_at),
     expires_at: String(row.expires_at),
-    ticket: mapOfferedTicketRow(row, phoneMap, aiLabels),
+    ticket: mapOfferedTicketRow(row, phoneMap, nameMap, aiLabels),
   }))
 
   return {
@@ -541,7 +588,10 @@ async function listOwnedTicketsPg(
   const phoneMap = await loadCitizenPhones(
     res.rows as Array<{ citizen_id: string | null; citizen_identity_revealed_at: string | null }>,
   )
-  const items = res.rows.map((row) => mapTicketRow(row, phoneMap, bucket === 'closed'))
+  const nameMap = await loadCitizenDisplayNames(
+    res.rows as Array<{ citizen_id: string | null; citizen_identity_revealed_at: string | null }>,
+  )
+  const items = res.rows.map((row) => mapTicketRow(row, phoneMap, nameMap, bucket === 'closed'))
 
   return {
     bucket,
@@ -621,6 +671,9 @@ async function listOfferedSupabase(
   const phoneMap = await loadCitizenPhones(
     rows.map((r) => (r.ticket ?? {}) as { citizen_id: string | null; citizen_identity_revealed_at: string | null }),
   )
+  const nameMap = await loadCitizenDisplayNames(
+    rows.map((r) => (r.ticket ?? {}) as { citizen_id: string | null; citizen_identity_revealed_at: string | null }),
+  )
 
   const ticketIds = rows.map((r) => (r.ticket ? String(r.ticket.id) : '')).filter(Boolean)
   const aiLabels = await loadAiSuggestedCategoryLabels(ticketIds)
@@ -642,7 +695,7 @@ async function listOfferedSupabase(
       (cat?.name as string | null) ?? null,
       aiLabels,
     )
-    const mapped = mapTicketRow(ticket, phoneMap, false)
+    const mapped = mapTicketRow(ticket, phoneMap, nameMap, false)
     return {
       id: raw.id as string,
       offered_at: raw.offered_at as string,
@@ -727,8 +780,9 @@ async function listOwnedTicketsSupabase(
   if (error) throw new Error(error.message)
 
   const phoneMap = await loadCitizenPhones(data ?? [])
+  const nameMap = await loadCitizenDisplayNames(data ?? [])
   const items = (data ?? []).map((row) =>
-    mapTicketRow(row as Record<string, unknown>, phoneMap, bucket === 'closed'),
+    mapTicketRow(row as Record<string, unknown>, phoneMap, nameMap, bucket === 'closed'),
   )
 
   const total = count ?? 0

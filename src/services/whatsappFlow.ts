@@ -15,7 +15,7 @@ import {
 } from './whatsappService.js'
 import { classifyIntent } from './aiService.js'
 import { createTicket } from './ticketService.js'
-import { generateTicketSuggestions } from './aiService.js'
+import { enrichTicketFromIssueText } from './ticketIntakeAi.js'
 import { downloadFromTwilioAndStore } from './attachmentService.js'
 import { maskWhatsAppUserId, waLog, waLogError, whatsappAutoOfferWorker } from '@/lib/whatsappFlowLog.js'
 
@@ -395,33 +395,25 @@ async function fileTicket(ctx: FlowContext) {
     }
   }
 
-  void whatsappAutoOfferWorker({
+  if (draft.issue_text) {
+    const enrich = await enrichTicketFromIssueText({
+      ticketId: result.ticketId,
+      organizationId: ctx.organizationId,
+      issueText: draft.issue_text,
+    })
+    if (!enrich.ok) {
+      waLog('script.ai', 'classification skipped', {
+        ticketId: result.ticketId,
+        error: enrich.error,
+      })
+    }
+  }
+
+  await whatsappAutoOfferWorker({
     ticketId: result.ticketId,
     ticketNumber: result.ticketNumber,
     intake: 'script',
   })
-
-  if (draft.issue_text) {
-    generateTicketSuggestions(draft.issue_text).then(async (s) => {
-      if (s.error) {
-        waLog('script.ai', 'suggestions skipped', { ticketId: result.ticketId, error: s.error })
-        return
-      }
-      await ctx.supabase.from('ai_ticket_suggestions').insert({
-        ticket_id: result.ticketId,
-        model_used: process.env.OPENROUTER_MODEL ?? 'unknown',
-        suggested_title: s.suggested_title,
-        suggested_summary: s.suggested_summary,
-        suggested_category: s.suggested_category,
-        suggested_severity: s.suggested_severity,
-        suggested_department: s.suggested_department,
-        suggested_location_text: s.suggested_location_text,
-        confidence_json: s.confidence_json,
-        raw_ai_response: s.raw_ai_response as Record<string, unknown>,
-        status: 'completed',
-      })
-    }).catch(() => {})
-  }
 }
 
 async function replyStatus(ctx: FlowContext, ticketNumber: string | null) {

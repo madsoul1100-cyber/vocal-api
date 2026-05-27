@@ -35,7 +35,7 @@ import {
 } from './telegramService'
 import { classifyIntent } from './aiService'
 import { createTicket } from './ticketService'
-import { generateTicketSuggestions } from './aiService'
+import { enrichTicketFromIssueText } from './ticketIntakeAi.js'
 import { downloadFromTelegramAndStore } from './attachmentService'
 
 export type Step =
@@ -421,27 +421,17 @@ async function fileTicket(ctx: FlowContext) {
 
   // Assignment waits until central support sets ready_for_assignment (see BUILD_TICKET_LIFECYCLE.md).
 
-  // Kick off AI enrichment (fire-and-forget).
   if (draft.issue_text) {
-    generateTicketSuggestions(draft.issue_text).then(async (s) => {
-      if (s.error) {
-        console.warn(`[telegramFlow] AI suggestions skipped for ticket ${result.ticketId}: ${s.error}`)
-        return
-      }
-      await ctx.supabase.from('ai_ticket_suggestions').insert({
-        ticket_id: result.ticketId,
-        model_used: process.env.OPENROUTER_MODEL ?? 'unknown',
-        suggested_title: s.suggested_title,
-        suggested_summary: s.suggested_summary,
-        suggested_category: s.suggested_category,
-        suggested_severity: s.suggested_severity,
-        suggested_department: s.suggested_department,
-        suggested_location_text: s.suggested_location_text,
-        confidence_json: s.confidence_json,
-        raw_ai_response: s.raw_ai_response as any,
-        status: 'completed',
-      })
-    }).catch(() => {})
+    const enrich = await enrichTicketFromIssueText({
+      ticketId: result.ticketId,
+      organizationId: ctx.organizationId,
+      issueText: draft.issue_text,
+    })
+    if (!enrich.ok) {
+      console.warn(
+        `[telegramFlow] AI classification skipped for ticket ${result.ticketId}: ${enrich.error}`,
+      )
+    }
   }
 }
 

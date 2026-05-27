@@ -29,7 +29,7 @@ import {
   type WhatsAppLang,
 } from './whatsappLocale.js'
 import { createTicket } from './ticketService.js'
-import { generateTicketSuggestions } from './aiService.js'
+import { enrichTicketFromIssueText } from './ticketIntakeAi.js'
 import { downloadFromTwilioAndStore } from './attachmentService.js'
 import { maskWhatsAppUserId, waLog, waLogError, whatsappAutoOfferWorker } from '@/lib/whatsappFlowLog.js'
 import type { Draft, DraftMedia, IncomingMessage } from './whatsappFlow.js'
@@ -369,28 +369,28 @@ async function finalizeTicket(ctx: AiFlowContext, aiDraft: AiDraftState) {
     }
   }
 
-  void whatsappAutoOfferWorker({
+  const enrich = await enrichTicketFromIssueText({
+    ticketId: result.ticketId,
+    organizationId: ctx.organizationId,
+    issueText,
+  })
+  if (!enrich.ok) {
+    waLog('ai.enrich', 'classification skipped', {
+      ticketId: result.ticketId,
+      error: enrich.error,
+    })
+  } else {
+    waLog('ai.enrich', 'classification applied', {
+      ticketId: result.ticketId,
+      fields: enrich.fieldsApplied,
+    })
+  }
+
+  await whatsappAutoOfferWorker({
     ticketId: result.ticketId,
     ticketNumber: result.ticketNumber,
     intake: 'ai',
   })
-
-  generateTicketSuggestions(issueText).then(async (s) => {
-    if (s.error) return
-    await ctx.supabase.from('ai_ticket_suggestions').insert({
-      ticket_id: result.ticketId,
-      model_used: process.env.OPENROUTER_MODEL ?? 'unknown',
-      suggested_title: s.suggested_title,
-      suggested_summary: s.suggested_summary,
-      suggested_category: s.suggested_category,
-      suggested_severity: s.suggested_severity,
-      suggested_department: s.suggested_department,
-      suggested_location_text: s.suggested_location_text,
-      confidence_json: s.confidence_json,
-      raw_ai_response: s.raw_ai_response as Record<string, unknown>,
-      status: 'completed',
-    })
-  }).catch(() => {})
 
   const filedNote = `Ticket registered: ${result.ticketNumber}.`
   const history = trimHistory([
