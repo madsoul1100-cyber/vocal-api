@@ -27,6 +27,8 @@ export function getPool(): pg.Pool {
       connectionString: url,
       ssl: process.env.DATABASE_SSL === 'true' ? { rejectUnauthorized: false } : undefined,
       max: Number(process.env.DATABASE_POOL_MAX ?? 10),
+      // Fail fast when RDS is unreachable; otherwise requests can hang.
+      connectionTimeoutMillis: Number(process.env.DATABASE_CONNECT_TIMEOUT_MS ?? 5000),
     })
   }
   return pool
