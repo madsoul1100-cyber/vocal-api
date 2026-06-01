@@ -422,11 +422,14 @@ export async function requestTicketClosure(
   }
 }
 
+const WORKER_CONTACT_CHANNELS = new Set(['call', 'sms', 'in_person', 'visit', 'other'])
+
 export async function updateTicketStatus(
   user: VocalUser,
   ticketId: string,
   subStatusRaw: string,
   workerId?: string,
+  options?: { contact_channel?: string },
 ) {
   const subStatus = subStatusRaw.trim()
   if (!subStatus) {
@@ -573,6 +576,12 @@ export async function updateTicketStatus(
 
   await supabase.from('tickets').update(updates).eq('id', ticketId)
 
+  const channelRaw = options?.contact_channel?.trim().toLowerCase()
+  const changeReason =
+    channelRaw && WORKER_CONTACT_CHANNELS.has(channelRaw)
+      ? `Status updated by user (contact: ${channelRaw})`
+      : 'Status updated by user'
+
   await supabase.from('ticket_stage_history').insert({
     ticket_id: ticketId,
     from_stage: ticket.stage,
@@ -580,7 +589,7 @@ export async function updateTicketStatus(
     from_sub_status: ticket.sub_status,
     to_sub_status: subStatus,
     changed_by: user.id,
-    change_reason: 'Status updated by user',
+    change_reason: changeReason,
     system_action: false,
   })
 

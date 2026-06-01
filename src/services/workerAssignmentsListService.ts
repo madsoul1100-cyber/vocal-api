@@ -3,6 +3,14 @@ import { isPostgresMode, dbQuery } from '@/lib/db.js'
 import { PENDING_CLOSURE_SUB_STATUS } from '@/lib/ticketStatusCatalog.js'
 import { TICKETS_V2_SLA_AT_RISK_HOURS } from '@/services/ticketQueries.js'
 import {
+  buildSlaFirstContactBlock,
+  canWorkerRequestClosure,
+  computeWorkerPrimaryAction,
+  subStatusLabel,
+  type WorkerPrimaryAction,
+  type WorkerSlaFirstContact,
+} from '@/lib/workerTicketCard.js'
+import {
   categoryNameFromOfferCategory,
   loadAiSuggestedCategoryLabels,
   resolveOfferCategory,
@@ -51,7 +59,11 @@ export interface WorkerTicketListItem {
   severity: string | null
   stage: string
   sub_status: string
+  /** Human-readable sub-status for chips (active bucket). */
+  sub_status_label?: string
   accepted_at: string | null
+  first_contacted_at?: string | null
+  updated_at?: string | null
   closed_at?: string | null
   outcome?: string | null
   /** True when worker requested closure; awaiting central support approval. */
@@ -64,6 +76,12 @@ export interface WorkerTicketListItem {
   critical_flag?: boolean
   category?: WorkerOfferCategory | null
   category_name?: string | null
+  /** Active bucket: first-contact SLA block for card footer timer. */
+  sla_first_contact?: WorkerSlaFirstContact | null
+  /** Active bucket: suggested card primary button. */
+  primary_action?: WorkerPrimaryAction
+  /** Active bucket: true when POST /v2/tickets/request-closure is allowed. */
+  can_request_closure?: boolean
 }
 
 export interface WorkerOfferedListItem {
@@ -419,7 +437,10 @@ function mapTicketRow(
     severity: (t.severity as string | null) ?? null,
     stage: String(t.stage),
     sub_status: String(t.sub_status),
+    sub_status_label: subStatusLabel(String(t.sub_status)),
     accepted_at: (t.accepted_at as string | null) ?? null,
+    first_contacted_at: (t.first_contacted_at as string | null) ?? undefined,
+    updated_at: (t.updated_at as string | null) ?? undefined,
     sla_first_contact_due_at: (t.sla_first_contact_due_at as string | null) ?? null,
     sla_resolution_due_at: (t.sla_resolution_due_at as string | null) ?? null,
     citizen_phone: citizenId ? (phoneMap[citizenId] ?? null) : null,
@@ -435,6 +456,47 @@ function mapTicketRow(
     item.closure_pending = String(t.sub_status) === PENDING_CLOSURE_SUB_STATUS
   }
   return item
+}
+
+function enrichActiveWorkerCard(item: WorkerTicketListItem): WorkerTicketListItem {
+  const first_contacted_at = item.first_contacted_at ?? null
+  return {
+    ...item,
+    sla_first_contact: buildSlaFirstContactBlock({
+      due_at: item.sla_first_contact_due_at,
+      first_contacted_at,
+    }),
+    can_request_closure: canWorkerRequestClosure({
+      stage: item.stage,
+      sub_status: item.sub_status,
+      first_contacted_at,
+    }),
+    primary_action: computeWorkerPrimaryAction({
+      sub_status: item.sub_status,
+      stage: item.stage,
+      first_contacted_at,
+      sla_first_contact_due_at: item.sla_first_contact_due_at,
+    }),
+  }
+}
+
+function mapActiveTicketRow(
+  row: Record<string, unknown>,
+  phoneMap: Record<string, string>,
+  nameMap: Record<string, string>,
+  aiLabels: Map<string, string>,
+): WorkerTicketListItem {
+  const catId = row.category_id as string | null | undefined
+  const catName = row.category_name as string | null | undefined
+  const ticketId = String(row.id)
+  const category = resolveOfferCategory(ticketId, catId, catName, aiLabels)
+  const base = mapTicketRow(row, phoneMap, nameMap, false)
+  return enrichActiveWorkerCard({
+    ...base,
+    critical_flag: row.critical_flag === true,
+    category,
+    category_name: categoryNameFromOfferCategory(category),
+  })
 }
 
 function mapOfferedTicketRow(
@@ -575,10 +637,13 @@ async function listOwnedTicketsPg(
 
   const res = await dbQuery<Record<string, unknown>>(
     `SELECT t.id, t.ticket_number, t.title, t.original_issue_text, t.location_text,
-            t.severity, t.stage, t.sub_status, t.accepted_at, t.closed_at, t.outcome,
+            t.latitude, t.longitude, t.severity, t.stage, t.sub_status,
+            t.accepted_at, t.first_contacted_at, t.updated_at, t.closed_at, t.outcome,
             t.sla_first_contact_due_at, t.sla_resolution_due_at,
-            t.citizen_id, t.citizen_identity_revealed_at
+            t.citizen_id, t.citizen_identity_revealed_at, t.critical_flag,
+            ic.id AS category_id, ic.name AS category_name
      FROM tickets t
+     LEFT JOIN issue_categories ic ON ic.id = t.category_id
      WHERE ${where}
      ORDER BY ${order}
      LIMIT $${limitParam} OFFSET $${offsetParam}`,
@@ -591,7 +656,12 @@ async function listOwnedTicketsPg(
   const nameMap = await loadCitizenDisplayNames(
     res.rows as Array<{ citizen_id: string | null; citizen_identity_revealed_at: string | null }>,
   )
-  const items = res.rows.map((row) => mapTicketRow(row, phoneMap, nameMap, bucket === 'closed'))
+  const ticketIds = res.rows.map((r) => String(r.id))
+  const aiLabels = await loadAiSuggestedCategoryLabels(ticketIds)
+  const items =
+    bucket === 'active'
+      ? res.rows.map((row) => mapActiveTicketRow(row, phoneMap, nameMap, aiLabels))
+      : res.rows.map((row) => mapTicketRow(row, phoneMap, nameMap, true))
 
   return {
     bucket,
@@ -622,7 +692,8 @@ async function listOfferedSupabase(
       tickets(
         id, ticket_number, title, original_issue_text,
         location_text, latitude, longitude, severity, stage, sub_status,
-        accepted_at, sla_first_contact_due_at, sla_resolution_due_at,
+        accepted_at, first_contacted_at, updated_at,
+        sla_first_contact_due_at, sla_resolution_due_at,
         citizen_id, citizen_identity_revealed_at, critical_flag,
         category:issue_categories!tickets_category_id_fkey(id, name)
       )
@@ -728,11 +799,12 @@ async function listOwnedTicketsSupabase(
   let query = supabase
     .from('tickets')
     .select(
-      `id, ticket_number, title, original_issue_text, location_text, severity,
-       stage, sub_status, accepted_at, closed_at, outcome,
-       sla_first_contact_due_at, sla_resolution_due_at,
+      `id, ticket_number, title, original_issue_text, location_text, latitude, longitude,
+       severity, stage, sub_status, accepted_at, first_contacted_at, updated_at,
+       closed_at, outcome, sla_first_contact_due_at, sla_resolution_due_at,
        citizen_id, citizen_identity_revealed_at, critical_flag, sla_breached_flag,
-       first_contacted_at, created_at, updated_at`,
+       created_at,
+       category:issue_categories!tickets_category_id_fkey(id, name)`,
       { count: 'exact' },
     )
     .eq('owner_user_id', workerId)
@@ -781,9 +853,26 @@ async function listOwnedTicketsSupabase(
 
   const phoneMap = await loadCitizenPhones(data ?? [])
   const nameMap = await loadCitizenDisplayNames(data ?? [])
-  const items = (data ?? []).map((row) =>
-    mapTicketRow(row as Record<string, unknown>, phoneMap, nameMap, bucket === 'closed'),
-  )
+  const ticketIds = (data ?? []).map((r) => String((r as { id: string }).id))
+  const aiLabels = await loadAiSuggestedCategoryLabels(ticketIds)
+  const items =
+    bucket === 'active'
+      ? (data ?? []).map((row) => {
+          const r = row as Record<string, unknown>
+          const cat = normalizeTicketJoin(r.category)
+          const mapped = mapActiveTicketRow(
+            {
+              ...r,
+              category_id: cat?.id,
+              category_name: cat?.name,
+            },
+            phoneMap,
+            nameMap,
+            aiLabels,
+          )
+          return mapped
+        })
+      : (data ?? []).map((row) => mapTicketRow(row as Record<string, unknown>, phoneMap, nameMap, true))
 
   const total = count ?? 0
   return {
