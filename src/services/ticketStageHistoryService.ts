@@ -1,6 +1,7 @@
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
 import { SUB_STATUS_LABELS, STAGE_LABELS } from '@/types/database.js'
 import type { TicketStage, TicketSubStatus } from '@/types/database.js'
+import { enrichWorkerProfile } from '@/services/workerProfileEnrich.js'
 
 export interface TicketStageHistoryItem {
   id: string
@@ -12,7 +13,12 @@ export interface TicketStageHistoryItem {
   to_sub_status: string
   from_sub_status_label: string | null
   to_sub_status_label: string
-  changed_by: { id: string; full_name: string } | null
+  changed_by: {
+    id: string
+    full_name: string
+    image_url: string | null
+    profile_image_url: string | null
+  } | null
   change_reason: string | null
   system_action: boolean
   created_at: string
@@ -53,7 +59,7 @@ export async function listTicketStageHistory(
       `
       id, ticket_id, from_stage, to_stage, from_sub_status, to_sub_status,
       changed_by, change_reason, system_action, created_at,
-      changed_by_user:users!ticket_stage_history_changed_by_fkey(id, full_name)
+      changed_by_user:users!ticket_stage_history_changed_by_fkey(id, full_name, image_url)
     `,
     )
     .eq('ticket_id', ticketId)
@@ -64,15 +70,29 @@ export async function listTicketStageHistory(
     return { error: error.message }
   }
 
-  return (rows ?? []).map((r) => {
-    const user = r.changed_by_user as { id?: string; full_name?: string } | null
+  const items: TicketStageHistoryItem[] = []
+  for (const r of rows ?? []) {
+    const user = r.changed_by_user as {
+      id?: string
+      full_name?: string
+      image_url?: string | null
+    } | null
     const systemAction = r.system_action as boolean
     const toSub = String(r.to_sub_status ?? '')
     const fromSub = (r.from_sub_status as string | null) ?? null
     const toStage = String(r.to_stage ?? '')
     const fromStage = (r.from_stage as string | null) ?? null
 
-    return {
+    let changed_by: TicketStageHistoryItem['changed_by'] = null
+    if (!systemAction && user?.id) {
+      changed_by = await enrichWorkerProfile({
+        id: user.id,
+        full_name: user.full_name ?? '',
+        image_url: user.image_url ?? null,
+      })
+    }
+
+    items.push({
       id: r.id as string,
       from_stage: fromStage,
       to_stage: toStage,
@@ -82,13 +102,11 @@ export async function listTicketStageHistory(
       to_sub_status: toSub,
       from_sub_status_label: subStatusLabel(fromSub),
       to_sub_status_label: subStatusLabel(toSub) ?? toSub,
-      changed_by:
-        !systemAction && user?.id
-          ? { id: user.id, full_name: user.full_name ?? '' }
-          : null,
+      changed_by,
       change_reason: (r.change_reason as string | null) ?? null,
       system_action: systemAction,
       created_at: r.created_at as string,
-    }
-  })
+    })
+  }
+  return items
 }

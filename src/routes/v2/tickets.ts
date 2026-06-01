@@ -49,6 +49,7 @@ import {
 } from '@/services/ticketAttachmentService.js'
 import { ticketAttachmentStorageBackend } from '@/services/attachmentService.js'
 import { listTicketStageHistory } from '@/services/ticketStageHistoryService.js'
+import { enrichWorkerProfile } from '@/services/workerProfileEnrich.js'
 
 const router = Router()
 const upload = multer({
@@ -449,7 +450,7 @@ router.get('/:id', requireAuth, async (req, res) => {
       *,
       category:issue_categories!tickets_category_id_fkey(id, name),
       subcategory:issue_categories!tickets_subcategory_id_fkey(id, name),
-      owner:users!tickets_owner_user_id_fkey(id, full_name),
+      owner:users!tickets_owner_user_id_fkey(id, full_name, image_url),
       territories(id, name)
     `)
     .eq('id', req.params.id)
@@ -463,6 +464,19 @@ router.get('/:id', requireAuth, async (req, res) => {
   }
 
   const row = data as Record<string, unknown>
+  const ownerEmbed = row.owner as
+    | { id: string; full_name: string; image_url?: string | null }
+    | Array<{ id: string; full_name: string; image_url?: string | null }>
+    | null
+  const ownerRow = Array.isArray(ownerEmbed) ? ownerEmbed[0] : ownerEmbed
+  if (ownerRow?.id) {
+    row.owner = await enrichWorkerProfile({
+      id: ownerRow.id,
+      full_name: ownerRow.full_name,
+      image_url: ownerRow.image_url ?? null,
+    })
+  }
+
   const ticket = nestTicketSla(
     nestTicketClassification(stripTicketAiMirrorFields(row), row),
     row,

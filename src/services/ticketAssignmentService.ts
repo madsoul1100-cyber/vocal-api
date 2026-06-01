@@ -1,10 +1,12 @@
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
 import { isPostgresMode, dbQuery } from '@/lib/db.js'
+import { findNearestAvailableWorker, offerTicketToWorker } from '@/services/assignmentService.js'
 import {
-  findNearestAvailableWorker,
-  offerTicketToWorker,
-  type CandidateWorker,
-} from '@/services/assignmentService.js'
+  enrichWorkerProfile,
+  enrichAssignableWorkers,
+  type EnrichedAssignableWorker,
+  type WorkerProfileRef,
+} from '@/services/workerProfileEnrich.js'
 
 export const ASSIGN_TICKET_ROLES = ['super_admin', 'central_support'] as const
 
@@ -25,14 +27,15 @@ export interface TicketCurrentAssignment {
   status: string
   offered_at: string
   expires_at: string | null
-  worker: { id: string; full_name: string }
+  worker: {
+    id: string
+    full_name: string
+    image_url: string | null
+    profile_image_url: string | null
+  }
 }
 
-export interface AssignableWorker {
-  id: string
-  full_name: string
-  territory_ids: string[]
-}
+export type AssignableWorker = EnrichedAssignableWorker
 
 export const ASSIGNABLE_WORKERS_DEFAULT_LIMIT = 20
 export const ASSIGNABLE_WORKERS_MAX_LIMIT = 100
@@ -93,13 +96,19 @@ export function assignableWorkersFiltersEcho(opts: AssignableWorkersListOptions)
 }
 
 function mapWorkerRows(
-  rows: Array<{ id: string; full_name: string; user_territories?: Array<{ territory_id: string }> | null }>,
-): AssignableWorker[] {
+  rows: Array<{
+    id: string
+    full_name: string
+    image_url?: string | null
+    user_territories?: Array<{ territory_id: string }> | null
+  }>,
+): Array<{ id: string; full_name: string; image_url: string | null; territory_ids: string[] }> {
   return rows.map((w) => {
     const territories = (w.user_territories ?? []) as Array<{ territory_id: string }>
     return {
       id: w.id,
       full_name: w.full_name,
+      image_url: w.image_url ?? null,
       territory_ids: territories.map((t) => t.territory_id),
     }
   })
@@ -170,9 +179,10 @@ async function listAssignableWorkersPaginatedPg(
   const listRes = await dbQuery<{
     id: string
     full_name: string
+    image_url: string | null
     territory_ids: string[] | null
   }>(
-    `SELECT u.id, u.full_name,
+    `SELECT u.id, u.full_name, u.image_url,
             COALESCE(
               (SELECT array_agg(ut.territory_id) FROM user_territories ut WHERE ut.user_id = u.id),
               ARRAY[]::uuid[]
@@ -184,11 +194,13 @@ async function listAssignableWorkersPaginatedPg(
     listParams,
   )
 
-  const workers: AssignableWorker[] = listRes.rows.map((r) => ({
+  const mapped = listRes.rows.map((r) => ({
     id: r.id,
     full_name: r.full_name,
+    image_url: r.image_url,
     territory_ids: (r.territory_ids ?? []).map(String),
   }))
+  const workers: AssignableWorker[] = await enrichAssignableWorkers(mapped)
 
   return {
     workers,
@@ -202,8 +214,8 @@ async function listAssignableWorkersPaginatedSupabase(
 ): Promise<AssignableWorkersListResult> {
   const supabase = createSupabaseServiceClient()
   const selectCols = opts.territoryId
-    ? 'id, full_name, user_territories!inner(territory_id)'
-    : 'id, full_name, user_territories(territory_id)'
+    ? 'id, full_name, image_url, user_territories!inner(territory_id)'
+    : 'id, full_name, image_url, user_territories(territory_id)'
 
   let query = supabase
     .from('users')
@@ -223,9 +235,15 @@ async function listAssignableWorkersPaginatedSupabase(
   const { data, count, error } = await query
   if (error) throw new Error(error.message)
 
-  const workers = mapWorkerRows(
-    (data ?? []) as Array<{ id: string; full_name: string; user_territories?: Array<{ territory_id: string }> }>,
+  const mapped = mapWorkerRows(
+    (data ?? []) as Array<{
+      id: string
+      full_name: string
+      image_url?: string | null
+      user_territories?: Array<{ territory_id: string }>
+    }>,
   )
+  const workers: AssignableWorker[] = await enrichAssignableWorkers(mapped)
 
   return {
     workers,
@@ -265,7 +283,7 @@ export async function getCurrentAssignment(
     .select(
       `
       id, status, offered_at, expires_at, worker_user_id,
-      worker:users!ticket_assignments_worker_user_id_fkey(id, full_name)
+      worker:users!ticket_assignments_worker_user_id_fkey(id, full_name, image_url)
     `,
     )
     .eq('ticket_id', ticketId)
@@ -274,16 +292,25 @@ export async function getCurrentAssignment(
 
   if (!row) return null
 
-  const rawWorker = row.worker as { id: string; full_name: string } | { id: string; full_name: string }[] | null
+  const rawWorker = row.worker as
+    | { id: string; full_name: string; image_url?: string | null }
+    | Array<{ id: string; full_name: string; image_url?: string | null }>
+    | null
   const worker = Array.isArray(rawWorker) ? rawWorker[0] : rawWorker
   if (!worker?.id) return null
+
+  const workerProfile = await enrichWorkerProfile({
+    id: worker.id,
+    full_name: worker.full_name,
+    image_url: worker.image_url ?? null,
+  })
 
   return {
     id: row.id as string,
     status: row.status as string,
     offered_at: row.offered_at as string,
     expires_at: (row.expires_at as string | null) ?? null,
-    worker: { id: worker.id, full_name: worker.full_name },
+    worker: workerProfile,
   }
 }
 
@@ -399,7 +426,12 @@ export async function autoAssignTicket(
   user: VocalUser,
   ticketId: string,
 ): Promise<
-  | { ok: true; assignment_id: string; expires_at: string; worker: CandidateWorker }
+  | {
+      ok: true
+      assignment_id: string
+      expires_at: string
+      worker: WorkerProfileRef & { distance_km: number | null; active_ticket_count: number }
+    }
   | { ok: false; status: number; error: string }
 > {
   if (!canAssignTickets(user.roles?.name)) {
@@ -430,11 +462,20 @@ export async function autoAssignTicket(
     return { ok: false, status: mapped.status, error: mapped.message }
   }
 
+  const profile = await enrichWorkerProfile({
+    id: candidate.id,
+    full_name: candidate.full_name,
+  })
+
   return {
     ok: true,
     assignment_id: offer.assignmentId,
     expires_at: offer.expiresAt,
-    worker: candidate,
+    worker: {
+      ...profile,
+      distance_km: candidate.distance_km,
+      active_ticket_count: candidate.active_ticket_count,
+    },
   }
 }
 
