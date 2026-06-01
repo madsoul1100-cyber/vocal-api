@@ -11,6 +11,18 @@ export const ROLE_HIERARCHY_BY_NAME: Record<string, number> = {
 
 export const STAFF_CREATION_APPROVER_ROLES = ['super_admin', 'central_support'] as const
 
+/** Roles that can open the workers UI and submit new staff (approval queue for non-approvers). */
+export const STAFF_WORKER_MANAGER_ROLES = [
+  'super_admin',
+  'central_support',
+  'state_leader',
+  'district_leader',
+] as const
+
+export function canAccessWorkersPage(roleName: string | null | undefined): boolean {
+  return !!roleName && (STAFF_WORKER_MANAGER_ROLES as readonly string[]).includes(roleName)
+}
+
 export function hierarchyLevelForRoleName(name: string | null | undefined): number | null {
   if (!name) return null
   return ROLE_HIERARCHY_BY_NAME[name] ?? null

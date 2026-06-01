@@ -3,10 +3,12 @@ import { isPostgresMode, dbQuery } from '@/lib/db.js'
 import { hashPassword } from '@/services/authService.js'
 import { normalizePhone } from '@/services/otpService.js'
 import {
+  canAccessWorkersPage,
   canApproveStaffCreation,
   canAssignRoleLevel,
   hierarchyLevelForRoleName,
   requiresStaffCreationApproval,
+  STAFF_WORKER_MANAGER_ROLES,
 } from '@/lib/roleHierarchy.js'
 import {
   deriveUserStaffStatus,
@@ -34,12 +36,12 @@ import {
 
 export type { StaffStatus, StaffCategoryCounts }
 
-export const WORKERS_PAGE_ROLES = ['super_admin', 'central_support', 'district_leader']
+/** @deprecated Prefer STAFF_WORKER_MANAGER_ROLES from roleHierarchy */
+export const WORKERS_PAGE_ROLES = [...STAFF_WORKER_MANAGER_ROLES]
+
 const AUTO_APPROVE_ROLES = ['super_admin', 'central_support']
 
-export function canAccessWorkersPage(role: string | null | undefined): boolean {
-  return !!role && WORKERS_PAGE_ROLES.includes(role)
-}
+export { canAccessWorkersPage }
 
 export interface TerritoryOption {
   id: string
@@ -874,13 +876,19 @@ async function listWorkersV2Supabase(
 export async function listWorkersV2(
   orgId: string,
   opts: WorkersListV2Options,
-  actorRoleName?: string | null,
+  actor?: { roleName?: string | null; userId?: string },
 ): Promise<WorkersListV2Result> {
+  const canApprove = canApproveStaffCreation(actor?.roleName)
+  const listOpts: WorkersListV2Options = {
+    ...opts,
+    pendingRequestedBy:
+      opts.pendingRequestedBy ?? (canApprove ? undefined : actor?.userId),
+  }
   const [listPart, summary, territories, roles] = await Promise.all([
-    isPostgresMode() ? listWorkersV2Pg(orgId, opts) : listWorkersV2Supabase(orgId, opts),
+    isPostgresMode() ? listWorkersV2Pg(orgId, listOpts) : listWorkersV2Supabase(orgId, listOpts),
     isPostgresMode() ? getWorkersOrgSummaryPg(orgId) : getWorkersOrgSummarySupabase(orgId),
     listTerritories(orgId),
-    listAssignableRoles(actorRoleName),
+    listAssignableRoles(actor?.roleName),
   ])
 
   return { ...listPart, summary, territories, roles }
@@ -930,9 +938,8 @@ export async function getWorkersPageData(
       includePending: true,
       pendingLimit: 50,
       pendingOffset: 0,
-      pendingRequestedBy: canApprove ? undefined : actor?.userId,
     },
-    actorRoleName,
+    { roleName: actorRoleName, userId: actor?.userId },
   )
 
   const active_workers = result.workers.filter((w) => w.staff_status === 'active')

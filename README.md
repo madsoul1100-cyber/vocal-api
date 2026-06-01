@@ -120,7 +120,7 @@ Paginated response: `{ bucket, items, pagination, filters }`.
 
 ### v2 workers (paginated)
 
-`GET /v2/workers` — `super_admin`, `central_support`, `district_leader` only. v1 unchanged (returns first 200 workers + 50 pending).
+`GET /v2/workers` — `super_admin`, `central_support`, `state_leader`, `district_leader`. Response includes `can_approve_staff` (`true` only for super admin / central support). v1 unchanged (returns first 200 workers + 50 pending).
 
 | Query param | Description |
 |-------------|-------------|
