@@ -36,6 +36,11 @@ import { enrichTicketFromIssueText } from './ticketIntakeAi.js'
 import { downloadFromTwilioAndStore } from './attachmentService.js'
 import { maskWhatsAppUserId, waLog, waLogError, whatsappAutoOfferWorker } from '@/lib/whatsappFlowLog.js'
 import type { Draft, DraftMedia, IncomingMessage } from './whatsappFlow.js'
+import {
+  applyIntakeGates,
+  draftReadyForConfirmation,
+  isVagueLocation,
+} from './whatsappIntakeGates.js'
 
 const MAX_HISTORY_TURNS = 24
 
@@ -51,6 +56,9 @@ export interface AiDraftState {
   severity_hint?: string | null
   scope_assessment?: string | null
   media?: DraftMedia[]
+  photo_requested?: boolean
+  photo_skipped?: boolean
+  location_confirmed?: boolean
 }
 
 export interface WhatsAppConversationMeta {
@@ -209,25 +217,51 @@ function localIntakeFallback(
     return { replyText: c.askIssue, draftUpdates: {}, readyToFile: false }
   }
 
+  let draftUpdates: IntakeResponse['draftUpdates'] = {}
+  let replyText = c.readyOneField(issue)
+  let modelReady = false
+
   if (!location) {
-    if (text.length >= 4 && isStandaloneLocationMessage(text)) {
-      return {
-        replyText: c.confirmSubmit(issue, text),
-        draftUpdates: { location_text: text },
-        readyToFile: true,
+    if (text.length >= 4) {
+      draftUpdates = { location_text: text }
+      if (isVagueLocation(text)) {
+        replyText = c.askSpecificLocation(text)
+      } else {
+        replyText = c.askPhoto
+        modelReady = false
       }
     }
-    return {
-      replyText: c.readyOneField(issue),
-      draftUpdates: {},
-      readyToFile: false,
-    }
+  } else if (isVagueLocation(location)) {
+    replyText = c.askSpecificLocation(location)
+    modelReady = false
+  } else {
+    modelReady = true
+    replyText = c.confirmSubmit(issue, location)
   }
 
+  const mergedDraft: AiDraftState = {
+    ...draft,
+    issue_text: issue || draft.issue_text,
+    issue_text_native: issue || draft.issue_text_native,
+    location_text: (draftUpdates.location_text as string) ?? location ?? draft.location_text,
+    media: draft.media,
+  }
+
+  const gated = applyIntakeGates({
+    draft: mergedDraft,
+    modelReadyToFile: modelReady,
+    lang,
+    hasMedia: hasPhoto,
+    userText: userContent,
+  })
+
   return {
-    replyText: c.confirmSubmit(issue, location),
-    draftUpdates: {},
-    readyToFile: true,
+    replyText: gated.replyOverride ?? replyText,
+    draftUpdates: {
+      ...draftUpdates,
+      ...(gated.draftPatch as IntakeResponse['draftUpdates']),
+    },
+    readyToFile: gated.readyToFile,
   }
 }
 
@@ -502,11 +536,28 @@ export async function handleInboundMessageAi(ctx: AiFlowContext): Promise<void> 
 
   const existingDraft = ctx.meta.aiDraft ?? {}
   if (words.isYes(text)) {
-    const issue = (existingDraft.issue_text_native ?? existingDraft.issue_text ?? '').trim()
-    if (issue) {
+    if (
+      draftReadyForConfirmation(existingDraft, Boolean(ctx.msg.media))
+    ) {
       await finalizeTicket(ctx, existingDraft)
       return
     }
+    const gateLang = replyLang(ctx, text)
+    const gated = applyIntakeGates({
+      draft: existingDraft,
+      modelReadyToFile: true,
+      lang: gateLang,
+      hasMedia: Boolean(ctx.msg.media),
+      userText: text,
+    })
+    const merged = { ...existingDraft, ...gated.draftPatch }
+    await sendWhatsAppMessage(ctx.msg.chat_id, gated.replyOverride ?? intakeCopy(gateLang).askIssue)
+    await persistMeta(ctx, 'ai_intake', {
+      ...ctx.meta,
+      aiDraft: merged as AiDraftState,
+      preferredLanguage: gateLang,
+    })
+    return
   }
 
   const userContent = buildUserContent(ctx)
@@ -565,7 +616,7 @@ export async function handleInboundMessageAi(ctx: AiFlowContext): Promise<void> 
     }
   }
 
-  const aiDraft = mergeAiDraft(ctx.meta.aiDraft ?? {}, response.draftUpdates, ctx)
+  let aiDraft = mergeAiDraft(ctx.meta.aiDraft ?? {}, response.draftUpdates, ctx)
   aiDraft.scope_assessment = response.scopeAssessment
 
   const preferredLanguage =
@@ -573,9 +624,20 @@ export async function handleInboundMessageAi(ctx: AiFlowContext): Promise<void> 
       ? normalizeStoredLanguage(response.language)
       : lang
 
+  const gated = applyIntakeGates({
+    draft: aiDraft,
+    modelReadyToFile: response.readyToFile,
+    lang: preferredLanguage,
+    hasMedia: Boolean(ctx.msg.media),
+    userText: text,
+  })
+  aiDraft = { ...aiDraft, ...(gated.draftPatch as Partial<AiDraftState>) }
+  response = { ...response, readyToFile: gated.readyToFile }
+
   const assistantText =
-    response.replyText?.trim() ||
-    'Tell me more about what happened — I am here to help you report it to the right people.'
+    gated.replyOverride ??
+    response.replyText?.trim() ??
+    intakeCopy(preferredLanguage).askIssue
 
   const updatedHistory = trimHistory([
     ...history,
