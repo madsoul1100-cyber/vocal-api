@@ -23,6 +23,7 @@ import {
   type TicketPickerOption,
 } from './whatsappTicketStatus.js'
 import {
+  intakeCopy,
   normalizeStoredLanguage,
   resolveReplyLanguage,
   statusCopy,
@@ -30,7 +31,7 @@ import {
 } from './whatsappLocale.js'
 import { createTicket } from './ticketService.js'
 import { generateTicketSuggestions } from './aiService.js'
-import { findNearestAvailableWorker, offerTicketToWorker } from './assignmentService.js'
+import { autoRouteNewTicket } from './assignmentService.js'
 import { downloadFromTwilioAndStore } from './attachmentService.js'
 import type { Draft, DraftMedia, IncomingMessage } from './whatsappFlow.js'
 
@@ -158,23 +159,30 @@ export function hydrateConversationMeta(meta: WhatsAppConversationMeta): WhatsAp
   }
 }
 
-/** When OpenRouter fails — still progress the conversation from accumulated draft + message. */
+/** When OpenRouter fails — conversational progress in the user's language mix. */
 function localIntakeFallback(
   userContent: string,
   draft: AiDraftState,
+  lang: WhatsAppLang,
+  hasMedia: boolean,
 ): {
   replyText: string
   draftUpdates: IntakeResponse['draftUpdates']
   readyToFile: boolean
 } {
+  const c = intakeCopy(lang)
   const text = userContent.trim()
   const issue = (draft.issue_text_native ?? draft.issue_text ?? '').trim()
   const location = (draft.location_text ?? '').trim()
+  const hasPhoto = hasMedia || (draft.media?.length ?? 0) > 0
 
-  if (isShortGreeting(text)) {
+  if (isShortGreeting(text) && !hasPhoto) {
+    return { replyText: c.greeting, draftUpdates: {}, readyToFile: false }
+  }
+
+  if (hasPhoto && !issue && text.length < 15) {
     return {
-      replyText:
-        'Hello! I am here to help you report civic problems to your local team — roads, drainage, water, garbage, and similar issues. What is going on in your area?',
+      replyText: c.askIssue,
       draftUpdates: {},
       readyToFile: false,
     }
@@ -183,45 +191,39 @@ function localIntakeFallback(
   if (!issue) {
     if (isStandaloneLocationMessage(text)) {
       return {
-        replyText:
-          'Thanks for the location. What problem should we report there — for example drainage, road damage, or water supply?',
+        replyText: c.askLocationOnly,
         draftUpdates: { location_text: text },
         readyToFile: false,
       }
     }
-    if (text.length >= 10) {
+    if (text.length >= 8) {
       const preview = text.length > 100 ? `${text.slice(0, 100)}…` : text
       return {
-        replyText: `I understand — "${preview}". Which locality or landmark is this in? (city, ward, or pin code)`,
+        replyText: c.ackIssueAskLocation(preview),
         draftUpdates: { issue_text: text, issue_text_native: text },
         readyToFile: false,
       }
     }
-    return {
-      replyText:
-        'Tell me what civic problem you are facing (for example: broken road, blocked drainage, no water).',
-      draftUpdates: {},
-      readyToFile: false,
-    }
+    return { replyText: c.askIssue, draftUpdates: {}, readyToFile: false }
   }
 
   if (!location) {
-    if (text.length >= 4) {
+    if (text.length >= 4 && isStandaloneLocationMessage(text)) {
       return {
-        replyText: `Noted your issue. Location: ${text}.\n\nReply *yes* to submit, or add more detail.`,
+        replyText: c.confirmSubmit(issue, text),
         draftUpdates: { location_text: text },
         readyToFile: true,
       }
     }
     return {
-      replyText: `Got it: "${issue.slice(0, 120)}${issue.length > 120 ? '…' : ''}". Where is this — locality, landmark, or pin code?`,
+      replyText: c.readyOneField(issue),
       draftUpdates: {},
       readyToFile: false,
     }
   }
 
   return {
-    replyText: `Ready to register:\n• Issue: ${issue.slice(0, 300)}\n• Location: ${location}\n\nReply *yes* to submit.`,
+    replyText: c.confirmSubmit(issue, location),
     draftUpdates: {},
     readyToFile: true,
   }
@@ -350,16 +352,8 @@ async function finalizeTicket(ctx: AiFlowContext, aiDraft: AiDraftState) {
     }
   }
 
-  findNearestAvailableWorker(result.ticketId).then(async (worker) => {
-    if (worker) {
-      await offerTicketToWorker({
-        ticketId: result.ticketId,
-        workerId: worker.id,
-        assignedByUserId: null,
-        reason: 'Auto-assigned at ticket creation',
-      })
-    }
-  }).catch(() => {})
+  // Auto-route: direct-assign to the territory's worker, else offer to nearest.
+  autoRouteNewTicket(result.ticketId).catch(() => {})
 
   generateTicketSuggestions(issueText).then(async (s) => {
     if (s.error) return
@@ -458,7 +452,14 @@ export async function handleInboundMessageAi(ctx: AiFlowContext): Promise<void> 
 
   let response = await processInbound({
     history,
-    newMessage: { text: userContent },
+    newMessage: {
+      text: userContent,
+      media: ctx.msg.media
+        ? {
+            image_description: `[Citizen sent a ${ctx.msg.media.type} on WhatsApp — thank them and use it as evidence]`,
+          }
+        : undefined,
+    },
     existingDraft: (ctx.meta.aiDraft ?? {}) as Record<string, unknown>,
   })
 
@@ -472,7 +473,12 @@ export async function handleInboundMessageAi(ctx: AiFlowContext): Promise<void> 
       '| history turns:',
       history.length,
     )
-    const local = localIntakeFallback(userContent, ctx.meta.aiDraft ?? {})
+    const local = localIntakeFallback(
+      userContent,
+      ctx.meta.aiDraft ?? {},
+      lang,
+      Boolean(ctx.msg.media),
+    )
     response = {
       ...response,
       replyText: local.replyText,

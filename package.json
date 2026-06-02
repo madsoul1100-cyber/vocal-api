@@ -13,6 +13,7 @@
     "seed:passwords": "tsx scripts/seed-passwords.ts",
     "seed:staff-profile-placeholder": "tsx scripts/seed-staff-profile-placeholder.ts",
     "seed:directory-categories": "tsx scripts/seed-directory-categories.ts",
+    "seed:territories": "tsx scripts/import-territories.ts",
     "generate:ai-suggestion": "tsx scripts/generate-ai-suggestion.ts"
   },
   "dependencies": {

@@ -26,9 +26,11 @@ import {
   resolveStaffProfileStoragePath,
 } from '@/services/staffStorageService.js'
 import {
+  expandTerritoryAssignmentIds,
   listOrgTerritories,
   listTerritoryIdsByNamePattern,
   listUserIdsWithTerritoryNameMatch,
+  type TerritoryAssignmentInput,
   validateTerritoryIdsForOrg,
 } from '@/services/territoryService.js'
 
@@ -956,6 +958,60 @@ async function listTerritories(orgId: string): Promise<TerritoryOption[]> {
   return listOrgTerritories(orgId)
 }
 
+/** Parse territory_assignments from multipart/JSON body (cascade picker). */
+export function parseTerritoryAssignmentsFromBody(
+  body: Record<string, unknown>,
+): TerritoryAssignmentInput[] {
+  const raw = body.territory_assignments
+  const out: TerritoryAssignmentInput[] = []
+
+  const pushItem = (item: unknown) => {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return
+    const o = item as Record<string, unknown>
+    const territory_id =
+      typeof o.territory_id === 'string'
+        ? o.territory_id.trim()
+        : typeof o.id === 'string'
+          ? o.id.trim()
+          : ''
+    if (!territory_id) return
+    out.push({
+      territory_id,
+      include_descendants: o.include_descendants === true || o.include_descendants === 'true',
+    })
+  }
+
+  if (typeof raw === 'string' && raw.trim()) {
+    try {
+      const parsed = JSON.parse(raw) as unknown
+      if (Array.isArray(parsed)) parsed.forEach(pushItem)
+    } catch {
+      /* ignore */
+    }
+  } else if (Array.isArray(raw)) {
+    raw.forEach(pushItem)
+  }
+
+  const seen = new Set<string>()
+  return out.filter((a) => {
+    if (seen.has(a.territory_id)) return false
+    seen.add(a.territory_id)
+    return true
+  })
+}
+
+/** Resolve final territory ID list (cascade assignments expand descendants). */
+export async function resolveTerritoryIdsFromBody(
+  orgId: string,
+  body: Record<string, unknown>,
+): Promise<string[]> {
+  const assignments = parseTerritoryAssignmentsFromBody(body)
+  if (assignments.length > 0) {
+    return expandTerritoryAssignmentIds(orgId, assignments)
+  }
+  return parseTerritoryIdsFromBody(body)
+}
+
 /** Parse territory_ids from multipart/JSON body (supports legacy territory_id). */
 export function parseTerritoryIdsFromBody(body: Record<string, unknown>): string[] {
   const ids: string[] = []
@@ -1129,7 +1185,7 @@ export async function createOrgUser(
         : null
 
   const active = body.active === true || body.active === 'true' || body.active === 'on'
-  const territoryIdsParsed = parseTerritoryIdsFromBody(body)
+  const territoryIdsParsed = await resolveTerritoryIdsFromBody(user.organization_id, body)
   const territoryCheck = await validateTerritoryIdsForOrg(
     user.organization_id,
     territoryIdsParsed,
@@ -1681,11 +1737,14 @@ export async function updateOrgUser(
     }
   }
 
-  const territoriesInBody = 'territory_ids' in body || 'territory_id' in body
+  const territoriesInBody =
+    'territory_ids' in body ||
+    'territory_id' in body ||
+    'territory_assignments' in body
   let territoryIdsToSync: string[] | undefined
   let primaryTerritoryId: string | null | undefined
   if (territoriesInBody) {
-    const parsed = parseTerritoryIdsFromBody(body)
+    const parsed = await resolveTerritoryIdsFromBody(actor.organization_id, body)
     const territoryCheck = await validateTerritoryIdsForOrg(actor.organization_id, parsed)
     if (!territoryCheck.ok) {
       return { ok: false as const, status: 400, error: territoryCheck.error }

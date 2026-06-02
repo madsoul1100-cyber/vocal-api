@@ -140,6 +140,48 @@ export async function notifyWorkerOfAssignment(
   }
 }
 
+// ── Direct assignment (no acceptance step) ─────────────────────────────────
+// Used when a ticket is auto-assigned to the worker who owns its territory.
+// There is no Accept/Reject — the ticket is already theirs — so we show the
+// "Update Status" button instead of dead Accept/Reject buttons.
+export async function notifyWorkerOfDirectAssignment(
+  ticketId: string,
+  workerId: string,
+): Promise<void> {
+  try {
+    const chatId = await getWorkerChatId(workerId)
+    if (!chatId) return
+
+    const supabase = createSupabaseServiceClient()
+    const { data: ticket } = await supabase
+      .from('tickets')
+      .select('ticket_number, original_issue_text, location_text, severity')
+      .eq('id', ticketId)
+      .single()
+    if (!ticket) return
+
+    const severityEmoji: Record<string, string> = {
+      critical: '🔴', high: '🟠', medium: '🟡', low: '⚪',
+    }
+    const sev = ticket.severity ? (severityEmoji[ticket.severity] ?? '⚪') : '⚪'
+    const issue = (ticket.original_issue_text ?? '').slice(0, 200)
+    const loc = ticket.location_text ? `📍 ${ticket.location_text}` : '📍 Location not specified'
+
+    const body =
+      `🔔 *Ticket Assigned to You — ${ticket.ticket_number}*\n` +
+      `${sev} Severity: ${ticket.severity ?? 'unset'}\n\n` +
+      `${issue}\n\n` +
+      `${loc}\n\n` +
+      `This ticket is in your territory and has been assigned directly to you. Please proceed.`
+
+    await sendWorkerMessage(chatId, body, {
+      reply_markup: updateKeyboard(ticketId),
+    })
+  } catch {
+    // Fire-and-forget — never throw
+  }
+}
+
 // ── Re-assignment / expiry notice ──────────────────────────────────────────
 // Tell the worker whose offer just expired (without acceptance) that the
 // ticket has moved on. Without this, their Accept/Reject buttons in Telegram

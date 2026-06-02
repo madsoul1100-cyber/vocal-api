@@ -1,0 +1,800 @@
+{
+  "source": "vocal territory database.xlsx (Telangana sample)",
+  "state": "Telangana",
+  "levels": [
+    {
+      "order": 1,
+      "label": "State"
+    },
+    {
+      "order": 2,
+      "label": "District"
+    },
+    {
+      "order": 3,
+      "label": "Mandal / Municipal Body"
+    },
+    {
+      "order": 4,
+      "label": "Ward"
+    }
+  ],
+  "territories": [
+    {
+      "key": "S-36",
+      "level": 1,
+      "name": "Telangana",
+      "code": "36",
+      "parent": null,
+      "meta": {
+        "state_type": "State",
+        "iso": "IN-TG",
+        "capital": "Hyderabad"
+      }
+    },
+    {
+      "key": "TG-01",
+      "level": 2,
+      "name": "Adilabad",
+      "code": "522",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Adilabad",
+        "is_rural": true,
+        "is_urban": false
+      }
+    },
+    {
+      "key": "TG-02",
+      "level": 2,
+      "name": "Bhadradri Kothagudem",
+      "code": "523",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Kothagudem",
+        "is_rural": true,
+        "is_urban": false
+      }
+    },
+    {
+      "key": "TG-03",
+      "level": 2,
+      "name": "Hanamkonda",
+      "code": "524",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Hanamkonda",
+        "is_rural": false,
+        "is_urban": true
+      }
+    },
+    {
+      "key": "TG-04",
+      "level": 2,
+      "name": "Hyderabad",
+      "code": "525",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Hyderabad",
+        "is_rural": false,
+        "is_urban": true
+      }
+    },
+    {
+      "key": "TG-05",
+      "level": 2,
+      "name": "Jagtial",
+      "code": "526",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Jagtial",
+        "is_rural": true,
+        "is_urban": false
+      }
+    },
+    {
+      "key": "TG-06",
+      "level": 2,
+      "name": "Jangaon",
+      "code": "527",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Jangaon",
+        "is_rural": true,
+        "is_urban": false
+      }
+    },
+    {
+      "key": "TG-07",
+      "level": 2,
+      "name": "Jayashankar Bhupalpally",
+      "code": "528",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Bhupalpally",
+        "is_rural": true,
+        "is_urban": false
+      }
+    },
+    {
+      "key": "TG-08",
+      "level": 2,
+      "name": "Jogulamba Gadwal",
+      "code": "529",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Gadwal",
+        "is_rural": true,
+        "is_urban": false
+      }
+    },
+    {
+      "key": "TG-09",
+      "level": 2,
+      "name": "Kamareddy",
+      "code": "530",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Kamareddy",
+        "is_rural": true,
+        "is_urban": false
+      }
+    },
+    {
+      "key": "TG-10",
+      "level": 2,
+      "name": "Karimnagar",
+      "code": "531",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Karimnagar",
+        "is_rural": true,
+        "is_urban": true
+      }
+    },
+    {
+      "key": "TG-11",
+      "level": 2,
+      "name": "Khammam",
+      "code": "532",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Khammam",
+        "is_rural": true,
+        "is_urban": true
+      }
+    },
+    {
+      "key": "TG-12",
+      "level": 2,
+      "name": "Komaram Bheem Asifabad",
+      "code": "533",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Asifabad",
+        "is_rural": true,
+        "is_urban": false
+      }
+    },
+    {
+      "key": "TG-13",
+      "level": 2,
+      "name": "Mahabubabad",
+      "code": "534",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Mahabubabad",
+        "is_rural": true,
+        "is_urban": false
+      }
+    },
+    {
+      "key": "TG-14",
+      "level": 2,
+      "name": "Mahabubnagar",
+      "code": "535",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Mahabubnagar",
+        "is_rural": true,
+        "is_urban": true
+      }
+    },
+    {
+      "key": "TG-15",
+      "level": 2,
+      "name": "Mancherial",
+      "code": "536",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Mancherial",
+        "is_rural": true,
+        "is_urban": false
+      }
+    },
+    {
+      "key": "TG-16",
+      "level": 2,
+      "name": "Medak",
+      "code": "537",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Medak",
+        "is_rural": true,
+        "is_urban": false
+      }
+    },
+    {
+      "key": "TG-17",
+      "level": 2,
+      "name": "Medchal-Malkajgiri",
+      "code": "538",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Medchal",
+        "is_rural": false,
+        "is_urban": true
+      }
+    },
+    {
+      "key": "TG-18",
+      "level": 2,
+      "name": "Mulugu",
+      "code": "539",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Mulugu",
+        "is_rural": true,
+        "is_urban": false
+      }
+    },
+    {
+      "key": "TG-19",
+      "level": 2,
+      "name": "Nagarkurnool",
+      "code": "540",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Nagarkurnool",
+        "is_rural": true,
+        "is_urban": false
+      }
+    },
+    {
+      "key": "TG-20",
+      "level": 2,
+      "name": "Nalgonda",
+      "code": "541",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Nalgonda",
+        "is_rural": true,
+        "is_urban": false
+      }
+    },
+    {
+      "key": "TG-21",
+      "level": 2,
+      "name": "Narayanpet",
+      "code": "542",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Narayanpet",
+        "is_rural": true,
+        "is_urban": false
+      }
+    },
+    {
+      "key": "TG-22",
+      "level": 2,
+      "name": "Nirmal",
+      "code": "543",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Nirmal",
+        "is_rural": true,
+        "is_urban": false
+      }
+    },
+    {
+      "key": "TG-23",
+      "level": 2,
+      "name": "Nizamabad",
+      "code": "544",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Nizamabad",
+        "is_rural": true,
+        "is_urban": true
+      }
+    },
+    {
+      "key": "TG-24",
+      "level": 2,
+      "name": "Peddapalli",
+      "code": "545",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Peddapalli",
+        "is_rural": true,
+        "is_urban": false
+      }
+    },
+    {
+      "key": "TG-25",
+      "level": 2,
+      "name": "Rajanna Sircilla",
+      "code": "546",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Sircilla",
+        "is_rural": true,
+        "is_urban": false
+      }
+    },
+    {
+      "key": "TG-26",
+      "level": 2,
+      "name": "Ranga Reddy",
+      "code": "547",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Hyderabad",
+        "is_rural": true,
+        "is_urban": true
+      }
+    },
+    {
+      "key": "TG-27",
+      "level": 2,
+      "name": "Sangareddy",
+      "code": "548",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Sangareddy",
+        "is_rural": true,
+        "is_urban": true
+      }
+    },
+    {
+      "key": "TG-28",
+      "level": 2,
+      "name": "Siddipet",
+      "code": "549",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Siddipet",
+        "is_rural": true,
+        "is_urban": true
+      }
+    },
+    {
+      "key": "TG-29",
+      "level": 2,
+      "name": "Suryapet",
+      "code": "550",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Suryapet",
+        "is_rural": true,
+        "is_urban": false
+      }
+    },
+    {
+      "key": "TG-30",
+      "level": 2,
+      "name": "Vikarabad",
+      "code": "551",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Vikarabad",
+        "is_rural": true,
+        "is_urban": false
+      }
+    },
+    {
+      "key": "TG-31",
+      "level": 2,
+      "name": "Wanaparthy",
+      "code": "552",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Wanaparthy",
+        "is_rural": true,
+        "is_urban": false
+      }
+    },
+    {
+      "key": "TG-32",
+      "level": 2,
+      "name": "Warangal",
+      "code": "553",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Warangal",
+        "is_rural": true,
+        "is_urban": true
+      }
+    },
+    {
+      "key": "TG-33",
+      "level": 2,
+      "name": "Yadadri Bhuvanagiri",
+      "code": "554",
+      "parent": "S-36",
+      "meta": {
+        "headquarters": "Bhongir",
+        "is_rural": true,
+        "is_urban": false
+      }
+    },
+    {
+      "key": "TG-SD-001",
+      "level": 3,
+      "name": "Amberpet",
+      "code": null,
+      "parent": "TG-04",
+      "meta": {
+        "kind": "mandal",
+        "subdistrict_type": "Mandal"
+      }
+    },
+    {
+      "key": "TG-SD-002",
+      "level": 3,
+      "name": "Asifnagar",
+      "code": null,
+      "parent": "TG-04",
+      "meta": {
+        "kind": "mandal",
+        "subdistrict_type": "Mandal"
+      }
+    },
+    {
+      "key": "TG-SD-003",
+      "level": 3,
+      "name": "Bahadurpura",
+      "code": null,
+      "parent": "TG-04",
+      "meta": {
+        "kind": "mandal",
+        "subdistrict_type": "Mandal"
+      }
+    },
+    {
+      "key": "TG-SD-004",
+      "level": 3,
+      "name": "Bandlaguda",
+      "code": null,
+      "parent": "TG-04",
+      "meta": {
+        "kind": "mandal",
+        "subdistrict_type": "Mandal"
+      }
+    },
+    {
+      "key": "TG-SD-005",
+      "level": 3,
+      "name": "Charminar",
+      "code": null,
+      "parent": "TG-04",
+      "meta": {
+        "kind": "mandal",
+        "subdistrict_type": "Mandal"
+      }
+    },
+    {
+      "key": "TG-SD-006",
+      "level": 3,
+      "name": "Golconda",
+      "code": null,
+      "parent": "TG-04",
+      "meta": {
+        "kind": "mandal",
+        "subdistrict_type": "Mandal"
+      }
+    },
+    {
+      "key": "TG-SD-007",
+      "level": 3,
+      "name": "Himayatnagar",
+      "code": null,
+      "parent": "TG-04",
+      "meta": {
+        "kind": "mandal",
+        "subdistrict_type": "Mandal"
+      }
+    },
+    {
+      "key": "TG-SD-008",
+      "level": 3,
+      "name": "Khairatabad",
+      "code": null,
+      "parent": "TG-04",
+      "meta": {
+        "kind": "mandal",
+        "subdistrict_type": "Mandal"
+      }
+    },
+    {
+      "key": "TG-SD-009",
+      "level": 3,
+      "name": "Marredpally",
+      "code": null,
+      "parent": "TG-04",
+      "meta": {
+        "kind": "mandal",
+        "subdistrict_type": "Mandal"
+      }
+    },
+    {
+      "key": "TG-SD-010",
+      "level": 3,
+      "name": "Musheerabad",
+      "code": null,
+      "parent": "TG-04",
+      "meta": {
+        "kind": "mandal",
+        "subdistrict_type": "Mandal"
+      }
+    },
+    {
+      "key": "TG-SD-011",
+      "level": 3,
+      "name": "Nampally",
+      "code": null,
+      "parent": "TG-04",
+      "meta": {
+        "kind": "mandal",
+        "subdistrict_type": "Mandal"
+      }
+    },
+    {
+      "key": "TG-SD-012",
+      "level": 3,
+      "name": "Saidabad",
+      "code": null,
+      "parent": "TG-04",
+      "meta": {
+        "kind": "mandal",
+        "subdistrict_type": "Mandal"
+      }
+    },
+    {
+      "key": "TG-SD-013",
+      "level": 3,
+      "name": "Secunderabad",
+      "code": null,
+      "parent": "TG-04",
+      "meta": {
+        "kind": "mandal",
+        "subdistrict_type": "Mandal"
+      }
+    },
+    {
+      "key": "TG-SD-014",
+      "level": 3,
+      "name": "Shaikpet",
+      "code": null,
+      "parent": "TG-04",
+      "meta": {
+        "kind": "mandal",
+        "subdistrict_type": "Mandal"
+      }
+    },
+    {
+      "key": "TG-SD-015",
+      "level": 3,
+      "name": "Tirumalagiri",
+      "code": null,
+      "parent": "TG-04",
+      "meta": {
+        "kind": "mandal",
+        "subdistrict_type": "Mandal"
+      }
+    },
+    {
+      "key": "TG-SD-016",
+      "level": 3,
+      "name": "Trimulgherry",
+      "code": null,
+      "parent": "TG-04",
+      "meta": {
+        "kind": "mandal",
+        "subdistrict_type": "Mandal"
+      }
+    },
+    {
+      "key": "TG-SD-017",
+      "level": 3,
+      "name": "Rajendranagar",
+      "code": null,
+      "parent": "TG-26",
+      "meta": {
+        "kind": "mandal",
+        "subdistrict_type": "Mandal"
+      }
+    },
+    {
+      "key": "TG-SD-018",
+      "level": 3,
+      "name": "Serilingampally",
+      "code": null,
+      "parent": "TG-26",
+      "meta": {
+        "kind": "mandal",
+        "subdistrict_type": "Mandal"
+      }
+    },
+    {
+      "key": "TG-SD-019",
+      "level": 3,
+      "name": "Shamshabad",
+      "code": null,
+      "parent": "TG-26",
+      "meta": {
+        "kind": "mandal",
+        "subdistrict_type": "Mandal"
+      }
+    },
+    {
+      "key": "TG-SD-020",
+      "level": 3,
+      "name": "Maheshwaram",
+      "code": null,
+      "parent": "TG-26",
+      "meta": {
+        "kind": "mandal",
+        "subdistrict_type": "Mandal"
+      }
+    },
+    {
+      "key": "TG-ULB-01",
+      "level": 3,
+      "name": "Greater Hyderabad Municipal Corporation",
+      "code": "800001",
+      "parent": "TG-04",
+      "meta": {
+        "kind": "urban_local_body",
+        "ulb_type": "Municipal Corporation"
+      }
+    },
+    {
+      "key": "TG-ULB-02",
+      "level": 3,
+      "name": "Warangal Municipal Corporation",
+      "code": "800002",
+      "parent": "TG-32",
+      "meta": {
+        "kind": "urban_local_body",
+        "ulb_type": "Municipal Corporation"
+      }
+    },
+    {
+      "key": "TG-ULB-03",
+      "level": 3,
+      "name": "Karimnagar Municipal Corporation",
+      "code": "800003",
+      "parent": "TG-10",
+      "meta": {
+        "kind": "urban_local_body",
+        "ulb_type": "Municipal Corporation"
+      }
+    },
+    {
+      "key": "TG-ULB-04",
+      "level": 3,
+      "name": "Khammam Municipal Corporation",
+      "code": "800004",
+      "parent": "TG-11",
+      "meta": {
+        "kind": "urban_local_body",
+        "ulb_type": "Municipal Corporation"
+      }
+    },
+    {
+      "key": "TG-ULB-05",
+      "level": 3,
+      "name": "Nizamabad Municipal Corporation",
+      "code": "800005",
+      "parent": "TG-23",
+      "meta": {
+        "kind": "urban_local_body",
+        "ulb_type": "Municipal Corporation"
+      }
+    },
+    {
+      "key": "TG-ULB-06",
+      "level": 3,
+      "name": "Ramagundam Municipal Corporation",
+      "code": "800006",
+      "parent": "TG-24",
+      "meta": {
+        "kind": "urban_local_body",
+        "ulb_type": "Municipal Corporation"
+      }
+    },
+    {
+      "key": "TG-ULB-07",
+      "level": 3,
+      "name": "Mahabubnagar Municipality",
+      "code": "800007",
+      "parent": "TG-14",
+      "meta": {
+        "kind": "urban_local_body",
+        "ulb_type": "Municipality"
+      }
+    },
+    {
+      "key": "TG-ULB-08",
+      "level": 3,
+      "name": "Suryapet Municipality",
+      "code": "800008",
+      "parent": "TG-29",
+      "meta": {
+        "kind": "urban_local_body",
+        "ulb_type": "Municipality"
+      }
+    },
+    {
+      "key": "GHMC-W-001",
+      "level": 4,
+      "name": "Kapra",
+      "code": "900001",
+      "parent": "TG-ULB-01",
+      "meta": {
+        "ward_number": "1"
+      }
+    },
+    {
+      "key": "GHMC-W-002",
+      "level": 4,
+      "name": "Dr. A.S. Rao Nagar",
+      "code": "900002",
+      "parent": "TG-ULB-01",
+      "meta": {
+        "ward_number": "2"
+      }
+    },
+    {
+      "key": "GHMC-W-003",
+      "level": 4,
+      "name": "Khairatabad",
+      "code": "900003",
+      "parent": "TG-ULB-01",
+      "meta": {
+        "ward_number": "94"
+      }
+    },
+    {
+      "key": "GHMC-W-004",
+      "level": 4,
+      "name": "Banjara Hills",
+      "code": "900004",
+      "parent": "TG-ULB-01",
+      "meta": {
+        "ward_number": "95"
+      }
+    },
+    {
+      "key": "GHMC-W-005",
+      "level": 4,
+      "name": "Jubilee Hills",
+      "code": "900005",
+      "parent": "TG-ULB-01",
+      "meta": {
+        "ward_number": "96"
+      }
+    },
+    {
+      "key": "GHMC-W-006",
+      "level": 4,
+      "name": "Serilingampally",
+      "code": "900006",
+      "parent": "TG-ULB-01",
+      "meta": {
+        "ward_number": "113"
+      }
+    }
+  ]
+}

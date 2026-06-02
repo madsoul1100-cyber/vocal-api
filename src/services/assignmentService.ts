@@ -15,8 +15,17 @@
  */
 
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
+import {
+  buildTerritoryAncestorChain,
+  loadTerritoryParentMap,
+  workerTerritoryCoversTicket,
+} from '@/services/territoryService.js'
 import { notifyCitizenOfTicketUpdate } from './citizenNotifier'
-import { notifyWorkerOfAssignment, notifyWorkerOfReassignment } from './workerNotifier'
+import {
+  notifyWorkerOfAssignment,
+  notifyWorkerOfDirectAssignment,
+  notifyWorkerOfReassignment,
+} from './workerNotifier'
 
 const GROUND_WORKER_ROLE_ID = '00000000-0000-0000-0000-000000000005'
 
@@ -140,13 +149,23 @@ export async function listCandidateWorkers(ticketId: string): Promise<CandidateW
     })
   }
 
-  // First pass — territory-scoped (preferred)
+  // First pass — territory-scoped (worker's territory is ticket node or an ancestor)
   if (ticket.territory_id) {
+    const parentOf = await loadTerritoryParentMap(ticket.organization_id)
     const territoryCandidates: CandidateWorker[] = []
     for (const w of workers as any[]) {
       if (excluded.has(w.id)) continue
       const territories = (w.user_territories ?? []) as Array<{ territory_id: string }>
-      if (!territories.some(t => t.territory_id === ticket.territory_id)) continue
+      const workerTerritoryIds = territories.map((t) => t.territory_id)
+      if (
+        !workerTerritoryCoversTicket(
+          workerTerritoryIds,
+          ticket.territory_id as string,
+          parentOf,
+        )
+      ) {
+        continue
+      }
       territoryCandidates.push(buildCandidate(w))
     }
     if (territoryCandidates.length > 0) return sortCandidates(territoryCandidates)
@@ -168,6 +187,80 @@ export async function listCandidateWorkers(ticketId: string): Promise<CandidateW
 export async function findNearestAvailableWorker(ticketId: string): Promise<CandidateWorker | null> {
   const list = await listCandidateWorkers(ticketId)
   return list[0] ?? null
+}
+
+/**
+ * Resolve the worker who "owns" the ticket's territory, walking UP the
+ * territory hierarchy.
+ *
+ * Workers are linked to territories via user_territories. A ticket may be
+ * tagged at a deep level (e.g. a Ward), while the responsible worker is
+ * assigned at a higher level (e.g. the Mandal or District). We therefore walk
+ * the parent chain starting from the ticket's territory and return the worker
+ * mapped to the CLOSEST level. When multiple workers cover the same level, we
+ * pick the least-loaded one (fewest active tickets) for fair distribution.
+ *
+ * Returns null when the ticket has no territory or no worker covers any
+ * ancestor — callers should then fall back to the offer/nearest flow.
+ */
+export async function findTerritoryOwner(ticketId: string): Promise<CandidateWorker | null> {
+  const supabase = createSupabaseServiceClient()
+
+  const { data: ticket } = await supabase
+    .from('tickets')
+    .select('id, organization_id, territory_id, offered_worker_ids')
+    .eq('id', ticketId)
+    .single()
+  if (!ticket || !ticket.territory_id) return null
+
+  const parentOf = await loadTerritoryParentMap(ticket.organization_id)
+  const chain = buildTerritoryAncestorChain(ticket.territory_id as string, parentOf)
+
+  const excluded = new Set<string>((ticket.offered_worker_ids as string[] | null) ?? [])
+
+  // Active ground workers in the org with their territory memberships.
+  const { data: workers } = await supabase
+    .from('users')
+    .select(`id, full_name, user_territories(territory_id)`)
+    .eq('organization_id', ticket.organization_id)
+    .eq('role_id', GROUND_WORKER_ROLE_ID)
+    .eq('active', true)
+  if (!workers || workers.length === 0) return null
+
+  // Load active ticket counts for fair distribution.
+  const { data: activeCounts } = await supabase
+    .from('tickets')
+    .select('owner_user_id')
+    .eq('organization_id', ticket.organization_id)
+    .neq('stage', 'closed')
+    .not('owner_user_id', 'is', null)
+  const loadMap = new Map<string, number>()
+  for (const t of activeCounts ?? []) {
+    if (t.owner_user_id) loadMap.set(t.owner_user_id, (loadMap.get(t.owner_user_id) ?? 0) + 1)
+  }
+
+  // Walk the chain closest-first; return the least-loaded worker at the first
+  // level that has any eligible worker.
+  for (const territoryId of chain) {
+    const matches: CandidateWorker[] = []
+    for (const w of workers as any[]) {
+      if (excluded.has(w.id)) continue
+      const memberships = (w.user_territories ?? []) as Array<{ territory_id: string }>
+      if (!memberships.some((m) => m.territory_id === territoryId)) continue
+      matches.push({
+        id: w.id,
+        full_name: w.full_name,
+        distance_km: null,
+        active_ticket_count: loadMap.get(w.id) ?? 0,
+      })
+    }
+    if (matches.length > 0) {
+      matches.sort((a, b) => a.active_ticket_count - b.active_ticket_count)
+      return matches[0]!
+    }
+  }
+
+  return null
 }
 
 /**
@@ -291,6 +384,163 @@ export async function offerTicketToWorker(args: {
   await notifyWorkerOfAssignment(args.ticketId, args.workerId)
 
   return { ok: true, assignmentId: assignment.id, expiresAt }
+}
+
+/**
+ * Directly assign a ticket to a worker WITHOUT an acceptance step.
+ *
+ * Unlike offerTicketToWorker (which creates an "offered" assignment the worker
+ * must accept before the acceptance SLA expires), this immediately makes the
+ * worker the owner and moves the ticket into the accepted/in-progress state.
+ * This is used when a worker definitively owns the ticket's territory, so the
+ * ticket should land straight in their queue.
+ */
+export async function directAssignTicketToWorker(args: {
+  ticketId: string
+  workerId: string
+  assignedByUserId?: string | null
+  reason?: string
+}): Promise<{ ok: true; assignmentId: string } | { ok: false; error: string }> {
+  const supabase = createSupabaseServiceClient()
+
+  const { data: ticket } = await supabase
+    .from('tickets')
+    .select('id, organization_id, stage, sub_status, anonymous_flag, citizen_id, offered_worker_ids, assignment_attempt_count')
+    .eq('id', args.ticketId)
+    .single()
+  if (!ticket) return { ok: false, error: 'ticket_not_found' }
+
+  const now = new Date()
+  const nowIso = now.toISOString()
+
+  const { data: settings } = await supabase
+    .from('organization_settings')
+    .select('first_contact_sla_hours, resolution_plan_sla_hours')
+    .eq('organization_id', ticket.organization_id)
+    .maybeSingle()
+  const firstContactHours = (settings as { first_contact_sla_hours?: number } | null)?.first_contact_sla_hours ?? 1
+  const resolutionHours = (settings as { resolution_plan_sla_hours?: number } | null)?.resolution_plan_sla_hours ?? 24
+  const slaFirstContactDueAt = new Date(now.getTime() + firstContactHours * 60 * 60 * 1000).toISOString()
+  const slaResolutionDueAt = new Date(now.getTime() + resolutionHours * 60 * 60 * 1000).toISOString()
+
+  // Retire any current offer/assignment on this ticket.
+  await supabase
+    .from('ticket_assignments')
+    .update({ is_current: false })
+    .eq('ticket_id', args.ticketId)
+    .eq('is_current', true)
+
+  const { data: assignment, error } = await supabase
+    .from('ticket_assignments')
+    .insert({
+      ticket_id: args.ticketId,
+      worker_user_id: args.workerId,
+      assigned_by: args.assignedByUserId ?? null,
+      status: 'force_assigned',
+      offered_at: nowIso,
+      responded_at: nowIso,
+      is_current: true,
+    })
+    .select('id')
+    .single()
+  if (error || !assignment) return { ok: false, error: error?.message ?? 'insert_failed' }
+
+  const offeredList = new Set<string>(((ticket.offered_worker_ids as string[] | null) ?? []))
+  offeredList.add(args.workerId)
+
+  await supabase
+    .from('tickets')
+    .update({
+      owner_user_id: args.workerId,
+      needs_triage: false,
+      stage: 'in_progress',
+      sub_status: 'accepted_by_worker',
+      accepted_at: nowIso,
+      sla_first_contact_due_at: slaFirstContactDueAt,
+      sla_resolution_due_at: slaResolutionDueAt,
+      sla_breached_flag: false,
+      assignment_attempt_count: ((ticket as any).assignment_attempt_count ?? 0) + 1,
+      offered_worker_ids: Array.from(offeredList),
+      last_updated_by_user_id: args.assignedByUserId ?? null,
+      updated_at: nowIso,
+    })
+    .eq('id', args.ticketId)
+
+  await supabase.from('ticket_stage_history').insert({
+    ticket_id: args.ticketId,
+    from_stage: ticket.stage,
+    to_stage: 'in_progress',
+    from_sub_status: ticket.sub_status,
+    to_sub_status: 'accepted_by_worker',
+    changed_by: args.assignedByUserId ?? null,
+    change_reason: args.reason ?? 'Auto-assigned to territory owner',
+    system_action: !args.assignedByUserId,
+  })
+
+  await supabase.from('audit_logs').insert({
+    organization_id: ticket.organization_id,
+    event_type: 'ticket_auto_assigned_to_territory_owner',
+    entity_type: 'ticket',
+    entity_id: args.ticketId,
+    actor_type: args.assignedByUserId ? 'user' : 'system',
+    actor_user_id: args.assignedByUserId ?? null,
+    new_value_json: { worker_id: args.workerId, assignment_id: assignment.id },
+  })
+
+  notifyCitizenOfTicketUpdate({
+    ticketId: args.ticketId,
+    prevSubStatus: ticket.sub_status as any,
+    newSubStatus: 'accepted_by_worker',
+    newStage: 'in_progress',
+    workerUserId: args.workerId,
+    key: 'accepted_by_worker',
+  }).catch(() => {})
+
+  // Await so serverless functions don't kill the in-flight worker notification.
+  await notifyWorkerOfDirectAssignment(args.ticketId, args.workerId)
+
+  return { ok: true, assignmentId: assignment.id }
+}
+
+/**
+ * Route a freshly created ticket to a worker.
+ *
+ * Preference order:
+ *   1. If a worker owns the ticket's territory (or any ancestor of it),
+ *      directly assign the ticket to them — no acceptance step.
+ *   2. Otherwise fall back to offering the ticket to the nearest available
+ *      worker (the existing accept-within-SLA flow).
+ *
+ * Safe to call fire-and-forget; it swallows nothing but returns a small status.
+ */
+export async function autoRouteNewTicket(ticketId: string): Promise<
+  | { routed: 'direct'; workerId: string }
+  | { routed: 'offered'; workerId: string }
+  | { routed: 'none' }
+> {
+  const owner = await findTerritoryOwner(ticketId)
+  if (owner) {
+    const res = await directAssignTicketToWorker({
+      ticketId,
+      workerId: owner.id,
+      assignedByUserId: null,
+      reason: 'Auto-assigned to territory owner at ticket creation',
+    })
+    if (res.ok) return { routed: 'direct', workerId: owner.id }
+  }
+
+  const nearest = await findNearestAvailableWorker(ticketId)
+  if (nearest) {
+    const offer = await offerTicketToWorker({
+      ticketId,
+      workerId: nearest.id,
+      assignedByUserId: null,
+      reason: 'Auto-assigned at ticket creation',
+    })
+    if (offer.ok) return { routed: 'offered', workerId: nearest.id }
+  }
+
+  return { routed: 'none' }
 }
 
 /**

@@ -19,7 +19,14 @@ import {
   updateOrgUser,
   workersV2FiltersEcho,
 } from '@/services/workersManagementService.js'
-import { createOrgTerritory } from '@/services/territoryService.js'
+import {
+  countTerritoryDescendants,
+  createOrgTerritory,
+  getTerritoryDescendantIds,
+  getTerritoryPickerBootstrap,
+  listTerritoryChildren,
+  listTerritoryLevels,
+} from '@/services/territoryService.js'
 import {
   completeStaffKycUpload,
   completeStaffProfileUpload,
@@ -79,6 +86,57 @@ router.post('/territories', requireAuth, async (req, res) => {
     return
   }
   res.status(201).json({ ok: true, territory: result.territory })
+})
+
+router.get('/territories/bootstrap', requireAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
+  if (!canAccessWorkersPage(user.roles?.name)) {
+    res.status(403).json({ error: 'Insufficient role' })
+    return
+  }
+  const bootstrap = await getTerritoryPickerBootstrap(user.organization_id)
+  if (!bootstrap) {
+    res.status(404).json({
+      error: 'Telangana territory data not found. Run npm run seed:territories in vocal-api.',
+    })
+    return
+  }
+  res.json(bootstrap)
+})
+
+router.get('/territories/levels', requireAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
+  if (!canAccessWorkersPage(user.roles?.name)) {
+    res.status(403).json({ error: 'Insufficient role' })
+    return
+  }
+  const levels = await listTerritoryLevels(user.organization_id)
+  res.json({ levels })
+})
+
+router.get('/territories/children', requireAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
+  if (!canAccessWorkersPage(user.roles?.name)) {
+    res.status(403).json({ error: 'Insufficient role' })
+    return
+  }
+  const q = req.query.parent_id
+  const parentId =
+    typeof q === 'string' && q.trim() && q.trim() !== 'null' ? q.trim() : null
+  const children = await listTerritoryChildren(user.organization_id, parentId)
+  res.json({ children })
+})
+
+router.get('/territories/:territoryId/descendants', requireAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
+  if (!canAccessWorkersPage(user.roles?.name)) {
+    res.status(403).json({ error: 'Insufficient role' })
+    return
+  }
+  const territoryId = String(req.params.territoryId)
+  const count = await countTerritoryDescendants(user.organization_id, territoryId)
+  const ids = await getTerritoryDescendantIds(user.organization_id, territoryId, true)
+  res.json({ territory_id: territoryId, descendant_count: count, territory_ids: ids })
 })
 
 /** Presigned profile upload (create worker — no worker id yet). */

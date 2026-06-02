@@ -36,7 +36,7 @@ import {
 import { classifyIntent } from './aiService'
 import { createTicket } from './ticketService'
 import { generateTicketSuggestions } from './aiService'
-import { findNearestAvailableWorker, offerTicketToWorker } from './assignmentService'
+import { autoRouteNewTicket } from './assignmentService'
 import { downloadFromTelegramAndStore } from './attachmentService'
 
 export type Step =
@@ -420,17 +420,9 @@ async function fileTicket(ctx: FlowContext) {
     console.error(`[telegramFlow] no media on draft for ticket ${result.ticketNumber}`)
   }
 
-  // Auto-assign: fire-and-forget; skips triage queue.
-  findNearestAvailableWorker(result.ticketId).then(async (worker) => {
-    if (worker) {
-      await offerTicketToWorker({
-        ticketId: result.ticketId,
-        workerId: worker.id,
-        assignedByUserId: null,
-        reason: 'Auto-assigned at ticket creation',
-      })
-    }
-  }).catch(() => {})
+  // Auto-route: fire-and-forget; skips triage queue.
+  // Direct-assign to the territory's worker if one exists, else offer to nearest.
+  autoRouteNewTicket(result.ticketId).catch(() => {})
 
   // Kick off AI enrichment (fire-and-forget).
   if (draft.issue_text) {

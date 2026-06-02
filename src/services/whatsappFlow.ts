@@ -16,7 +16,7 @@ import {
 import { classifyIntent } from './aiService.js'
 import { createTicket } from './ticketService.js'
 import { generateTicketSuggestions } from './aiService.js'
-import { findNearestAvailableWorker, offerTicketToWorker } from './assignmentService.js'
+import { autoRouteNewTicket } from './assignmentService.js'
 import { downloadFromTwilioAndStore } from './attachmentService.js'
 
 export type Step =
@@ -357,16 +357,8 @@ async function fileTicket(ctx: FlowContext) {
     }
   }
 
-  findNearestAvailableWorker(result.ticketId).then(async (worker) => {
-    if (worker) {
-      await offerTicketToWorker({
-        ticketId: result.ticketId,
-        workerId: worker.id,
-        assignedByUserId: null,
-        reason: 'Auto-assigned at ticket creation',
-      })
-    }
-  }).catch(() => {})
+  // Auto-route: direct-assign to the territory's worker, else offer to nearest.
+  autoRouteNewTicket(result.ticketId).catch(() => {})
 
   if (draft.issue_text) {
     generateTicketSuggestions(draft.issue_text).then(async (s) => {
