@@ -49,6 +49,7 @@ import {
 } from '@/services/ticketAttachmentService.js'
 import { ticketAttachmentStorageBackend } from '@/services/attachmentService.js'
 import { listTicketStageHistory } from '@/services/ticketStageHistoryService.js'
+import { updateTicketSeverity } from '@/services/ticketSeverityService.js'
 
 const router = Router()
 const upload = multer({
@@ -403,6 +404,37 @@ router.get('/:id/assignable-workers', requireAuth, async (req, res) => {
     const message = err instanceof Error ? err.message : 'Assignable workers list failed'
     res.status(500).json({ error: message })
   }
+})
+
+/** Update ticket severity; central_support / super_admin only */
+router.patch('/:id/severity', requireAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> })
+    .vocalUser
+
+  const ticketId = String(req.params.id)
+  const severity =
+    typeof req.body?.severity === 'string'
+      ? req.body.severity
+      : typeof req.body?.severity_level === 'string'
+        ? req.body.severity_level
+        : undefined
+
+  if (!severity?.trim()) {
+    res.status(400).json({ error: 'severity required (critical | high | medium | low)' })
+    return
+  }
+
+  const result = await updateTicketSeverity(user as any, ticketId, severity)
+  if (!result.ok) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+
+  res.json({
+    ok: true,
+    ticket: result.ticket,
+    previous_severity: result.previous_severity,
+  })
 })
 
 /** Pending AI triage suggestion; central_support / super_admin only */

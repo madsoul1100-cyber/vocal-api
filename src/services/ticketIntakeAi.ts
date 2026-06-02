@@ -4,6 +4,11 @@
  */
 
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
+import {
+  DEFAULT_TICKET_SEVERITY,
+  normalizeTicketSeverity,
+} from '@/lib/severity.js'
+import type { Severity } from '@/types/database.js'
 import { generateTicketSuggestions, type AiSuggestionResult } from '@/services/aiService.js'
 import { applyCriticalSeveritySideEffects } from '@/services/ticketService.js'
 
@@ -114,29 +119,102 @@ export async function persistAiSuggestionAndApplyToTicket(args: {
 }
 
 /**
+ * Ensure tickets have severity after intake (AI → conversation hint → default medium).
+ */
+export async function ensureTicketSeverityAtIntake(args: {
+  ticketId: string
+  severityHint?: string | null
+}): Promise<{ severity: Severity; applied: boolean }> {
+  const supabase = createSupabaseServiceClient()
+  const { data: ticket } = await supabase
+    .from('tickets')
+    .select('severity')
+    .eq('id', args.ticketId)
+    .single()
+
+  if (ticket?.severity) {
+    return { severity: ticket.severity as Severity, applied: false }
+  }
+
+  const fromHint = normalizeTicketSeverity(args.severityHint)
+  const severity = fromHint ?? DEFAULT_TICKET_SEVERITY
+  const now = new Date().toISOString()
+
+  const { error: updErr } = await supabase
+    .from('tickets')
+    .update({ severity, updated_at: now })
+    .eq('id', args.ticketId)
+
+  if (updErr) {
+    console.error('[ticketIntakeAi] ensure severity', updErr)
+    return { severity, applied: false }
+  }
+
+  await applyCriticalSeveritySideEffects(args.ticketId, severity).catch(() => {})
+  return { severity, applied: true }
+}
+
+/**
  * Run AI on issue text, store suggestion row, apply category/severity/title to ticket.
- * Call before worker offer so current-offer includes category.
+ * Call before worker offer so current-offer includes category and severity.
  */
 export async function enrichTicketFromIssueText(args: {
   ticketId: string
   organizationId: string
   issueText: string
   overrideCategory?: boolean
-}): Promise<{ ok: boolean; error?: string; fieldsApplied?: string[] }> {
+  severityHint?: string | null
+  /** When true (default), set severity from hint or medium if still empty after AI. */
+  ensureSeverity?: boolean
+}): Promise<{
+  ok: boolean
+  error?: string
+  fieldsApplied?: string[]
+  severity?: Severity
+}> {
   const text = args.issueText.trim()
-  if (!text) return { ok: false, error: 'empty_issue_text' }
-
-  const result = await generateTicketSuggestions(text)
-  if (result.error) {
-    return { ok: false, error: result.error }
+  if (!text) {
+    if (args.ensureSeverity !== false) {
+      const ensured = await ensureTicketSeverityAtIntake({
+        ticketId: args.ticketId,
+        severityHint: args.severityHint,
+      })
+      return { ok: true, fieldsApplied: ensured.applied ? ['severity'] : [], severity: ensured.severity }
+    }
+    return { ok: false, error: 'empty_issue_text' }
   }
 
-  const applied = await persistAiSuggestionAndApplyToTicket({
-    ticketId: args.ticketId,
-    organizationId: args.organizationId,
-    result,
-    overrideCategory: args.overrideCategory ?? false,
-  })
+  const result = await generateTicketSuggestions(text)
+  const fieldsApplied: string[] = []
 
-  return { ok: true, fieldsApplied: applied.fieldsApplied }
+  if (!result.error) {
+    const applied = await persistAiSuggestionAndApplyToTicket({
+      ticketId: args.ticketId,
+      organizationId: args.organizationId,
+      result,
+      overrideCategory: args.overrideCategory ?? false,
+    })
+    fieldsApplied.push(...applied.fieldsApplied)
+  }
+
+  let severity: Severity | undefined
+  if (args.ensureSeverity !== false) {
+    const ensured = await ensureTicketSeverityAtIntake({
+      ticketId: args.ticketId,
+      severityHint: args.severityHint ?? result.suggested_severity,
+    })
+    severity = ensured.severity
+    if (ensured.applied) fieldsApplied.push('severity')
+  }
+
+  if (result.error) {
+    return {
+      ok: args.ensureSeverity !== false && !!severity,
+      error: result.error,
+      fieldsApplied,
+      severity,
+    }
+  }
+
+  return { ok: true, fieldsApplied, severity }
 }
