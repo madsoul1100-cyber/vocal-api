@@ -23,7 +23,12 @@ aws s3api put-bucket-cors \
   --cors-configuration file://docs/s3-cors-ticket-attachments.example.json
 ```
 
-Adjust `AllowedOrigins` first if your Flutter app runs on a port other than `61836`.
+Adjust `AllowedOrigins` for extra dev ports or preview URLs. The example includes:
+
+- **Production:** `https://nyleader.vercel.app` ([Naa Neta](https://nyleader.vercel.app))
+- **Local Flutter web:** `http://localhost:49807`, `http://localhost:61836`, etc.
+
+If you add a Vercel preview deployment (`https://*.vercel.app`), either list each URL or use a separate CORS rule (S3 does not support wildcard subdomains in `AllowedOrigins`).
 
 ## Preview images (`file://` in Flutter)
 

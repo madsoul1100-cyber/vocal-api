@@ -110,6 +110,31 @@ Or: `report`, `status`, `cancel`, `yes`, `done`, `skip`
 
 When a ticket filed via WhatsApp is updated, `citizenNotifier` sends updates back on WhatsApp (same templates as Telegram, plain text).
 
+## Flow logging (debug)
+
+Structured logs use the prefix **`[whatsappFlow]`** (on by default).
+
+```bash
+# Disable noisy logs
+WHATSAPP_FLOW_LOG=false
+```
+
+With `npm run dev`, watch the API terminal while messaging the bot. Typical sequence:
+
+| Phase | Meaning |
+|-------|---------|
+| `webhook.inbound` | Twilio hit your backend |
+| `webhook.context` | Citizen + conversation + AI vs script mode |
+| `webhook.handler` | Dispatched to AI or script intake |
+| `ai.dispatch` / `script.dispatch` | Step handler started |
+| `ai.turn` | AI intake reply (`readyToFile`, intent, …) |
+| `ai.file` / `script.file` | Ticket created |
+| `assign.start` → `assign.ok` | Nearest worker offered (Telegram) |
+| `outbound.sent` | Reply sent back to WhatsApp |
+| `webhook.done` | Request finished (`ms` timing) |
+
+Phone numbers in logs are masked (`***1234`).
+
 ## Not included in v1
 
 - Worker alerts on WhatsApp (still Telegram worker bot only).  

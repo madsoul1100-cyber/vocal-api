@@ -1,6 +1,9 @@
 import type { TicketStage, TicketSubStatus } from '@/types/database.js'
 import { STAGE_LABELS, SUB_STATUS_LABELS } from '@/types/database.js'
 
+/** Worker-proposed closure; stage stays non-closed until CS approves. */
+export const PENDING_CLOSURE_SUB_STATUS: TicketSubStatus = 'pending_closure_approval'
+
 /** Parent stage for each sub-status code. */
 export const SUB_STATUS_STAGE_MAP: Record<TicketSubStatus, TicketStage> = {
   new_awaiting_triage: 'to_do',
@@ -25,6 +28,7 @@ export const SUB_STATUS_STAGE_MAP: Record<TicketSubStatus, TicketStage> = {
   suspected_fake_spam_review: 'on_hold',
   reassignment_pending: 'on_hold',
   sla_breach_escalation_queue: 'on_hold',
+  pending_closure_approval: 'on_hold',
   resolved_by_organization: 'closed',
   resolved_by_external_party: 'closed',
   unable_to_support: 'closed',
@@ -59,6 +63,7 @@ const CATALOG_ORDER: TicketSubStatus[] = [
   'suspected_fake_spam_review',
   'reassignment_pending',
   'sla_breach_escalation_queue',
+  'pending_closure_approval',
   'resolved_by_organization',
   'resolved_by_external_party',
   'unable_to_support',
@@ -71,8 +76,8 @@ const CATALOG_ORDER: TicketSubStatus[] = [
 
 export const SUB_STATUSES_REQUIRING_WORKER: TicketSubStatus[] = ['assigned_awaiting_acceptance']
 
+/** Sub-statuses workers may set via POST /v2/tickets/status (not accept / request-closure). */
 export const WORKER_ALLOWED_SUB_STATUSES: TicketSubStatus[] = [
-  'accepted_by_worker',
   'citizen_contacted',
   'field_verification_in_progress',
   'action_plan_created',
@@ -109,6 +114,8 @@ export interface TicketStatusOptionsResponse {
   groups: StatusOptionGroup[]
   sub_statuses_requiring_worker: TicketSubStatus[]
   worker_allowed_sub_statuses: TicketSubStatus[]
+  /** Workers use POST /v2/tickets/request-closure instead of setting this sub-status directly. */
+  worker_can_request_closure: boolean
 }
 
 export function isValidSubStatus(code: string): code is TicketSubStatus {
@@ -159,5 +166,6 @@ export function getTicketStatusOptionsForRole(
     groups: buildGroups(codes),
     sub_statuses_requiring_worker: [...SUB_STATUSES_REQUIRING_WORKER],
     worker_allowed_sub_statuses: [...WORKER_ALLOWED_SUB_STATUSES],
+    worker_can_request_closure: isWorker,
   }
 }

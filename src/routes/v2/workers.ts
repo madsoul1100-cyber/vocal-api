@@ -6,6 +6,7 @@ import {
   workersCreateUpload,
 } from '@/lib/workersUpload.js'
 import { processStaffCreateUploads } from '@/services/staffUploadService.js'
+import { canApproveStaffCreation } from '@/lib/roleHierarchy.js'
 import {
   canAccessWorkersPage,
   createOrgUser,
@@ -60,7 +61,10 @@ router.get('/', requireAuth, async (req, res) => {
   const listOpts = parseWorkersV2ListQuery(req.query as Record<string, unknown>)
 
   try {
-    const result = await listWorkersV2(user.organization_id, listOpts, user.roles?.name)
+    const result = await listWorkersV2(user.organization_id, listOpts, {
+      roleName: user.roles?.name,
+      userId: user.id,
+    })
     res.json({
       workers: result.workers,
       pagination: result.pagination,
@@ -70,6 +74,7 @@ router.get('/', requireAuth, async (req, res) => {
       territories: result.territories,
       roles: result.roles,
       filters: workersV2FiltersEcho(listOpts),
+      can_approve_staff: canApproveStaffCreation(user.roles?.name),
     })
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Workers list failed'
@@ -279,6 +284,9 @@ router.post('/', requireAuth, workersCreateUpload, async (req, res) => {
     id: result.id,
     pending_approval: result.pending_approval ?? false,
     request_id: result.request_id,
+    message: result.pending_approval
+      ? 'Worker submitted for approval. Central Support or Super Admin will review.'
+      : undefined,
   })
 })
 

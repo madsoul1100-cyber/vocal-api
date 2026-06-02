@@ -1,4 +1,6 @@
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
+import { resolveIssueCategoryId } from '@/services/ticketIntakeAi.js'
+import { applyCriticalSeveritySideEffects } from '@/services/ticketService.js'
 import { stripTicketAiMirrorFields } from '@/services/ticketQueries.js'
 import { loadCitizenIdentityForTicket } from '@/services/ticketCitizenIdentity.js'
 import type { AiTicketSuggestion } from '@/types/database.js'
@@ -123,18 +125,11 @@ export async function confirmAiSuggestion(
   }
 
   if (!ticket.category_id && suggestion.suggested_category) {
-    const { data: categories } = await supabase
-      .from('issue_categories')
-      .select('id, name')
-      .or(`organization_id.eq.${user.organization_id},organization_id.is.null`)
-      .eq('active', true)
-      .eq('level', 1)
-      .ilike('name', suggestion.suggested_category)
-      .limit(1)
-
-    if (categories?.[0]) {
-      patch.category_id = categories[0].id
-    }
+    const resolved = await resolveIssueCategoryId(
+      user.organization_id,
+      suggestion.suggested_category,
+    )
+    if (resolved) patch.category_id = resolved.id
   }
 
   const { error: updateErr } = await supabase.from('tickets').update(patch).eq('id', ticketId)
@@ -142,6 +137,11 @@ export async function confirmAiSuggestion(
   if (updateErr) {
     console.error('[confirmAiSuggestion] ticket update', updateErr)
     return { ok: false as const, status: 500, error: updateErr.message }
+  }
+
+  const appliedSeverity = patch.severity as string | undefined
+  if (appliedSeverity) {
+    await applyCriticalSeveritySideEffects(ticketId, appliedSeverity).catch(() => {})
   }
 
   // Confirm chosen row and any other pending rows (e.g. from --force backfills).

@@ -7,6 +7,7 @@ import {
   generateAmplifyDraft,
   getAmplifySession,
   listAmplifySessions,
+  updateAmplifySourceSelections,
 } from '@/services/amplifyManagementService.js'
 
 const router = Router()
@@ -63,6 +64,37 @@ router.get('/sessions/:id', requireAuth, async (req, res) => {
     return
   }
   res.json(session)
+})
+
+/** Toggle which sources (including per-attachment rows) are included in the next generate. */
+router.patch('/sessions/:id/sources', requireAuth, async (req, res) => {
+  const user = requireAmplifyRole(req, res)
+  if (!user) return
+
+  const sessionId = String(req.params.id)
+  const raw = req.body?.sources
+  if (!Array.isArray(raw)) {
+    res.status(400).json({ error: 'sources array is required' })
+    return
+  }
+
+  const updates = raw.map((row: { id?: string; included?: boolean }) => ({
+    id: String(row.id ?? ''),
+    included: row.included === true,
+  }))
+
+  const result = await updateAmplifySourceSelections(
+    user.organization_id,
+    sessionId,
+    updates,
+  )
+  if (!result.ok) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+
+  const session = await getAmplifySession(user.organization_id, sessionId)
+  res.json({ ok: true, sources: session?.sources ?? [] })
 })
 
 router.post('/sessions/:id/generate', requireAuth, async (req, res) => {

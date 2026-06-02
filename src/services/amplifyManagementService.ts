@@ -8,6 +8,15 @@ import {
   type AmplifyPlatform,
   type AmplifyTone,
 } from '@/services/amplifyService.js'
+import {
+  enrichAmplifySources,
+  seedAmplifySourcesForSession,
+  syncAllAmplifySourcesFromTicket,
+  updateAmplifySourceSelections,
+  type AmplifySourceItem,
+} from '@/services/amplifySourceSync.js'
+
+export { updateAmplifySourceSelections }
 
 export const AMPLIFY_ALLOWED_ROLES = ['super_admin', 'central_support']
 
@@ -41,12 +50,7 @@ export interface AmplifySessionDetail {
     longitude: number | null
     severity: string | null
   } | null
-  sources: Array<{
-    id: string
-    source_type: string
-    source_content: string | null
-    included: boolean
-  }>
+  sources: AmplifySourceItem[]
   outputs: Array<{
     id: string
     output_format: string
@@ -172,11 +176,30 @@ async function getAmplifySessionPg(
   const session = sessionRes.rows[0]
   if (!session) return null
 
+  await syncAllAmplifySourcesFromTicket(sessionId, session.ticket_id)
+
   const [sourcesRes, outputsRes] = await Promise.all([
-    dbQuery<AmplifySessionDetail['sources'][0]>(
-      `SELECT id, source_type, source_content, included
+    dbQuery<{
+      id: string
+      source_type: string
+      source_content: string | null
+      included: boolean
+      source_ref_id: string | null
+    }>(
+      `SELECT id, source_type, source_content, included, source_ref_id
        FROM amplify_source_selections
-       WHERE session_id = $1`,
+       WHERE session_id = $1
+       ORDER BY
+         CASE source_type
+           WHEN 'complaint_text' THEN 1
+           WHEN 'normalized_summary' THEN 2
+           WHEN 'transcript' THEN 3
+           WHEN 'case_metadata' THEN 4
+           WHEN 'field_note' THEN 5
+           WHEN 'attachment' THEN 6
+           ELSE 99
+         END,
+         id ASC`,
       [sessionId],
     ),
     dbQuery<AmplifySessionDetail['outputs'][0]>(
@@ -195,7 +218,7 @@ async function getAmplifySessionPg(
     ticket_id: session.ticket_id,
     organization_id: session.organization_id,
     tickets: session.tickets,
-    sources: sourcesRes.rows,
+    sources: await enrichAmplifySources(sourcesRes.rows, session.ticket_id),
     outputs: outputsRes.rows.map((o: AmplifySessionDetail['outputs'][0]) => ({
       ...o,
       metadata_json: (o.metadata_json as Record<string, unknown> | null) ?? null,
@@ -228,11 +251,14 @@ async function getAmplifySessionSupabase(
 
   if (!session || session.organization_id !== orgId) return null
 
+  await syncAllAmplifySourcesFromTicket(sessionId, session.ticket_id as string)
+
   const [{ data: sources }, { data: outputs }] = await Promise.all([
     supabase
       .from('amplify_source_selections')
-      .select('id, source_type, source_content, included')
-      .eq('session_id', sessionId),
+      .select('id, source_type, source_content, included, source_ref_id')
+      .eq('session_id', sessionId)
+      .order('source_type', { ascending: true }),
     supabase
       .from('amplify_generated_outputs')
       .select('id, output_format, tone, content, model_used, generated_at, metadata_json')
@@ -249,7 +275,16 @@ async function getAmplifySessionSupabase(
     ticket_id: session.ticket_id,
     organization_id: session.organization_id,
     tickets: ticket ?? null,
-    sources: sources ?? [],
+    sources: await enrichAmplifySources(
+      (sources ?? []) as Array<{
+        id: string
+        source_type: string
+        source_content: string | null
+        included: boolean
+        source_ref_id: string | null
+      }>,
+      session.ticket_id as string,
+    ),
     outputs: (outputs ?? []) as AmplifySessionDetail['outputs'],
     platforms: PLATFORMS,
     tones: TONES,
@@ -282,6 +317,7 @@ export async function createAmplifySession(
     .maybeSingle()
 
   if (existing) {
+    await syncAllAmplifySourcesFromTicket(existing.id as string, ticketId)
     return { ok: true, id: existing.id as string, reused: true }
   }
 
@@ -300,24 +336,15 @@ export async function createAmplifySession(
     return { ok: false, status: 500, error: error?.message ?? 'Insert failed' }
   }
 
-  const seeds: Array<{ source_type: string; source_content: string | null }> = []
-  if (ticket.original_issue_text) {
-    seeds.push({ source_type: 'complaint_text', source_content: ticket.original_issue_text })
-  }
-  if (ticket.normalized_summary) {
-    seeds.push({ source_type: 'normalized_summary', source_content: ticket.normalized_summary })
-  }
-
-  if (seeds.length) {
-    await supabase.from('amplify_source_selections').insert(
-      seeds.map((s) => ({
-        session_id: session.id,
-        source_type: s.source_type,
-        source_content: s.source_content,
-        included: true,
-      })),
-    )
-  }
+  await seedAmplifySourcesForSession(
+    session.id as string,
+    {
+      original_issue_text: ticket.original_issue_text as string | null,
+      normalized_summary: ticket.normalized_summary as string | null,
+    },
+    ticketId,
+    supabase,
+  )
 
   await supabase.from('audit_logs').insert({
     organization_id: user.organization_id,
@@ -369,21 +396,20 @@ export async function generateAmplifyDraft(
 
   let sourcesQuery = supabase
     .from('amplify_source_selections')
-    .select('id, source_type, source_content, included')
+    .select('id, source_type, source_content, included, source_ref_id')
     .eq('session_id', sessionId)
-    .eq('included', true)
 
   if (Array.isArray(body.source_ids) && body.source_ids.length > 0) {
     sourcesQuery = sourcesQuery.in('id', body.source_ids)
+  } else {
+    sourcesQuery = sourcesQuery.eq('included', true)
   }
 
   const { data: sources } = await sourcesQuery
 
   const { data: ticket } = await supabase
     .from('tickets')
-    .select(
-      'ticket_number, title, original_issue_text, normalized_summary, location_text, latitude, longitude, severity',
-    )
+    .select('ticket_number, title')
     .eq('id', session.ticket_id)
     .single()
 
@@ -392,16 +418,11 @@ export async function generateAmplifyDraft(
     content: s.source_content ?? '',
   }))
 
-  if (ticket) {
+  const hasCaseMetadata = (sources ?? []).some((s) => s.source_type === 'case_metadata')
+  if (ticket && !hasCaseMetadata) {
     labeledSources.push({
-      label: 'ticket_meta',
-      content: [
-        `ticket: ${ticket.ticket_number}${ticket.title ? ` (${ticket.title})` : ''}`,
-        ticket.location_text ? `location: ${ticket.location_text}` : null,
-        ticket.severity ? `severity: ${ticket.severity}` : null,
-      ]
-        .filter(Boolean)
-        .join('\n'),
+      label: 'ticket_ref',
+      content: `ticket: ${ticket.ticket_number}${ticket.title ? ` (${ticket.title})` : ''}`,
     })
   }
 

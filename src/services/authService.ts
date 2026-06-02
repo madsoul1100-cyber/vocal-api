@@ -67,6 +67,37 @@ export function verifyAccessToken(token: string): JwtPayload | null {
   }
 }
 
+function classifyLoginLookupError(message: string): {
+  status: number
+  code: string
+  error: string
+} {
+  const m = message.toLowerCase()
+  const connectivity =
+    m.includes('connection terminated') ||
+    m.includes('connection timeout') ||
+    m.includes('connect etimedout') ||
+    m.includes('econnrefused') ||
+    m.includes('enotfound') ||
+    m.includes('getaddrinfo') ||
+    (m.includes('timeout') && m.includes('connect'))
+
+  if (connectivity) {
+    return {
+      status: 503,
+      code: 'DATABASE_UNAVAILABLE',
+      error:
+        'Cannot reach the database. Check DATABASE_URL, VPN, and RDS network access, then try again.',
+    }
+  }
+
+  return {
+    status: 503,
+    code: 'DATABASE_ERROR',
+    error: 'A database error occurred during sign-in. Try again or contact support.',
+  }
+}
+
 export async function loginWithEmailPassword(email: string, password: string) {
   const supabase = createSupabaseServiceClient()
   const normalized = email.trim().toLowerCase()
@@ -77,7 +108,12 @@ export async function loginWithEmailPassword(email: string, password: string) {
     .eq('email', normalized)
     .maybeSingle()
 
-  if (error || !user) {
+  if (error) {
+    const classified = classifyLoginLookupError(error.message)
+    return { ok: false as const, ...classified }
+  }
+
+  if (!user) {
     return { ok: false as const, error: 'Invalid email or password', status: 401 }
   }
 

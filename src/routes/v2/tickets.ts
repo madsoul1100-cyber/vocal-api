@@ -16,6 +16,7 @@ import {
   acceptTicket,
   getTicketStatusOptions,
   rejectTicket,
+  requestTicketClosure,
   updateTicketStatus,
 } from '@/services/ticketActionsService.js'
 import {
@@ -170,16 +171,42 @@ router.post('/auto-assign', requireAuth, async (req, res) => {
   })
 })
 
+router.post('/request-closure', requireAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> }).vocalUser
+  const ticketId = req.body?.ticket_id as string | undefined
+  const note = (req.body?.note ?? req.body?.content) as string | undefined
+  if (!ticketId || !note?.trim()) {
+    res.status(400).json({ error: 'ticket_id and note required' })
+    return
+  }
+  const result = await requestTicketClosure(user as any, ticketId, note)
+  if (!result.ok) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+  res.json({
+    ok: true,
+    sub_status: result.sub_status,
+    stage: result.stage,
+    closure_pending: result.closure_pending,
+    note_id: result.note_id,
+  })
+})
+
 router.post('/status', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> }).vocalUser
   const ticketId = req.body?.ticket_id as string | undefined
   const subStatus = req.body?.sub_status as string | undefined
   const workerId = req.body?.worker_id as string | undefined
+  const contactChannel =
+    typeof req.body?.contact_channel === 'string' ? req.body.contact_channel : undefined
   if (!ticketId || !subStatus) {
     res.status(400).json({ error: 'ticket_id and sub_status required' })
     return
   }
-  const result = await updateTicketStatus(user as any, ticketId, subStatus, workerId)
+  const result = await updateTicketStatus(user as any, ticketId, subStatus, workerId, {
+    contact_channel: contactChannel,
+  })
   if (!result.ok) {
     res.status(result.status).json({ error: result.error })
     return

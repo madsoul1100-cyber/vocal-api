@@ -54,6 +54,12 @@ export async function createTicket(input: CreateTicketInput): Promise<TicketCrea
   const needsLocationValidation = !hasUsableLocation
   const incompleteInfo = !input.originalIssueText
 
+  const initialSubStatus = incompleteInfo
+    ? 'incomplete_information'
+    : needsLocationValidation
+      ? 'needs_location_validation'
+      : 'new_awaiting_triage'
+
   const { data: ticket, error } = await supabase
     .from('tickets')
     .insert({
@@ -68,10 +74,11 @@ export async function createTicket(input: CreateTicketInput): Promise<TicketCrea
       latitude: input.latitude ?? null,
       longitude: input.longitude ?? null,
       stage: 'to_do',
-      sub_status: incompleteInfo ? 'incomplete_information' : 'new_awaiting_triage',
+      sub_status: initialSubStatus,
       incomplete_information_flag: incompleteInfo,
       needs_location_validation_flag: needsLocationValidation,
       needs_triage: true,
+      needs_closure_review: false,
       created_by_system: true,
     })
     .select('id, ticket_number')
@@ -87,7 +94,7 @@ export async function createTicket(input: CreateTicketInput): Promise<TicketCrea
     from_stage: null,
     to_stage: 'to_do',
     from_sub_status: null,
-    to_sub_status: incompleteInfo ? 'incomplete_information' : 'new_awaiting_triage',
+    to_sub_status: initialSubStatus,
     system_action: true,
     change_reason: 'Ticket created from ' + input.sourceChannel + ' intake',
   })
@@ -217,4 +224,54 @@ export async function addTicketNote(
   })
 
   return { success: true, noteId: note.id }
+}
+
+/** When severity becomes critical on a to_do ticket, flag for immediate attention. */
+export async function applyCriticalSeveritySideEffects(
+  ticketId: string,
+  severity: string | null | undefined,
+): Promise<void> {
+  if (severity !== 'critical') return
+
+  const supabase = createSupabaseServiceClient()
+  const { data: ticket } = await supabase
+    .from('tickets')
+    .select('id, organization_id, stage, sub_status')
+    .eq('id', ticketId)
+    .single()
+
+  if (!ticket || ticket.stage === 'closed') return
+
+  const now = new Date().toISOString()
+  const patch: Record<string, unknown> = {
+    critical_flag: true,
+    updated_at: now,
+  }
+
+  if (ticket.stage === 'to_do' && ticket.sub_status !== 'critical_immediate_attention') {
+    patch.sub_status = 'critical_immediate_attention'
+  }
+
+  await supabase.from('tickets').update(patch).eq('id', ticketId)
+
+  if (patch.sub_status) {
+    await supabase.from('ticket_stage_history').insert({
+      ticket_id: ticketId,
+      from_stage: ticket.stage,
+      to_stage: 'to_do',
+      from_sub_status: ticket.sub_status,
+      to_sub_status: 'critical_immediate_attention',
+      change_reason: 'Severity set to critical',
+      system_action: true,
+    })
+
+    await supabase.from('audit_logs').insert({
+      organization_id: ticket.organization_id,
+      event_type: 'ticket_critical_flagged',
+      entity_type: 'ticket',
+      entity_id: ticketId,
+      actor_type: 'system',
+      new_value_json: { sub_status: 'critical_immediate_attention' },
+    })
+  }
 }

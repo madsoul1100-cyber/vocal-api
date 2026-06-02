@@ -11,10 +11,11 @@ import { SQL_TICKET_LIST } from '@/lib/postgresCompat/embedSql.js'
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
 import type { TicketStage, Severity, TicketSubStatus } from '@/types/database.js'
 import { SUB_STATUS_LABELS } from '@/types/database.js'
+import { isValidSubStatus } from '@/lib/ticketStatusCatalog.js'
 
 export const TICKET_LIST_SELECT = `
   id, ticket_number, title, original_issue_text, stage, sub_status, severity,
-  critical_flag, needs_triage, anonymous_flag, location_text, latitude, longitude,
+  critical_flag, needs_triage, needs_closure_review, anonymous_flag, location_text, latitude, longitude,
   created_at, updated_at, accepted_at,
   sla_first_contact_due_at, sla_resolution_due_at, sla_breached_flag,
   territories(id, name),
@@ -239,6 +240,8 @@ export interface TicketListV2Options {
   stage?: TicketStage
   severity?: Severity
   needsTriage?: boolean
+  needsClosureReview?: boolean
+  subStatus?: TicketSubStatus
   slaBreached?: boolean
   slaFirstContactOverdue?: boolean
   slaResolutionOverdue?: boolean
@@ -320,6 +323,11 @@ export function parseTicketsV2ListQuery(query: Record<string, unknown>): TicketL
     stage: parseTicketStage(query.stage),
     severity: parseTicketSeverity(query.severity),
     needsTriage: parseBooleanQuery(query.needs_triage),
+    needsClosureReview: parseBooleanQuery(query.needs_closure_review),
+    subStatus:
+      typeof query.sub_status === 'string' && isValidSubStatus(query.sub_status.trim())
+        ? (query.sub_status.trim() as TicketSubStatus)
+        : undefined,
     slaBreached: parseBooleanQuery(query.sla_breached),
     slaFirstContactOverdue: parseBooleanQuery(query.sla_first_contact_overdue),
     slaResolutionOverdue: parseBooleanQuery(query.sla_resolution_overdue),
@@ -371,6 +379,15 @@ function appendTicketV2Filters(
     clause += ` AND ${alias}.needs_triage = true`
   } else if (opts.needsTriage === false) {
     clause += ` AND ${alias}.needs_triage = false`
+  }
+  if (opts.needsClosureReview === true) {
+    clause += ` AND ${alias}.needs_closure_review = true`
+  } else if (opts.needsClosureReview === false) {
+    clause += ` AND ${alias}.needs_closure_review = false`
+  }
+  if (opts.subStatus) {
+    clause += ` AND ${alias}.sub_status = $${paramIndex.i++}`
+    params.push(opts.subStatus)
   }
   if (opts.critical === true) {
     clause += ` AND ${alias}.critical_flag = true`
@@ -502,6 +519,9 @@ async function listTicketsV2Supabase(
   if (opts.severity) query = query.eq('severity', opts.severity)
   if (opts.needsTriage === true) query = query.eq('needs_triage', true)
   else if (opts.needsTriage === false) query = query.eq('needs_triage', false)
+  if (opts.needsClosureReview === true) query = query.eq('needs_closure_review', true)
+  else if (opts.needsClosureReview === false) query = query.eq('needs_closure_review', false)
+  if (opts.subStatus) query = query.eq('sub_status', opts.subStatus)
   if (opts.critical === true) query = query.eq('critical_flag', true)
   else if (opts.critical === false) query = query.eq('critical_flag', false)
   if (opts.hasLocation === true) query = query.not('latitude', 'is', null)
@@ -582,6 +602,8 @@ export function ticketsV2FiltersEcho(opts: TicketListV2Options) {
     stage: opts.stage ?? null,
     severity: opts.severity ?? null,
     needs_triage: opts.needsTriage ?? null,
+    needs_closure_review: opts.needsClosureReview ?? null,
+    sub_status: opts.subStatus ?? null,
     sla_breached: opts.slaBreached ?? null,
     sla_first_contact_overdue: opts.slaFirstContactOverdue ?? null,
     sla_resolution_overdue: opts.slaResolutionOverdue ?? null,

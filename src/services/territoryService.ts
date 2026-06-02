@@ -1,5 +1,6 @@
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
 import { isPostgresMode, dbQuery } from '@/lib/db.js'
+import { canAccessWorkersPage } from '@/lib/roleHierarchy.js'
 
 export interface TerritoryOption {
   id: string
@@ -36,7 +37,7 @@ const WORKERS_PAGE_ROLES = ['super_admin', 'central_support', 'district_leader']
 export const DEFAULT_TERRITORY_STATE_NAME = 'Telangana'
 
 function canManageTerritories(role: string | null | undefined): boolean {
-  return !!role && WORKERS_PAGE_ROLES.includes(role)
+  return canAccessWorkersPage(role)
 }
 
 async function ensureDefaultTerritoryLevel(orgId: string): Promise<string> {

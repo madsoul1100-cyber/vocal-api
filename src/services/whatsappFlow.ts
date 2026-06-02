@@ -17,7 +17,9 @@ import { classifyIntent } from './aiService.js'
 import { createTicket } from './ticketService.js'
 import { generateTicketSuggestions } from './aiService.js'
 import { autoRouteNewTicket } from './assignmentService.js'
+import { enrichTicketFromIssueText } from './ticketIntakeAi.js'
 import { downloadFromTwilioAndStore } from './attachmentService.js'
+import { maskWhatsAppUserId, waLog, waLogError, whatsappAutoOfferWorker } from '@/lib/whatsappFlowLog.js'
 
 export type Step =
   | 'idle'
@@ -75,6 +77,17 @@ function applyMenuShortcut(text: string): string {
 export async function handleInboundMessage(ctx: FlowContext): Promise<void> {
   let text = ctx.msg.text ?? ''
   text = applyMenuShortcut(text)
+
+  waLog('script.dispatch', 'handle message', {
+    conversationId: ctx.conversationId,
+    citizenId: ctx.citizenId,
+    from: maskWhatsAppUserId(ctx.msg.chat_id),
+    step: ctx.currentStep,
+    messageId: ctx.msg.message_id,
+    textPreview: text ? text.slice(0, 80) : null,
+    hasMedia: !!ctx.msg.media,
+    hasLocation: !!ctx.msg.location,
+  })
 
   if (isCommand(text, '/start') || words.isStart(text)) return doStart(ctx)
   if (isCommand(text, '/help') || words.isHelp(text)) return doHelp(ctx)
@@ -285,10 +298,19 @@ async function sendSummary(ctx: FlowContext, draft: Draft) {
 async function fileTicket(ctx: FlowContext) {
   const draft = ctx.draft
   if (!draft.issue_text) {
+    waLog('script.file', 'aborted — no issue text', { conversationId: ctx.conversationId })
     await setStep(ctx, 'collecting_issue', draft)
     await sendWhatsAppMessage(ctx.msg.chat_id, BOT.startIssue())
     return
   }
+
+  waLog('script.file', 'creating ticket', {
+    conversationId: ctx.conversationId,
+    citizenId: ctx.citizenId,
+    hasLocation: !!(draft.location_text || (draft.latitude && draft.longitude)),
+    mediaCount: draft.media?.length ?? 0,
+    issueChars: draft.issue_text.length,
+  })
 
   const result = await createTicket({
     organizationId: ctx.organizationId,
@@ -304,9 +326,19 @@ async function fileTicket(ctx: FlowContext) {
   })
 
   if (!result.success) {
+    waLog('script.file', 'createTicket failed', {
+      conversationId: ctx.conversationId,
+      error: result.error,
+    })
     await sendWhatsAppMessage(ctx.msg.chat_id, BOT.failed())
     return
   }
+
+  waLog('script.file', 'ticket created', {
+    conversationId: ctx.conversationId,
+    ticketId: result.ticketId,
+    ticketNumber: result.ticketNumber,
+  })
 
   await ctx.supabase
     .from('channel_conversations')
@@ -320,6 +352,10 @@ async function fileTicket(ctx: FlowContext) {
     .eq('id', ctx.conversationId)
 
   await sendWhatsAppMessage(ctx.msg.chat_id, BOT.filed(result.ticketNumber))
+  waLog('script.reply', 'sent filed confirmation to citizen', {
+    ticketNumber: result.ticketNumber,
+    from: maskWhatsAppUserId(ctx.msg.chat_id),
+  })
 
   if (draft.media?.length) {
     try {
@@ -352,8 +388,12 @@ async function fileTicket(ctx: FlowContext) {
         }),
       )
       await ctx.supabase.from('ticket_attachments').insert(rows)
+      waLog('script.media', 'attachments saved', {
+        ticketId: result.ticketId,
+        count: rows.length,
+      })
     } catch (err) {
-      console.error('[whatsappFlow] media upload error:', err instanceof Error ? err.message : String(err))
+      waLogError('script.media', 'attachment upload failed', err, { ticketId: result.ticketId })
     }
   }
 
@@ -361,23 +401,24 @@ async function fileTicket(ctx: FlowContext) {
   autoRouteNewTicket(result.ticketId).catch(() => {})
 
   if (draft.issue_text) {
-    generateTicketSuggestions(draft.issue_text).then(async (s) => {
-      if (s.error) return
-      await ctx.supabase.from('ai_ticket_suggestions').insert({
-        ticket_id: result.ticketId,
-        model_used: process.env.OPENROUTER_MODEL ?? 'unknown',
-        suggested_title: s.suggested_title,
-        suggested_summary: s.suggested_summary,
-        suggested_category: s.suggested_category,
-        suggested_severity: s.suggested_severity,
-        suggested_department: s.suggested_department,
-        suggested_location_text: s.suggested_location_text,
-        confidence_json: s.confidence_json,
-        raw_ai_response: s.raw_ai_response as Record<string, unknown>,
-        status: 'completed',
+    const enrich = await enrichTicketFromIssueText({
+      ticketId: result.ticketId,
+      organizationId: ctx.organizationId,
+      issueText: draft.issue_text,
+    })
+    if (!enrich.ok) {
+      waLog('script.ai', 'classification skipped', {
+        ticketId: result.ticketId,
+        error: enrich.error,
       })
-    }).catch(() => {})
+    }
   }
+
+  await whatsappAutoOfferWorker({
+    ticketId: result.ticketId,
+    ticketNumber: result.ticketNumber,
+    intake: 'script',
+  })
 }
 
 async function replyStatus(ctx: FlowContext, ticketNumber: string | null) {
@@ -428,6 +469,7 @@ async function replyStatus(ctx: FlowContext, ticketNumber: string | null) {
 }
 
 async function setStep(ctx: FlowContext, step: Step, draft: Draft) {
+  const prev = ctx.currentStep
   await ctx.supabase
     .from('channel_conversations')
     .update({
@@ -438,6 +480,14 @@ async function setStep(ctx: FlowContext, step: Step, draft: Draft) {
     .eq('id', ctx.conversationId)
   ctx.currentStep = step
   ctx.draft = draft
+  if (prev !== step) {
+    waLog('script.step', `${prev} → ${step}`, {
+      conversationId: ctx.conversationId,
+      hasIssue: !!draft.issue_text,
+      mediaCount: draft.media?.length ?? 0,
+      hasLocation: !!(draft.location_text || draft.latitude),
+    })
+  }
 }
 
 async function resetConversation(ctx: FlowContext, step: Step) {
