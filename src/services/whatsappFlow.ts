@@ -400,18 +400,24 @@ async function fileTicket(ctx: FlowContext) {
   // Auto-route: direct-assign to the territory's worker, else offer to nearest.
   autoRouteNewTicket(result.ticketId).catch(() => {})
 
-  if (draft.issue_text) {
-    const enrich = await enrichTicketFromIssueText({
+  const enrich = await enrichTicketFromIssueText({
+    ticketId: result.ticketId,
+    organizationId: ctx.organizationId,
+    issueText: draft.issue_text,
+    ensureSeverity: true,
+  })
+  if (!enrich.ok) {
+    waLog('script.ai', 'classification partial', {
       ticketId: result.ticketId,
-      organizationId: ctx.organizationId,
-      issueText: draft.issue_text,
+      error: enrich.error,
+      severity: enrich.severity,
     })
-    if (!enrich.ok) {
-      waLog('script.ai', 'classification skipped', {
-        ticketId: result.ticketId,
-        error: enrich.error,
-      })
-    }
+  } else {
+    waLog('script.ai', 'classification applied', {
+      ticketId: result.ticketId,
+      fields: enrich.fieldsApplied,
+      severity: enrich.severity,
+    })
   }
 
   await whatsappAutoOfferWorker({

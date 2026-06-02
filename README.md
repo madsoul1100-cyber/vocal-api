@@ -83,6 +83,7 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 | `POST /v2/tickets/:id/attachments` | Legacy multipart: optional `content`, optional `file` (at least one); optional `note_type` |
 | `GET /v2/tickets/:id/ai-suggestion` | Pending AI suggestion (`super_admin` / `central_support` only; latest completed, unconfirmed, or `null`) |
 | `POST /v2/tickets/confirm-ai` | Apply AI suggestion to empty ticket fields; body `{ ticket_id, suggestion_id }`; same roles only |
+| `PATCH /v2/tickets/:id/severity` | Set or change severity; body `{ severity }` (`critical` \| `high` \| `medium` \| `low`); `super_admin` / `central_support` only |
 
 ### v2 worker / My Assignments (`ground_worker`)
 

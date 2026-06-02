@@ -431,10 +431,11 @@ async function fileTicket(ctx: FlowContext) {
       ticketId: result.ticketId,
       organizationId: ctx.organizationId,
       issueText: draft.issue_text,
+      ensureSeverity: true,
     })
     if (!enrich.ok) {
       console.warn(
-        `[telegramFlow] AI classification skipped for ticket ${result.ticketId}: ${enrich.error}`,
+        `[telegramFlow] AI classification partial for ticket ${result.ticketId}: ${enrich.error}; severity=${enrich.severity ?? 'unset'}`,
       )
     }
   }
