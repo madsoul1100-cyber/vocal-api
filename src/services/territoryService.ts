@@ -92,7 +92,7 @@ type TerritoryNodeRow = TerritoryRow & { has_children: boolean }
 const territoryTreeCache = new Map<string, { expiresAt: number; rows: TerritoryRow[] }>()
 const TREE_CACHE_TTL_MS = 60_000
 
-async function loadOrgTerritoryRowsCached(orgId: string): Promise<TerritoryRow[]> {
+export async function loadOrgTerritoryRowsCached(orgId: string): Promise<TerritoryRow[]> {
   const hit = territoryTreeCache.get(orgId)
   if (hit && hit.expiresAt > Date.now()) return hit.rows
   const rows = await loadOrgTerritoryRows(orgId)
