@@ -303,6 +303,11 @@ export async function offerTicketToWorker(args: {
   workerId: string
   assignedByUserId?: string | null
   reason?: string
+  /**
+   * WhatsApp intake: nearest-worker offer while ticket remains in CS triage
+   * (`needs_triage` stays true). CS manual assign still requires triage complete.
+   */
+  parallelWithTriage?: boolean
 }): Promise<{ ok: true; assignmentId: string; expiresAt: string } | { ok: false; error: string }> {
   const supabase = createSupabaseServiceClient()
 
@@ -316,7 +321,9 @@ export async function offerTicketToWorker(args: {
   if (!ticket) return { ok: false, error: 'ticket_not_found' }
 
   const triageCheck = await assertTicketReadyForWorkerAssignment(args.ticketId)
-  if (!triageCheck.ok) return { ok: false, error: TRIAGE_REQUIRED_ERROR }
+  if (!triageCheck.ok && !args.parallelWithTriage) {
+    return { ok: false, error: TRIAGE_REQUIRED_ERROR }
+  }
 
   const workerId = await applyDevOfferWorkerPin({
     ticketId: args.ticketId,
@@ -354,18 +361,19 @@ export async function offerTicketToWorker(args: {
   const offeredList = new Set<string>(((ticket.offered_worker_ids as string[] | null) ?? []))
   offeredList.add(workerId)
 
-  await supabase
-    .from('tickets')
-    .update({
-      owner_user_id: workerId,
-      needs_triage: false,
-      stage: 'in_progress',
-      sub_status: 'assigned_awaiting_acceptance',
-      assignment_attempt_count: ((ticket as any).assignment_attempt_count ?? 0) + 1,
-      offered_worker_ids: Array.from(offeredList),
-      updated_at: now.toISOString(),
-    })
-    .eq('id', args.ticketId)
+  const ticketPatch: Record<string, unknown> = {
+    owner_user_id: workerId,
+    stage: 'in_progress',
+    sub_status: 'assigned_awaiting_acceptance',
+    assignment_attempt_count: ((ticket as any).assignment_attempt_count ?? 0) + 1,
+    offered_worker_ids: Array.from(offeredList),
+    updated_at: now.toISOString(),
+  }
+  if (!args.parallelWithTriage) {
+    ticketPatch.needs_triage = false
+  }
+
+  await supabase.from('tickets').update(ticketPatch).eq('id', args.ticketId)
 
   await supabase.from('ticket_stage_history').insert({
     ticket_id: args.ticketId,
@@ -374,7 +382,11 @@ export async function offerTicketToWorker(args: {
     from_sub_status: ticket.sub_status,
     to_sub_status: 'assigned_awaiting_acceptance',
     changed_by: args.assignedByUserId ?? null,
-    change_reason: args.reason ?? `Offered to worker (${slaMinutes}m acceptance window)`,
+    change_reason:
+      args.reason ??
+      (args.parallelWithTriage
+        ? `Parallel intake offer (${slaMinutes}m acceptance window; CS triage continues)`
+        : `Offered to worker (${slaMinutes}m acceptance window)`),
     system_action: !args.assignedByUserId,
   })
 
@@ -612,11 +624,18 @@ export async function expireStaleAssignments(): Promise<{
 
     const { data: ticket } = await supabase
       .from('tickets')
-      .select('id, ticket_number, organization_id, stage, sub_status, assignment_attempt_count, needs_triage')
+      .select(
+        'id, ticket_number, organization_id, stage, sub_status, assignment_attempt_count, needs_triage, source_channel',
+      )
       .eq('id', a.ticket_id)
       .single()
     if (!ticket) continue
-    if (ticket.needs_triage === true) continue
+    if (ticket.needs_triage === true) {
+      const parallelWhatsAppOffer =
+        ticket.source_channel === 'whatsapp' &&
+        ticket.sub_status === 'assigned_awaiting_acceptance'
+      if (!parallelWhatsAppOffer) continue
+    }
 
     // Tell the worker whose offer just expired that the ticket has moved on,
     // so their stale Accept/Reject buttons in Telegram aren't a black hole.
@@ -695,6 +714,8 @@ export async function expireStaleAssignments(): Promise<{
       workerId: next.id,
       assignedByUserId: null,
       reason: 'Auto re-offer after prior offer expired',
+      parallelWithTriage:
+        ticket.needs_triage === true && ticket.source_channel === 'whatsapp',
     })
     if (result.ok) reoffered++
   }

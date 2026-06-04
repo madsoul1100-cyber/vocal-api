@@ -1,5 +1,6 @@
 /**
  * Ground worker files a ticket on behalf of a citizen (field intake).
+ * No worker auto-offer — ticket stays `needs_triage` for CS approval only.
  */
 
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
