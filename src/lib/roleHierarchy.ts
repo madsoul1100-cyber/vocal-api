@@ -23,6 +23,19 @@ export function canAccessWorkersPage(roleName: string | null | undefined): boole
   return !!roleName && (STAFF_WORKER_MANAGER_ROLES as readonly string[]).includes(roleName)
 }
 
+/** Roles that may file a ticket on behalf of a citizen (field / org staff). */
+export const WORKER_TICKET_INTAKE_ROLES = [
+  'super_admin',
+  'central_support',
+  'state_leader',
+  'district_leader',
+  'ground_worker',
+] as const
+
+export function canCreateWorkerIntakeTicket(roleName: string | null | undefined): boolean {
+  return !!roleName && (WORKER_TICKET_INTAKE_ROLES as readonly string[]).includes(roleName)
+}
+
 export function hierarchyLevelForRoleName(name: string | null | undefined): number | null {
   if (!name) return null
   return ROLE_HIERARCHY_BY_NAME[name] ?? null

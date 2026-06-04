@@ -50,6 +50,10 @@ import {
 import { ticketAttachmentStorageBackend } from '@/services/attachmentService.js'
 import { listTicketStageHistory } from '@/services/ticketStageHistoryService.js'
 import { updateTicketSeverity } from '@/services/ticketSeverityService.js'
+import {
+  createWorkerIntakeTicket,
+  parseWorkerIntakeBody,
+} from '@/services/workerTicketIntakeService.js'
 import { TRIAGE_REQUIRED_MESSAGE } from '@/services/ticketTriageService.js'
 
 const router = Router()
@@ -219,6 +223,22 @@ router.post('/status', requireAuth, async (req, res) => {
     body.expires_at = result.expires_at
   }
   res.json(body)
+})
+
+/** Field intake — worker files ticket on behalf of citizen; auto-assigned to creator. */
+router.post('/worker-intake', requireAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> }).vocalUser
+  const result = await createWorkerIntakeTicket(
+    user as any,
+    parseWorkerIntakeBody((req.body ?? {}) as Record<string, unknown>),
+  )
+
+  if (!result.ok) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+
+  res.status(201).json({ ok: true, ...result.result })
 })
 
 /** Stream attachment bytes (local disk / S3 / Supabase). Use `preview_url` from list when on RDS without S3. */

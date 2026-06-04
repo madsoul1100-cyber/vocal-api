@@ -14,9 +14,11 @@ export interface CreateTicketInput {
   citizenId?: string
   anonymousFlag?: boolean
   originalIssueText?: string
+  title?: string
   locationText?: string
   latitude?: number
   longitude?: number
+  territoryId?: string
   attachmentCount?: number
   /** False when filed by a staff/worker user (e.g. ground worker intake). */
   createdBySystem?: boolean
@@ -64,6 +66,8 @@ export async function createTicket(input: CreateTicketInput): Promise<TicketCrea
       ? 'needs_location_validation'
       : 'new_awaiting_triage'
 
+  // const createdBySystem = input.createdBySystem !== false
+
   const { data: ticket, error } = await supabase
     .from('tickets')
     .insert({
@@ -73,10 +77,12 @@ export async function createTicket(input: CreateTicketInput): Promise<TicketCrea
       source_conversation_id: input.sourceConversationId ?? null,
       citizen_id: input.citizenId ?? null,
       anonymous_flag: input.anonymousFlag ?? false,
+      title: input.title ?? null,
       original_issue_text: input.originalIssueText ?? null,
       location_text: input.locationText ?? null,
       latitude: input.latitude ?? null,
       longitude: input.longitude ?? null,
+      territory_id: input.territoryId ?? null,
       stage: 'to_do',
       sub_status: initialSubStatus,
       incomplete_information_flag: incompleteInfo,
