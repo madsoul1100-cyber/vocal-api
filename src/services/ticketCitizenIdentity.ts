@@ -8,6 +8,7 @@ export interface CitizenIdentityBlock {
   revealed_at: string | null
   revealed_by: string | null
   anonymous: boolean
+  verified: boolean
   display_name: string | null
   username: string | null
   phone: string | null
@@ -37,12 +38,26 @@ export async function loadCitizenIdentityForTicket(
 
   const revealed = !!ticket.citizen_identity_revealed_at
   const anonymous = ticket.anonymous_flag
+
+  const supabase = createSupabaseServiceClient()
+  const { data: citizen, error: citizenErr } = await supabase
+    .from('citizens')
+    .select('display_name, verified')
+    .eq('id', ticket.citizen_id)
+    .maybeSingle()
+
+  if (citizenErr) {
+    console.error('[loadCitizenIdentityForTicket] citizen', citizenErr)
+  }
+
+  const verified = citizen?.verified === true
   const base: CitizenIdentityBlock = {
     id: ticket.citizen_id,
     revealed,
     revealed_at: ticket.citizen_identity_revealed_at,
     revealed_by: ticket.citizen_identity_revealed_by ?? null,
     anonymous,
+    verified,
     display_name: null,
     username: null,
     phone: null,
@@ -50,18 +65,6 @@ export async function loadCitizenIdentityForTicket(
   }
 
   if (!canViewCitizenPii(role, ticket)) {
-    return base
-  }
-
-  const supabase = createSupabaseServiceClient()
-  const { data: citizen, error: citizenErr } = await supabase
-    .from('citizens')
-    .select('display_name')
-    .eq('id', ticket.citizen_id)
-    .maybeSingle()
-
-  if (citizenErr) {
-    console.error('[loadCitizenIdentityForTicket] citizen', citizenErr)
     return base
   }
 
@@ -84,6 +87,7 @@ export async function loadCitizenIdentityForTicket(
 
   return {
     ...base,
+    verified,
     display_name: citizen?.display_name ?? null,
     username: channelRow?.username ?? null,
     phone: channelRow?.phone ?? null,

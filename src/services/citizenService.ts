@@ -83,11 +83,17 @@ export async function upsertCitizenFromWhatsApp(
     .single()
 
   if (existing) {
+    const now = new Date().toISOString()
     await supabase
       .from('citizen_channel_identities')
-      .update({ last_seen_at: new Date().toISOString() })
+      .update({ last_seen_at: now })
       .eq('channel', 'whatsapp')
       .eq('channel_user_id', channelUserId)
+
+    await supabase
+      .from('citizens')
+      .update({ verified: true, updated_at: now })
+      .eq('id', existing.citizen_id)
 
     return { citizenId: existing.citizen_id, isNew: false }
   }
@@ -98,6 +104,7 @@ export async function upsertCitizenFromWhatsApp(
       organization_id: organizationId,
       display_name: displayName ?? null,
       is_anonymous: false,
+      verified: true,
     })
     .select('id')
     .single()
