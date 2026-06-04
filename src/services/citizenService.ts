@@ -6,6 +6,7 @@
  */
 
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
+import { normalizePhone } from '@/services/otpService.js'
 
 interface UpsertCitizenResult {
   citizenId: string
@@ -18,11 +19,12 @@ export interface WorkerIntakeCitizenResult {
   verified: boolean
 }
 
-/** Normalize phone to E.164-ish for storage and lookup. */
+/**
+ * Normalize citizen phone for storage and lookup.
+ * Frontend may send 10-digit Indian mobile only; backend adds +91 (same rules as staff OTP).
+ */
 export function normalizeCitizenPhoneE164(phoneRaw: string): string | null {
-  const digits = phoneRaw.replace(/\D/g, '')
-  if (digits.length < 10 || digits.length > 15) return null
-  return phoneRaw.trim().startsWith('+') ? `+${digits}` : `+${digits}`
+  return normalizePhone(phoneRaw)
 }
 
 /**

@@ -17,6 +17,7 @@ import { classifyIntent } from './aiService.js'
 import { createTicket } from './ticketService.js'
 import { generateTicketSuggestions } from './aiService.js'
 import { enrichTicketFromIssueText } from './ticketIntakeAi.js'
+import { whatsappAutoOfferWorker } from '@/lib/whatsappFlowLog.js'
 import { downloadFromTwilioAndStore } from './attachmentService.js'
 import { maskWhatsAppUserId, waLog, waLogError } from '@/lib/whatsappFlowLog.js'
 
@@ -416,9 +417,10 @@ async function fileTicket(ctx: FlowContext) {
     })
   }
 
-  waLog('script.file', 'ticket awaiting triage before worker assignment', {
+  await whatsappAutoOfferWorker({
     ticketId: result.ticketId,
     ticketNumber: result.ticketNumber,
+    intake: 'script',
   })
 }
 

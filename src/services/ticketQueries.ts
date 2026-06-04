@@ -249,6 +249,17 @@ export interface TicketListV2Options {
   hasLocation?: boolean
   critical?: boolean
   ownerId?: string
+  sourceChannel?: 'telegram' | 'whatsapp' | 'web' | 'manual'
+}
+
+const TICKET_SOURCE_CHANNELS = ['telegram', 'whatsapp', 'web', 'manual'] as const
+
+function parseTicketSourceChannel(
+  raw: unknown,
+): TicketListV2Options['sourceChannel'] | undefined {
+  if (typeof raw !== 'string' || !raw.trim()) return undefined
+  const ch = raw.trim() as (typeof TICKET_SOURCE_CHANNELS)[number]
+  return TICKET_SOURCE_CHANNELS.includes(ch) ? ch : undefined
 }
 
 export interface TicketListV2Pagination {
@@ -335,6 +346,7 @@ export function parseTicketsV2ListQuery(query: Record<string, unknown>): TicketL
     hasLocation: parseBooleanQuery(query.has_location),
     critical: parseBooleanQuery(query.critical),
     ownerId,
+    sourceChannel: parseTicketSourceChannel(query.source_channel),
   }
 }
 
@@ -402,6 +414,10 @@ function appendTicketV2Filters(
   if (opts.ownerId) {
     clause += ` AND ${alias}.owner_user_id = $${paramIndex.i++}`
     params.push(opts.ownerId)
+  }
+  if (opts.sourceChannel) {
+    clause += ` AND ${alias}.source_channel = $${paramIndex.i++}`
+    params.push(opts.sourceChannel)
   }
   if (opts.slaBreached === true) {
     clause += ` AND ${alias}.sla_breached_flag = true`
@@ -527,6 +543,7 @@ async function listTicketsV2Supabase(
   if (opts.hasLocation === true) query = query.not('latitude', 'is', null)
   else if (opts.hasLocation === false) query = query.is('latitude', null)
   if (opts.ownerId) query = query.eq('owner_user_id', opts.ownerId)
+  if (opts.sourceChannel) query = query.eq('source_channel', opts.sourceChannel)
   if (opts.slaBreached === true) query = query.eq('sla_breached_flag', true)
   else if (opts.slaBreached === false) query = query.eq('sla_breached_flag', false)
 
@@ -611,6 +628,7 @@ export function ticketsV2FiltersEcho(opts: TicketListV2Options) {
     has_location: opts.hasLocation ?? null,
     critical: opts.critical ?? null,
     owner_id: opts.ownerId ?? null,
+    source_channel: opts.sourceChannel ?? null,
     sort: opts.sort,
     order: opts.order,
     limit: opts.limit,

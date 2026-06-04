@@ -51,6 +51,7 @@ Response includes `pagination` (`limit`, `offset`, `total`, `hasNextPage`, `hasP
 | `stage` | `to_do`, `in_progress`, `on_hold`, `closed` |
 | `severity` | `critical`, `high`, `medium`, `low` |
 | `needs_triage` | `true` / `false` |
+| `source_channel` | `whatsapp`, `manual`, `telegram`, `web` |
 | `needs_closure_review` | `true` / `false` — worker-requested closure queue for central support |
 | `sub_status` | Filter by sub-status code (e.g. `pending_closure_approval`) |
 | `has_location` | `true` / `false` |
@@ -93,7 +94,7 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 | `GET /v2/worker/assignments/summary` | Tab counts: `{ counts: { offered, active, closed }, telegramLinked }` |
 | `GET /v2/worker/assignments?bucket=…` | Paginated tab list (see below) |
 | `GET /v2/worker/current-offer` | Poll single pending offer (`offered_at`, `expires_at`, ticket with `category` / `category_name`, `critical_flag`) |
-| `POST /v2/worker/tickets` | File ticket on behalf of citizen (`multipart/form-data`). Required: `citizen_name`, `citizen_phone`, `address`, `description`. Optional: `latitude`, `longitude`, `files` (max 5). Aliases: `name`, `phone`/`number`, `location_text`, `issue_text`. Creates `source_channel=manual`, `needs_triage=true`, AI enrich like WhatsApp; citizen `verified=false` if phone is new to org |
+| `POST /v2/worker/tickets` | File ticket on behalf of citizen (`multipart/form-data`). Required: `citizen_name`, `citizen_phone`, `address`, `description`. Optional: `latitude`, `longitude`, `files` (max 5). Creates `source_channel=manual`, `needs_triage=true` — **CS approval only** (no worker offer at create). Filter CS queue: `GET /v2/tickets?needs_triage=true&source_channel=manual` |
 | `POST /v2/tickets/accept` / `reject` / `status` | Accept offer, reject, update sub-status (`status` optional `contact_channel`: `call`, `sms`, `in_person`, `visit`, `other`) |
 
 **Buckets** (`bucket` required for paginated list):

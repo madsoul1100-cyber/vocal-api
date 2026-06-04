@@ -63,7 +63,8 @@ export async function whatsappAutoOfferWorker(args: {
       ticketId,
       workerId: worker.id,
       assignedByUserId: null,
-      reason: `Auto-assigned after WhatsApp intake (${intake})`,
+      reason: `Auto-offered after WhatsApp intake (${intake}); CS triage continues in parallel`,
+      parallelWithTriage: true,
     })
     if (offer.ok) {
       waLog('assign.ok', 'worker offered', {
