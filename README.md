@@ -51,6 +51,7 @@ Response includes `pagination` (`limit`, `offset`, `total`, `hasNextPage`, `hasP
 | `stage` | `to_do`, `in_progress`, `on_hold`, `closed` |
 | `severity` | `critical`, `high`, `medium`, `low` |
 | `needs_triage` | `true` / `false` |
+| `source_channel` | `whatsapp`, `manual`, `telegram`, `web` |
 | `needs_closure_review` | `true` / `false` — worker-requested closure queue for central support |
 | `sub_status` | Filter by sub-status code (e.g. `pending_closure_approval`) |
 | `has_location` | `true` / `false` |
