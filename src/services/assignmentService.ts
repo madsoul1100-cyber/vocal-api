@@ -24,6 +24,7 @@ import {  applyDevOfferWorkerPin,
   isDevOfferWorkerPinEnabled,
   resolveDevPinnedWorkerId,
 } from '@/lib/devOfferWorker.js'
+import { assertTicketReadyForWorkerAssignment, TRIAGE_REQUIRED_ERROR } from './ticketTriageService.js'
 import { notifyCitizenOfTicketUpdate } from './citizenNotifier'
 import {
   notifyWorkerOfAssignment,
@@ -307,10 +308,15 @@ export async function offerTicketToWorker(args: {
 
   const { data: ticket } = await supabase
     .from('tickets')
-    .select('id, organization_id, stage, sub_status, offered_worker_ids, assignment_attempt_count')
+    .select(
+      'id, organization_id, stage, sub_status, needs_triage, offered_worker_ids, assignment_attempt_count',
+    )
     .eq('id', args.ticketId)
     .single()
   if (!ticket) return { ok: false, error: 'ticket_not_found' }
+
+  const triageCheck = await assertTicketReadyForWorkerAssignment(args.ticketId)
+  if (!triageCheck.ok) return { ok: false, error: TRIAGE_REQUIRED_ERROR }
 
   const workerId = await applyDevOfferWorkerPin({
     ticketId: args.ticketId,
@@ -429,6 +435,9 @@ export async function directAssignTicketToWorker(args: {
     .single()
   if (!ticket) return { ok: false, error: 'ticket_not_found' }
 
+  const triageCheck = await assertTicketReadyForWorkerAssignment(args.ticketId)
+  if (!triageCheck.ok) return { ok: false, error: TRIAGE_REQUIRED_ERROR }
+
   const now = new Date()
   const nowIso = now.toISOString()
 
@@ -522,21 +531,18 @@ export async function directAssignTicketToWorker(args: {
 }
 
 /**
- * Route a freshly created ticket to a worker.
- *
- * Preference order:
- *   1. If a worker owns the ticket's territory (or any ancestor of it),
- *      directly assign the ticket to them — no acceptance step.
- *   2. Otherwise fall back to offering the ticket to the nearest available
- *      worker (the existing accept-within-SLA flow).
- *
- * Safe to call fire-and-forget; it swallows nothing but returns a small status.
+ * Route a ticket to a worker after intake.
+ * Disabled at create time — callers must wait until triage is complete
+ * (`needs_triage = false`). CS assigns via POST /v2/tickets/assign or auto-assign.
  */
 export async function autoRouteNewTicket(ticketId: string): Promise<
   | { routed: 'direct'; workerId: string }
   | { routed: 'offered'; workerId: string }
   | { routed: 'none' }
 > {
+  const triageCheck = await assertTicketReadyForWorkerAssignment(ticketId)
+  if (!triageCheck.ok) return { routed: 'none' }
+
   const owner = await findTerritoryOwner(ticketId)
   if (owner) {
     const res = await directAssignTicketToWorker({
@@ -606,10 +612,11 @@ export async function expireStaleAssignments(): Promise<{
 
     const { data: ticket } = await supabase
       .from('tickets')
-      .select('id, ticket_number, organization_id, stage, sub_status, assignment_attempt_count')
+      .select('id, ticket_number, organization_id, stage, sub_status, assignment_attempt_count, needs_triage')
       .eq('id', a.ticket_id)
       .single()
     if (!ticket) continue
+    if (ticket.needs_triage === true) continue
 
     // Tell the worker whose offer just expired that the ticket has moved on,
     // so their stale Accept/Reject buttons in Telegram aren't a black hole.

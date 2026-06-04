@@ -30,10 +30,9 @@ import {
   type WhatsAppLang,
 } from './whatsappLocale.js'
 import { createTicket } from './ticketService.js'
-import { autoRouteNewTicket } from './assignmentService.js'
 import { enrichTicketFromIssueText } from './ticketIntakeAi.js'
 import { downloadFromTwilioAndStore } from './attachmentService.js'
-import { maskWhatsAppUserId, waLog, waLogError, whatsappAutoOfferWorker } from '@/lib/whatsappFlowLog.js'
+import { maskWhatsAppUserId, waLog, waLogError } from '@/lib/whatsappFlowLog.js'
 import type { Draft, DraftMedia, IncomingMessage } from './whatsappFlow.js'
 import {
   applyIntakeGates,
@@ -406,9 +405,6 @@ async function finalizeTicket(ctx: AiFlowContext, aiDraft: AiDraftState) {
     }
   }
 
-  // Auto-route: direct-assign to the territory's worker, else offer to nearest.
-  autoRouteNewTicket(result.ticketId).catch(() => {})
-
   const enrich = await enrichTicketFromIssueText({
     ticketId: result.ticketId,
     organizationId: ctx.organizationId,
@@ -430,10 +426,9 @@ async function finalizeTicket(ctx: AiFlowContext, aiDraft: AiDraftState) {
     })
   }
 
-  await whatsappAutoOfferWorker({
+  waLog('ai.file', 'ticket awaiting triage before worker assignment', {
     ticketId: result.ticketId,
     ticketNumber: result.ticketNumber,
-    intake: 'ai',
   })
 
   const filedNote = `Ticket registered: ${result.ticketNumber}.`

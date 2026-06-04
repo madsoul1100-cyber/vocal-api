@@ -1,5 +1,4 @@
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
-import { listCandidateWorkers, offerTicketToWorker } from '@/services/assignmentService.js'
 import {
   getTicketStatusOptionsForRole,
   isClosedSubStatus,
@@ -292,30 +291,8 @@ export async function rejectTicket(user: VocalUser, ticketId: string, reason: st
     metadata_json: { reason, attempt_count: newAttemptCount },
   })
 
-  let reoffered: { worker_id: string; assignment_id: string; expires_at: string } | null = null
-  try {
-    const candidates = await listCandidateWorkers(ticketId)
-    const next = candidates[0]
-    if (next) {
-      const offer = await offerTicketToWorker({
-        ticketId,
-        workerId: next.id,
-        assignedByUserId: null,
-        reason: `Auto re-offer after rejection (${reason})`,
-      })
-      if (offer.ok) {
-        reoffered = {
-          worker_id: next.id,
-          assignment_id: offer.assignmentId,
-          expires_at: offer.expiresAt,
-        }
-      }
-    }
-  } catch {
-    /* best-effort */
-  }
-
-  return { ok: true as const, reoffered }
+  // Re-offer only after central support completes triage again (needs_triage = false).
+  return { ok: true as const, reoffered: null }
 }
 
 /** Worker soft-close: closure note + pending_closure_approval (stage stays non-closed). */
@@ -570,8 +547,11 @@ export async function updateTicketStatus(
   }
   if (shouldSetClosureReview(subStatus)) {
     updates.needs_closure_review = true
-  } else if (shouldClearClosureReview(currentSubStatus, subStatus)) {
+  } else   if (shouldClearClosureReview(currentSubStatus, subStatus)) {
     updates.needs_closure_review = false
+  }
+  if (subStatus === 'ready_for_assignment') {
+    updates.needs_triage = false
   }
 
   await supabase.from('tickets').update(updates).eq('id', ticketId)

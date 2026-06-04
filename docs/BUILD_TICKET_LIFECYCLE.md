@@ -20,7 +20,7 @@ Source: product matrix (stages/sub-statuses) + worker soft close with CS approva
 | B4 | Critical: bypass serial offer; notify nearest worker + location leader | Deferred |
 | B5 | Reject → `reassignment_pending` (`on_hold`) + re-offer | Implemented |
 | B6 | Max attempts → `sla_breach_escalation_queue` | Exists |
-| B7 | No auto-assign on intake until `ready_for_assignment` | Implemented |
+| B7 | No worker offer/assign until triage complete (`needs_triage = false`) | Implemented |
 
 ## C. Permissions
 
