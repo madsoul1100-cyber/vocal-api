@@ -4,6 +4,10 @@ import { getCurrentVocalUser } from '@/lib/auth.js'
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
 import { queryTickets } from '@/services/ticketQueries.js'
 import { acceptTicket, rejectTicket, updateTicketStatus } from '@/services/ticketActionsService.js'
+import {
+  createWorkerIntakeTicket,
+  parseWorkerIntakeBody,
+} from '@/services/workerTicketIntakeService.js'
 
 const router = Router()
 
@@ -83,6 +87,22 @@ router.post('/status', requireAuth, async (req, res) => {
     return
   }
   res.json({ ok: true })
+})
+
+/** Field intake — worker files ticket on behalf of citizen; auto-assigned to creator. */
+router.post('/worker-intake', requireAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> }).vocalUser
+  const result = await createWorkerIntakeTicket(
+    user as any,
+    parseWorkerIntakeBody((req.body ?? {}) as Record<string, unknown>),
+  )
+
+  if (!result.ok) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+
+  res.status(201).json({ ok: true, ...result.result })
 })
 
 router.get('/:id', requireAuth, async (req, res) => {

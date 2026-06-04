@@ -14,10 +14,15 @@ export interface CreateTicketInput {
   citizenId?: string
   anonymousFlag?: boolean
   originalIssueText?: string
+  title?: string
   locationText?: string
   latitude?: number
   longitude?: number
+  territoryId?: string
   attachmentCount?: number
+  /** When false, ticket was filed by a staff member (field intake). Default true. */
+  createdBySystem?: boolean
+  createdByUserId?: string
 }
 
 export interface TicketCreationResult {
@@ -60,6 +65,8 @@ export async function createTicket(input: CreateTicketInput): Promise<TicketCrea
       ? 'needs_location_validation'
       : 'new_awaiting_triage'
 
+  const createdBySystem = input.createdBySystem !== false
+
   const { data: ticket, error } = await supabase
     .from('tickets')
     .insert({
@@ -69,17 +76,20 @@ export async function createTicket(input: CreateTicketInput): Promise<TicketCrea
       source_conversation_id: input.sourceConversationId ?? null,
       citizen_id: input.citizenId ?? null,
       anonymous_flag: input.anonymousFlag ?? false,
+      title: input.title ?? null,
       original_issue_text: input.originalIssueText ?? null,
       location_text: input.locationText ?? null,
       latitude: input.latitude ?? null,
       longitude: input.longitude ?? null,
+      territory_id: input.territoryId ?? null,
       stage: 'to_do',
       sub_status: initialSubStatus,
       incomplete_information_flag: incompleteInfo,
       needs_location_validation_flag: needsLocationValidation,
       needs_triage: true,
       needs_closure_review: false,
-      created_by_system: true,
+      created_by_system: createdBySystem,
+      last_updated_by_user_id: input.createdByUserId ?? null,
     })
     .select('id, ticket_number')
     .single()
@@ -105,12 +115,14 @@ export async function createTicket(input: CreateTicketInput): Promise<TicketCrea
     event_type: 'ticket_created',
     entity_type: 'ticket',
     entity_id: ticket.id,
-    actor_type: 'system',
+    actor_type: createdBySystem ? 'system' : 'user',
+    actor_user_id: input.createdByUserId ?? null,
     new_value_json: {
       ticket_number: ticket.ticket_number,
       source_channel: input.sourceChannel,
       has_location: hasUsableLocation,
       anonymous: input.anonymousFlag ?? false,
+      worker_intake: !createdBySystem,
     },
   })
 
