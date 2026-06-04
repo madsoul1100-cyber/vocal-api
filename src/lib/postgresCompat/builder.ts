@@ -53,6 +53,49 @@ function setClauseFragment(col: string, paramIndex: number): string {
   return isJsonbColumn(col) ? `${col} = $${paramIndex}::jsonb` : `${col} = $${paramIndex}`
 }
 
+/** PostgREST-style or() parts: col.eq.val, col.is.null, col.lt.val, col.ilike.%x% or col.ilike.%x% */
+function parseOrFilterPart(
+  part: string,
+  nextParam: () => number,
+  params: unknown[],
+): string | null {
+  const p = part.trim()
+  if (!p) return null
+
+  const isNull = p.match(/^([\w]+)\.is\.null$/i)
+  if (isNull) return `${isNull[1]} IS NULL`
+
+  const ilikeWrapped = p.match(/^([\w]+)\.ilike\.%(.+)%$/i)
+  if (ilikeWrapped) {
+    const idx = nextParam()
+    params.push(`%${ilikeWrapped[2]}%`)
+    return `${ilikeWrapped[1]} ILIKE $${idx}`
+  }
+
+  const ilikeRaw = p.match(/^([\w]+)\.ilike\.(.+)$/i)
+  if (ilikeRaw) {
+    const idx = nextParam()
+    params.push(ilikeRaw[2])
+    return `${ilikeRaw[1]} ILIKE $${idx}`
+  }
+
+  const eq = p.match(/^([\w]+)\.eq\.(.+)$/i)
+  if (eq) {
+    const idx = nextParam()
+    params.push(eq[2])
+    return `${eq[1]} = $${idx}`
+  }
+
+  const lt = p.match(/^([\w]+)\.lt\.(.+)$/i)
+  if (lt) {
+    const idx = nextParam()
+    params.push(lt[2])
+    return `${lt[1]} < $${idx}`
+  }
+
+  return null
+}
+
 function buildWhere(filters: Filter[], startIdx = 1): { sql: string; params: unknown[] } {
   const params: unknown[] = []
   const parts: string[] = []
@@ -84,16 +127,12 @@ function buildWhere(filters: Filter[], startIdx = 1): { sql: string; params: unk
       parts.push(`${f.col} < $${i++}`)
       params.push(f.val)
     } else if (f.kind === 'or') {
-      // PostgREST ilike or: title.ilike.%x%,ticket_number.ilike.%x%
-      const clauses = f.expr.split(',').map((part) => {
-        const m = part.trim().match(/^(\w+)\.ilike\.%(.+)%$/)
-        if (!m) return null
-        const clause = `${m[1]} ILIKE $${i++}`
-        params.push(`%${m[2]}%`)
-        return clause
-      })
-      const valid = clauses.filter(Boolean) as string[]
-      if (valid.length) parts.push(`(${valid.join(' OR ')})`)
+      const nextParam = () => i++
+      const clauses = f.expr
+        .split(',')
+        .map((part) => parseOrFilterPart(part, nextParam, params))
+        .filter(Boolean) as string[]
+      if (clauses.length) parts.push(`(${clauses.join(' OR ')})`)
     }
   }
 
