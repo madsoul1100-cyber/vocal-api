@@ -167,6 +167,8 @@ export interface Citizen {
   organization_id: string
   display_name: string | null
   is_anonymous: boolean
+  /** WhatsApp (Twilio) intake sets true; other channels default false unless updated. */
+  verified: boolean
   notes: string | null
   created_at: string
   updated_at: string

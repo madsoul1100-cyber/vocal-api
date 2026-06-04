@@ -431,18 +431,9 @@ export async function workerRejectViaBot(
       metadata_json: { via: 'telegram_bot' },
     })
 
-    // Re-offer to next available worker.
-    const { findNearestAvailableWorker, offerTicketToWorker } = await import('./assignmentService')
-    const next = await findNearestAvailableWorker(ticketId)
-    if (next) {
-      offerTicketToWorker({
-        ticketId,
-        workerId: next.id,
-        assignedByUserId: null,
-        reason: 'Re-offered after worker rejected via Telegram',
-      }).catch(() => {})
-    }
-
-    await sendWorkerMessage(chatId, `↩️ Ticket rejected. It will be assigned to another team member.`)
+    await sendWorkerMessage(
+      chatId,
+      `↩️ Ticket rejected. Central support will review and assign the next worker.`,
+    )
   } catch { /* swallow */ }
 }

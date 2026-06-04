@@ -20,9 +20,10 @@ export interface CreateTicketInput {
   longitude?: number
   territoryId?: string
   attachmentCount?: number
-  /** When false, ticket was filed by a staff member (field intake). Default true. */
+  /** False when filed by a staff/worker user (e.g. ground worker intake). */
   createdBySystem?: boolean
-  createdByUserId?: string
+  createdByUserId?: string | null
+  stageHistoryReason?: string
 }
 
 export interface TicketCreationResult {
@@ -65,7 +66,7 @@ export async function createTicket(input: CreateTicketInput): Promise<TicketCrea
       ? 'needs_location_validation'
       : 'new_awaiting_triage'
 
-  const createdBySystem = input.createdBySystem !== false
+  // const createdBySystem = input.createdBySystem !== false
 
   const { data: ticket, error } = await supabase
     .from('tickets')
@@ -88,7 +89,7 @@ export async function createTicket(input: CreateTicketInput): Promise<TicketCrea
       needs_location_validation_flag: needsLocationValidation,
       needs_triage: true,
       needs_closure_review: false,
-      created_by_system: createdBySystem,
+      created_by_system: input.createdBySystem ?? true,
       last_updated_by_user_id: input.createdByUserId ?? null,
     })
     .select('id, ticket_number')
@@ -98,6 +99,11 @@ export async function createTicket(input: CreateTicketInput): Promise<TicketCrea
     return { ticketId: '', ticketNumber: '', success: false, error: error?.message ?? 'Insert failed' }
   }
 
+  const createdBySystem = input.createdBySystem ?? true
+  const historyReason =
+    input.stageHistoryReason?.trim() ||
+    `Ticket created from ${input.sourceChannel} intake`
+
   // Write initial stage history
   await supabase.from('ticket_stage_history').insert({
     ticket_id: ticket.id,
@@ -105,8 +111,9 @@ export async function createTicket(input: CreateTicketInput): Promise<TicketCrea
     to_stage: 'to_do',
     from_sub_status: null,
     to_sub_status: initialSubStatus,
-    system_action: true,
-    change_reason: 'Ticket created from ' + input.sourceChannel + ' intake',
+    changed_by: input.createdByUserId ?? null,
+    system_action: createdBySystem,
+    change_reason: historyReason,
   })
 
   // Write audit log
@@ -116,13 +123,13 @@ export async function createTicket(input: CreateTicketInput): Promise<TicketCrea
     entity_type: 'ticket',
     entity_id: ticket.id,
     actor_type: createdBySystem ? 'system' : 'user',
-    actor_user_id: input.createdByUserId ?? null,
+    actor_user_id: createdBySystem ? null : (input.createdByUserId ?? null),
     new_value_json: {
       ticket_number: ticket.ticket_number,
       source_channel: input.sourceChannel,
       has_location: hasUsableLocation,
       anonymous: input.anonymousFlag ?? false,
-      worker_intake: !createdBySystem,
+      filed_by_worker: !createdBySystem,
     },
   })
 

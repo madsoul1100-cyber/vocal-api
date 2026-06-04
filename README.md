@@ -93,6 +93,7 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 | `GET /v2/worker/assignments/summary` | Tab counts: `{ counts: { offered, active, closed }, telegramLinked }` |
 | `GET /v2/worker/assignments?bucket=…` | Paginated tab list (see below) |
 | `GET /v2/worker/current-offer` | Poll single pending offer (`offered_at`, `expires_at`, ticket with `category` / `category_name`, `critical_flag`) |
+| `POST /v2/worker/tickets` | File ticket on behalf of citizen (`multipart/form-data`). Required: `citizen_name`, `citizen_phone`, `address`, `description`. Optional: `latitude`, `longitude`, `files` (max 5). Aliases: `name`, `phone`/`number`, `location_text`, `issue_text`. Creates `source_channel=manual`, `needs_triage=true`, AI enrich like WhatsApp; citizen `verified=false` if phone is new to org |
 | `POST /v2/tickets/accept` / `reject` / `status` | Accept offer, reject, update sub-status (`status` optional `contact_channel`: `call`, `sms`, `in_person`, `visit`, `other`) |
 
 **Buckets** (`bucket` required for paginated list):
@@ -158,6 +159,19 @@ Response: `workers`, `pagination`, `pending`, `pending_pagination`, `summary` (`
 | `PATCH /v2/workers/:id` | Update staff (legacy multipart still supported) |
 | `DELETE /v2/workers/:id` | Soft-deactivate (`active=false`) |
 | `POST /v2/workers/activation/:id` | Approve or reject pending activation (`{ action, note? }`) |
+
+**v2 territory picker** (cascade on worker create/edit; v1 routes unchanged — no pagination):
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /v2/workers/territories/bootstrap` | Telangana `state` + paginated `districts`; includes `levels` |
+| `GET /v2/workers/territories/levels` | Level definitions (State, District, …) |
+| `GET /v2/workers/territories/children?parent_id=` | Children of parent (`parent_id` omitted = state root) |
+| `GET /v2/workers/territories/:territoryId/descendants` | Paginated descendant `nodes` + `territory_ids` |
+
+Shared query params: `limit` (default `50`, max `200`), `offset` (default `0`), `keyword` or `search` (matches `name` / `code`). Descendants also: `include_self` (`true` default).
+
+Responses include `pagination` (`limit`, `offset`, `total`, `has_more`) and echoed `filters`.
 
 **Presigned staff uploads** use the same S3 bucket CORS rules as ticket attachments — see [`docs/S3_CORS_SETUP.md`](docs/S3_CORS_SETUP.md).
 

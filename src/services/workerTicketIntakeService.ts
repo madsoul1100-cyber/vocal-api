@@ -1,12 +1,19 @@
 /**
- * Field intake — staff file a ticket on behalf of a citizen who approached them
- * in person. The ticket is created with source_channel=manual and assigned
- * directly to the worker who created it (no offer / accept step).
+ * Field intake — staff file a ticket on behalf of a citizen (in person).
+ *
+ * - POST /tickets/worker-intake (JSON, staff roles) → createWorkerIntakeTicket
+ * - POST /worker/tickets (multipart, ground worker) → fileTicketAsWorker
+ *
+ * Required: name, number, address, description.
+ * Optional: geo coordinates, photos.
+ * Ticket is linked to a citizen record and auto-assigned to the creator.
  */
 
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
 import { canCreateWorkerIntakeTicket } from '@/lib/roleHierarchy.js'
+import { uploadWorkerAttachment } from '@/services/attachmentService.js'
 import { directAssignTicketToWorker } from '@/services/assignmentService.js'
+import { resolveCitizenForWorkerIntake } from '@/services/citizenService.js'
 import { enrichTicketFromIssueText } from '@/services/ticketIntakeAi.js'
 import { addTicketNote, createTicket } from '@/services/ticketService.js'
 
@@ -19,18 +26,54 @@ type VocalUser = {
 }
 
 export interface WorkerTicketIntakeInput {
-  /** Citizen full name (required). */
   citizen_name: string
-  /** Citizen contact number (required). */
   citizen_phone: string
-  /** Postal / locality address (required). */
   address: string
-  /** Problem description (required). */
   description: string
   latitude?: number
   longitude?: number
   territory_id?: string
+  files?: Array<{ buffer: Buffer; originalname: string; mimetype: string }>
 }
+
+export interface WorkerTicketIntakeResult {
+  ticket_id: string
+  ticket_number: string
+  assignment_id: string
+  stage: string
+  sub_status: string
+  citizen_id: string
+  citizen_verified: boolean
+  citizen_is_new: boolean
+  attachment_count: number
+}
+
+export interface WorkerFileTicketInput {
+  organizationId: string
+  workerUserId: string
+  citizenName: string
+  citizenPhone: string
+  address: string
+  description: string
+  latitude?: number | null
+  longitude?: number | null
+  files?: Array<{ buffer: Buffer; originalname: string; mimetype: string }>
+}
+
+export type WorkerFileTicketResult =
+  | {
+      ok: true
+      ticket_id: string
+      ticket_number: string
+      assignment_id: string
+      stage: string
+      sub_status: string
+      citizen_id: string
+      citizen_verified: boolean
+      citizen_is_new: boolean
+      attachment_count: number
+    }
+  | { ok: false; status: number; error: string }
 
 function parseCoord(raw: unknown): number | undefined {
   if (typeof raw === 'number' && Number.isFinite(raw)) return raw
@@ -39,8 +82,13 @@ function parseCoord(raw: unknown): number | undefined {
   return Number.isFinite(n) ? n : undefined
 }
 
-/** Normalize and validate intake payload from JSON body. */
-export function parseWorkerIntakeBody(body: Record<string, unknown>): WorkerTicketIntakeInput {
+function parseOptionalCoord(raw: unknown): number | null {
+  if (raw === undefined || raw === null || raw === '') return null
+  const n = typeof raw === 'number' ? raw : parseFloat(String(raw))
+  return Number.isFinite(n) ? n : null
+}
+
+function parseIntakeFieldsFromBody(body: Record<string, unknown>): WorkerTicketIntakeInput {
   const citizen_name =
     (typeof body.citizen_name === 'string' ? body.citizen_name : typeof body.name === 'string' ? body.name : '')
   const citizen_phone =
@@ -62,7 +110,9 @@ export function parseWorkerIntakeBody(body: Record<string, unknown>): WorkerTick
       ? body.description
       : typeof body.issue_text === 'string'
         ? body.issue_text
-        : '')
+        : typeof body.original_issue_text === 'string'
+          ? body.original_issue_text
+          : '')
 
   const latitude = parseCoord(body.latitude)
   const longitude = parseCoord(body.longitude)
@@ -73,7 +123,7 @@ export function parseWorkerIntakeBody(body: Record<string, unknown>): WorkerTick
     citizen_name,
     citizen_phone,
     address,
-    description,
+    description: description.slice(0, 4000),
     latitude,
     longitude,
     territory_id,
@@ -111,12 +161,42 @@ function validateWorkerIntakeInput(
   return { ok: true }
 }
 
-export interface WorkerTicketIntakeResult {
-  ticket_id: string
-  ticket_number: string
-  assignment_id: string
-  stage: string
-  sub_status: string
+/** Normalize JSON body for POST /tickets/worker-intake. */
+export function parseWorkerIntakeBody(body: Record<string, unknown>): WorkerTicketIntakeInput {
+  return parseIntakeFieldsFromBody(body)
+}
+
+/** Parse + validate multipart fields for POST /worker/tickets. */
+export function parseWorkerFileTicketBody(body: Record<string, unknown>): {
+  ok: true
+  fields: Omit<WorkerFileTicketInput, 'organizationId' | 'workerUserId' | 'files'>
+} | { ok: false; error: string } {
+  const parsed = parseIntakeFieldsFromBody(body)
+  const validation = validateWorkerIntakeInput(parsed)
+  if (!validation.ok) {
+    return { ok: false, error: validation.error }
+  }
+
+  const latitude = parseOptionalCoord(body.latitude)
+  const longitude = parseOptionalCoord(body.longitude)
+  if (
+    (body.latitude !== undefined && body.latitude !== '' && latitude === null) ||
+    (body.longitude !== undefined && body.longitude !== '' && longitude === null)
+  ) {
+    return { ok: false, error: 'latitude and longitude must be valid numbers when provided' }
+  }
+
+  return {
+    ok: true,
+    fields: {
+      citizenName: parsed.citizen_name.trim(),
+      citizenPhone: parsed.citizen_phone.trim(),
+      address: parsed.address.trim(),
+      description: parsed.description.trim(),
+      latitude,
+      longitude,
+    },
+  }
 }
 
 async function loadWorkerTerritoryIds(userId: string): Promise<string[]> {
@@ -197,6 +277,178 @@ function buildEnrichmentText(input: WorkerTicketIntakeInput): string {
   ].join('\n')
 }
 
+async function resolveIntakeCitizen(
+  organizationId: string,
+  phone: string,
+  name: string,
+): Promise<
+  | { ok: true; citizen: Awaited<ReturnType<typeof resolveCitizenForWorkerIntake>> }
+  | { ok: false; status: number; error: string }
+> {
+  try {
+    const citizen = await resolveCitizenForWorkerIntake(organizationId, phone, name)
+    return { ok: true, citizen }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (msg === 'invalid_phone') {
+      return { ok: false, status: 400, error: 'Valid citizen phone number is required' }
+    }
+    if (msg === 'invalid_name') {
+      return { ok: false, status: 400, error: 'Citizen name is required' }
+    }
+    return { ok: false, status: 500, error: msg }
+  }
+}
+
+async function uploadIntakeAttachments(
+  organizationId: string,
+  workerUserId: string,
+  ticketId: string,
+  files: Array<{ buffer: Buffer; originalname: string; mimetype: string }>,
+): Promise<number> {
+  const supabase = createSupabaseServiceClient()
+  let attachmentCount = 0
+
+  for (const file of files) {
+    try {
+      const stored = await uploadWorkerAttachment({
+        bytes: file.buffer,
+        filename: file.originalname,
+        mime: file.mimetype,
+        org_id: organizationId,
+        ticket_id: ticketId,
+      })
+      if (!stored) continue
+
+      const { error: insErr } = await supabase.from('ticket_attachments').insert({
+        ticket_id: ticketId,
+        file_name: file.originalname,
+        storage_path: stored.storage_path,
+        mime_type: stored.mime_type,
+        file_size_bytes: stored.size_bytes,
+        attachment_type: stored.attachment_type,
+        uploaded_by: workerUserId,
+      })
+      if (!insErr) attachmentCount++
+    } catch {
+      /* best-effort */
+    }
+  }
+
+  return attachmentCount
+}
+
+type IntakeCoreParams = {
+  organizationId: string
+  workerUserId: string
+  input: WorkerTicketIntakeInput
+  territoryId?: string | null
+}
+
+async function runWorkerIntakeCore(
+  params: IntakeCoreParams,
+): Promise<
+  | { ok: true; result: WorkerTicketIntakeResult }
+  | { ok: false; status: number; error: string }
+> {
+  const { organizationId, workerUserId, input } = params
+  const description = input.description.trim()
+  const address = input.address.trim()
+
+  const citizenRes = await resolveIntakeCitizen(
+    organizationId,
+    input.citizen_phone.trim(),
+    input.citizen_name.trim(),
+  )
+  if (!citizenRes.ok) return citizenRes
+  const { citizen } = citizenRes
+
+  const created = await createTicket({
+    organizationId,
+    sourceChannel: 'manual',
+    citizenId: citizen.citizenId,
+    anonymousFlag: false,
+    originalIssueText: description,
+    locationText: address,
+    latitude: input.latitude,
+    longitude: input.longitude,
+    territoryId: params.territoryId ?? undefined,
+    attachmentCount: input.files?.length ?? 0,
+    createdBySystem: false,
+    createdByUserId: workerUserId,
+    stageHistoryReason: 'Ticket filed by worker on behalf of citizen (field intake)',
+  })
+
+  if (!created.success || !created.ticketId) {
+    return { ok: false, status: 500, error: created.error ?? 'Ticket creation failed' }
+  }
+
+  await addTicketNote(created.ticketId, workerUserId, buildCitizenIntakeNote(input), 'general', true)
+
+  const attachmentCount = await uploadIntakeAttachments(
+    organizationId,
+    workerUserId,
+    created.ticketId,
+    input.files ?? [],
+  )
+
+  const assign = await directAssignTicketToWorker({
+    ticketId: created.ticketId,
+    workerId: workerUserId,
+    assignedByUserId: workerUserId,
+    reason: 'Self-assigned — ticket created by worker at field intake',
+  })
+
+  if (!assign.ok) {
+    return {
+      ok: false,
+      status: 500,
+      error: assign.error ?? 'Ticket created but assignment failed',
+    }
+  }
+
+  enrichTicketFromIssueText({
+    ticketId: created.ticketId,
+    organizationId,
+    issueText: buildEnrichmentText(input),
+    ensureSeverity: true,
+  }).catch(() => {})
+
+  const supabase = createSupabaseServiceClient()
+  await supabase.from('audit_logs').insert({
+    organization_id: organizationId,
+    event_type: 'worker_filed_ticket',
+    entity_type: 'ticket',
+    entity_id: created.ticketId,
+    actor_type: 'user',
+    actor_user_id: workerUserId,
+    new_value_json: {
+      ticket_number: created.ticketNumber,
+      citizen_id: citizen.citizenId,
+      citizen_verified: citizen.verified,
+      citizen_is_new: citizen.isNew,
+      attachment_count: attachmentCount,
+      assignment_id: assign.assignmentId,
+    },
+  })
+
+  return {
+    ok: true,
+    result: {
+      ticket_id: created.ticketId,
+      ticket_number: created.ticketNumber,
+      assignment_id: assign.assignmentId,
+      stage: 'in_progress',
+      sub_status: 'accepted_by_worker',
+      citizen_id: citizen.citizenId,
+      citizen_verified: citizen.verified,
+      citizen_is_new: citizen.isNew,
+      attachment_count: attachmentCount,
+    },
+  }
+}
+
+/** JSON intake for staff roles (POST /tickets/worker-intake). */
 export async function createWorkerIntakeTicket(
   user: VocalUser,
   input: WorkerTicketIntakeInput,
@@ -212,9 +464,6 @@ export async function createWorkerIntakeTicket(
   const validation = validateWorkerIntakeInput(input)
   if (!validation.ok) return validation
 
-  const description = input.description.trim()
-  const address = input.address.trim()
-
   const territoryRes = await resolveTerritoryId(
     user.organization_id,
     user.id,
@@ -223,53 +472,55 @@ export async function createWorkerIntakeTicket(
   )
   if (!territoryRes.ok) return territoryRes
 
-  const created = await createTicket({
+  return runWorkerIntakeCore({
     organizationId: user.organization_id,
-    sourceChannel: 'manual',
-    originalIssueText: description,
-    locationText: address,
-    latitude: input.latitude,
-    longitude: input.longitude,
-    territoryId: territoryRes.territoryId ?? undefined,
-    createdBySystem: false,
-    createdByUserId: user.id,
+    workerUserId: user.id,
+    input,
+    territoryId: territoryRes.territoryId,
   })
+}
 
-  if (!created.success || !created.ticketId) {
-    return { ok: false, status: 500, error: created.error ?? 'Ticket creation failed' }
+/** Multipart intake for ground workers (POST /worker/tickets). */
+export async function fileTicketAsWorker(
+  input: WorkerFileTicketInput,
+): Promise<WorkerFileTicketResult> {
+  const intakeInput: WorkerTicketIntakeInput = {
+    citizen_name: input.citizenName,
+    citizen_phone: input.citizenPhone,
+    address: input.address,
+    description: input.description,
+    latitude: input.latitude ?? undefined,
+    longitude: input.longitude ?? undefined,
+    files: input.files,
   }
 
-  await addTicketNote(created.ticketId, user.id, buildCitizenIntakeNote(input), 'general', true)
-
-  const assign = await directAssignTicketToWorker({
-    ticketId: created.ticketId,
-    workerId: user.id,
-    assignedByUserId: user.id,
-    reason: 'Self-assigned — ticket created by worker at field intake',
-  })
-
-  if (!assign.ok) {
-    return {
-      ok: false,
-      status: 500,
-      error: assign.error ?? 'Ticket created but assignment failed',
-    }
+  const validation = validateWorkerIntakeInput(intakeInput)
+  if (!validation.ok) {
+    return { ok: false, status: validation.status, error: validation.error }
   }
 
-  enrichTicketFromIssueText({
-    ticketId: created.ticketId,
-    organizationId: user.organization_id,
-    issueText: buildEnrichmentText(input),
-  }).catch(() => {})
+  const core = await runWorkerIntakeCore({
+    organizationId: input.organizationId,
+    workerUserId: input.workerUserId,
+    input: intakeInput,
+    territoryId: null,
+  })
 
+  if (!core.ok) {
+    return { ok: false, status: core.status, error: core.error }
+  }
+
+  const r = core.result
   return {
     ok: true,
-    result: {
-      ticket_id: created.ticketId,
-      ticket_number: created.ticketNumber,
-      assignment_id: assign.assignmentId,
-      stage: 'in_progress',
-      sub_status: 'accepted_by_worker',
-    },
+    ticket_id: r.ticket_id,
+    ticket_number: r.ticket_number,
+    assignment_id: r.assignment_id,
+    stage: r.stage,
+    sub_status: r.sub_status,
+    citizen_id: r.citizen_id,
+    citizen_verified: r.citizen_verified,
+    citizen_is_new: r.citizen_is_new,
+    attachment_count: r.attachment_count,
   }
 }
