@@ -159,6 +159,19 @@ Response: `workers`, `pagination`, `pending`, `pending_pagination`, `summary` (`
 | `DELETE /v2/workers/:id` | Soft-deactivate (`active=false`) |
 | `POST /v2/workers/activation/:id` | Approve or reject pending activation (`{ action, note? }`) |
 
+**v2 territory picker** (cascade on worker create/edit; v1 routes unchanged — no pagination):
+
+| Endpoint | Description |
+|----------|-------------|
+| `GET /v2/workers/territories/bootstrap` | Telangana `state` + paginated `districts`; includes `levels` |
+| `GET /v2/workers/territories/levels` | Level definitions (State, District, …) |
+| `GET /v2/workers/territories/children?parent_id=` | Children of parent (`parent_id` omitted = state root) |
+| `GET /v2/workers/territories/:territoryId/descendants` | Paginated descendant `nodes` + `territory_ids` |
+
+Shared query params: `limit` (default `50`, max `200`), `offset` (default `0`), `keyword` or `search` (matches `name` / `code`). Descendants also: `include_self` (`true` default).
+
+Responses include `pagination` (`limit`, `offset`, `total`, `has_more`) and echoed `filters`.
+
 **Presigned staff uploads** use the same S3 bucket CORS rules as ticket attachments — see [`docs/S3_CORS_SETUP.md`](docs/S3_CORS_SETUP.md).
 
 `POST /v2/workers` body (create): `full_name`, `role_id`, `email`, `password` (min 8), optional `phone`, `active`, `territory_id`, `metadata_json`, optional `image_url` (from profile complete), optional `kyc_documents` (array from KYC complete).

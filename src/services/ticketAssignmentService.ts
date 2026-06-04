@@ -5,6 +5,7 @@ import {
   offerTicketToWorker,
   type CandidateWorker,
 } from '@/services/assignmentService.js'
+import { TRIAGE_REQUIRED_ERROR, TRIAGE_REQUIRED_MESSAGE } from '@/services/ticketTriageService.js'
 
 export const ASSIGN_TICKET_ROLES = ['super_admin', 'central_support'] as const
 
@@ -355,6 +356,9 @@ export async function listAssignableWorkersForTicket(
 
 function mapOfferError(error: string): { status: number; message: string } {
   if (error === 'ticket_not_found') return { status: 404, message: 'Ticket not found' }
+  if (error === TRIAGE_REQUIRED_ERROR) {
+    return { status: 422, message: TRIAGE_REQUIRED_MESSAGE }
+  }
   return { status: 500, message: error || 'Assignment failed' }
 }
 

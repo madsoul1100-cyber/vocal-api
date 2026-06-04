@@ -1,6 +1,7 @@
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
 import { resolveIssueCategoryId } from '@/services/ticketIntakeAi.js'
 import { applyCriticalSeveritySideEffects } from '@/services/ticketService.js'
+import { buildTriageCompletePatch } from '@/services/ticketTriageService.js'
 import { stripTicketAiMirrorFields } from '@/services/ticketQueries.js'
 import { loadCitizenIdentityForTicket } from '@/services/ticketCitizenIdentity.js'
 import type { AiTicketSuggestion } from '@/types/database.js'
@@ -78,7 +79,7 @@ export async function confirmAiSuggestion(
   const { data: ticket, error: ticketErr } = await supabase
     .from('tickets')
     .select(
-      'id, organization_id, title, normalized_summary, severity, department, category_id, subcategory_id, needs_triage',
+      'id, organization_id, title, normalized_summary, severity, department, category_id, subcategory_id, needs_triage, stage, sub_status',
     )
     .eq('id', ticketId)
     .eq('organization_id', user.organization_id)
@@ -103,7 +104,10 @@ export async function confirmAiSuggestion(
 
   const now = new Date().toISOString()
   const patch: Record<string, unknown> = {
-    needs_triage: false,
+    ...buildTriageCompletePatch({
+      stage: String(ticket.stage),
+      sub_status: String(ticket.sub_status),
+    }),
     ai_suggestions_confirmed: true,
     ai_confirmed_by: user.id,
     ai_confirmed_at: now,

@@ -36,7 +36,6 @@ import {
 import { classifyIntent } from './aiService'
 import { createTicket } from './ticketService'
 import { generateTicketSuggestions } from './aiService'
-import { autoRouteNewTicket } from './assignmentService'
 import { enrichTicketFromIssueText } from './ticketIntakeAi.js'
 import { downloadFromTelegramAndStore } from './attachmentService'
 
@@ -421,10 +420,7 @@ async function fileTicket(ctx: FlowContext) {
     console.error(`[telegramFlow] no media on draft for ticket ${result.ticketNumber}`)
   }
 
-  // Auto-route: fire-and-forget; skips triage queue.
-  // Direct-assign to the territory's worker if one exists, else offer to nearest.
-  autoRouteNewTicket(result.ticketId).catch(() => {})
-  // Assignment waits until central support sets ready_for_assignment (see BUILD_TICKET_LIFECYCLE.md).
+  // Worker assignment waits until central support completes triage (needs_triage = false).
 
   if (draft.issue_text) {
     const enrich = await enrichTicketFromIssueText({

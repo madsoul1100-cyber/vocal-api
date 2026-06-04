@@ -50,6 +50,7 @@ import {
 import { ticketAttachmentStorageBackend } from '@/services/attachmentService.js'
 import { listTicketStageHistory } from '@/services/ticketStageHistoryService.js'
 import { updateTicketSeverity } from '@/services/ticketSeverityService.js'
+import { TRIAGE_REQUIRED_MESSAGE } from '@/services/ticketTriageService.js'
 
 const router = Router()
 const upload = multer({
@@ -533,6 +534,9 @@ router.get('/:id', requireAuth, async (req, res) => {
   }
 
   const can_respond_to_offer = workerCanRespondToOffer(roleName, user.id, current_assignment)
+  const needs_triage = row.needs_triage === true
+  const can_assign =
+    privilegedAssign && !needs_triage && assignable_worker_count > 0
 
   res.json({
     ticket: stripTicketDetailDuplicates({
@@ -545,7 +549,8 @@ router.get('/:id', requireAuth, async (req, res) => {
     }),
     current_assignment,
     assignable_worker_count: privilegedAssign ? assignable_worker_count : null,
-    can_assign: privilegedAssign && assignable_worker_count > 0,
+    can_assign,
+    assign_blocked_reason: can_assign ? null : needs_triage ? TRIAGE_REQUIRED_MESSAGE : null,
     can_respond_to_offer,
   })
 })

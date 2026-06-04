@@ -20,14 +20,14 @@ import {
   updateOrgUser,
   workersV2FiltersEcho,
 } from '@/services/workersManagementService.js'
+import { createOrgTerritory } from '@/services/territoryService.js'
 import {
-  countTerritoryDescendants,
-  createOrgTerritory,
-  getTerritoryDescendantIds,
-  getTerritoryPickerBootstrap,
-  listTerritoryChildren,
-  listTerritoryLevels,
-} from '@/services/territoryService.js'
+  getTerritoryPickerBootstrapV2,
+  listTerritoryChildrenV2,
+  listTerritoryDescendantsV2,
+  listTerritoryLevelsV2,
+  parseTerritoryPickerQuery,
+} from '@/services/territoryPickerV2Service.js'
 import {
   completeStaffKycUpload,
   completeStaffProfileUpload,
@@ -99,14 +99,21 @@ router.get('/territories/bootstrap', requireAuth, async (req, res) => {
     res.status(403).json({ error: 'Insufficient role' })
     return
   }
-  const bootstrap = await getTerritoryPickerBootstrap(user.organization_id)
-  if (!bootstrap) {
+  const opts = parseTerritoryPickerQuery(req.query as Record<string, unknown>)
+  const bootstrap = await getTerritoryPickerBootstrapV2(user.organization_id, opts)
+  if (!bootstrap.ok) {
     res.status(404).json({
       error: 'Telangana territory data not found. Run npm run seed:territories in vocal-api.',
     })
     return
   }
-  res.json(bootstrap)
+  res.json({
+    levels: bootstrap.levels,
+    state: bootstrap.state,
+    districts: bootstrap.districts,
+    pagination: bootstrap.pagination,
+    filters: bootstrap.filters,
+  })
 })
 
 router.get('/territories/levels', requireAuth, async (req, res) => {
@@ -115,8 +122,9 @@ router.get('/territories/levels', requireAuth, async (req, res) => {
     res.status(403).json({ error: 'Insufficient role' })
     return
   }
-  const levels = await listTerritoryLevels(user.organization_id)
-  res.json({ levels })
+  const opts = parseTerritoryPickerQuery(req.query as Record<string, unknown>)
+  const result = await listTerritoryLevelsV2(user.organization_id, opts)
+  res.json(result)
 })
 
 router.get('/territories/children', requireAuth, async (req, res) => {
@@ -128,8 +136,9 @@ router.get('/territories/children', requireAuth, async (req, res) => {
   const q = req.query.parent_id
   const parentId =
     typeof q === 'string' && q.trim() && q.trim() !== 'null' ? q.trim() : null
-  const children = await listTerritoryChildren(user.organization_id, parentId)
-  res.json({ children })
+  const opts = parseTerritoryPickerQuery(req.query as Record<string, unknown>)
+  const result = await listTerritoryChildrenV2(user.organization_id, parentId, opts)
+  res.json(result)
 })
 
 router.get('/territories/:territoryId/descendants', requireAuth, async (req, res) => {
@@ -139,9 +148,15 @@ router.get('/territories/:territoryId/descendants', requireAuth, async (req, res
     return
   }
   const territoryId = String(req.params.territoryId)
-  const count = await countTerritoryDescendants(user.organization_id, territoryId)
-  const ids = await getTerritoryDescendantIds(user.organization_id, territoryId, true)
-  res.json({ territory_id: territoryId, descendant_count: count, territory_ids: ids })
+  const opts = parseTerritoryPickerQuery(req.query as Record<string, unknown>)
+  const includeSelf = String(req.query.include_self ?? 'true').toLowerCase() !== 'false'
+  const result = await listTerritoryDescendantsV2(
+    user.organization_id,
+    territoryId,
+    opts,
+    includeSelf,
+  )
+  res.json(result)
 })
 
 /** Presigned profile upload (create worker — no worker id yet). */
