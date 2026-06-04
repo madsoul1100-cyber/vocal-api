@@ -16,6 +16,7 @@ type Filter =
   | { kind: 'not_is'; col: string; val: unknown }
   | { kind: 'in'; col: string; vals: unknown[] }
   | { kind: 'lt'; col: string; val: unknown }
+  | { kind: 'ilike'; col: string; val: string }
   | { kind: 'or'; expr: string }
 
 type DbResult<T> = { data: T | null; error: { message: string; code?: string } | null; count?: number | null }
@@ -125,6 +126,9 @@ function buildWhere(filters: Filter[], startIdx = 1): { sql: string; params: unk
       params.push(f.vals)
     } else if (f.kind === 'lt') {
       parts.push(`${f.col} < $${i++}`)
+      params.push(f.val)
+    } else if (f.kind === 'ilike') {
+      parts.push(`${f.col} ILIKE $${i++}`)
       params.push(f.val)
     } else if (f.kind === 'or') {
       const nextParam = () => i++
@@ -273,6 +277,11 @@ export class PostgresTableQuery<T = Record<string, unknown>> {
 
   lt(col: string, val: unknown) {
     this.filters.push({ kind: 'lt', col, val })
+    return this
+  }
+
+  ilike(col: string, pattern: string) {
+    this.filters.push({ kind: 'ilike', col, val: pattern })
     return this
   }
 
