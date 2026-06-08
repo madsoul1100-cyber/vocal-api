@@ -18,6 +18,13 @@ export interface IntakeDraftForGates {
 const VISUAL_ISSUE =
   /\b(road|sadak|sarak|pothole|drainage|nala|garbage|kachra|water|paani|streetlight|footpath|construction|damage|kharab|broken|leak|overflow)\b/i
 
+const ANIMAL_SANITATION_ISSUE =
+  /\b(dog|dogs|kutta|kutte|kukka|kukkalu|stray|animal|vaccinat|rabies|bite|pig|pigs|mosquito|dengue|sanitation|cleanliness)\b/i
+
+/** Purely informational — no photo needed. */
+const NON_PHOTO_ISSUE =
+  /\b(only status|ticket status|what is my ticket|mera ticket|status check)\b/i
+
 const SPECIFIC_LOCATION_MARKERS =
   /\b(\d{6}|pin\s*code|pincode|h\.?\s*no|house|flat|plot|shop|gali|galii|lane|street|road|ward|colony|nagar|mohalla|beside|near|opposite|adjacent|landmark|building|apartment|society|mandal|village|panchayat|door|no\.?\s*\d)\b/i
 
@@ -42,8 +49,28 @@ export function isVagueLocation(location: string | null | undefined): boolean {
 }
 
 export function issueLikelyNeedsPhoto(issue: string | null | undefined, category?: string | null): boolean {
-  if (category && /road|drainage|garbage|water|street|construction/i.test(category)) return true
-  return VISUAL_ISSUE.test(issue ?? '')
+  const text = issue ?? ''
+  if (!text.trim()) return false
+  if (NON_PHOTO_ISSUE.test(text)) return false
+  if (category && /road|drainage|garbage|water|street|construction|animal|sanitation/i.test(category)) {
+    return true
+  }
+  if (VISUAL_ISSUE.test(text) || ANIMAL_SANITATION_ISSUE.test(text)) return true
+  // Most civic complaints benefit from on-ground photo evidence
+  return text.trim().length >= 12
+}
+
+/** Citizen wants to send or was expecting a photo prompt. */
+export function userWantsToSendPhoto(text: string): boolean {
+  const t = text.trim()
+  if (!t) return false
+  if (isPhotoSkipMessage(t)) return false
+  return /\b(photo|photos|image|images|picture|pictures|pic|pics|selfie|upload|attachment|attach|foto|tasveer|chitra)\b/i.test(
+      t,
+    ) ||
+    /\b(bhej|bhejna|bhejdo|pamp|pampinch|send).{0,30}(photo|image|pic)/i.test(t) ||
+    /\b(want|wanna).{0,20}(upload|send).{0,20}(photo|image|pic)/i.test(t) ||
+    /\b(nhi puchi|nahi puchi|didn't ask|did not ask|photo nahi pucha|images nhi|why.*photo)/i.test(t)
 }
 
 export function isPhotoSkipMessage(text: string): boolean {
@@ -78,6 +105,23 @@ export function applyIntakeGates(args: {
   }
 
   const merged: IntakeDraftForGates = { ...draft, ...patch }
+  const issueEarly = (merged.issue_text_native ?? merged.issue_text ?? '').trim()
+  const locationEarly = (merged.location_text ?? '').trim()
+
+  if (
+    userWantsToSendPhoto(userText) &&
+    !hasPhoto &&
+    !merged.photo_skipped &&
+    issueEarly &&
+    locationEarly &&
+    !isVagueLocation(locationEarly)
+  ) {
+    return {
+      readyToFile: false,
+      replyOverride: c.askPhotoNow,
+      draftPatch: { ...patch, photo_requested: true },
+    }
+  }
 
   if (!modelReadyToFile) {
     if (issue && location && isVagueLocation(location)) {

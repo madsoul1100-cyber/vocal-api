@@ -538,6 +538,32 @@ export async function handleInboundMessageAi(ctx: AiFlowContext): Promise<void> 
   }
 
   const existingDraft = ctx.meta.aiDraft ?? {}
+  const langEarly = replyLang(ctx, text)
+
+  if (ctx.msg.media) {
+    const issueM = (existingDraft.issue_text_native ?? existingDraft.issue_text ?? '').trim()
+    const locationM = (existingDraft.location_text ?? '').trim()
+    if (issueM && locationM && !isVagueLocation(locationM)) {
+      const aiDraft = mergeAiDraft(existingDraft, {}, ctx)
+      const c = intakeCopy(langEarly)
+      const assistantText = `${c.photoReceivedAck}\n\n${c.confirmSubmit(issueM, locationM)}`
+      const userContent = buildUserContent(ctx)
+      const updatedHistory = trimHistory([
+        ...(ctx.meta.history ?? []),
+        { role: 'user', content: userContent },
+        { role: 'assistant', content: assistantText },
+      ])
+      await sendWhatsAppMessage(ctx.msg.chat_id, assistantText)
+      await persistMeta(ctx, 'ai_intake', {
+        ...ctx.meta,
+        history: updatedHistory,
+        aiDraft: { ...aiDraft, photo_requested: true },
+        preferredLanguage: langEarly,
+      })
+      return
+    }
+  }
+
   if (words.isYes(text)) {
     if (
       draftReadyForConfirmation(existingDraft, Boolean(ctx.msg.media))

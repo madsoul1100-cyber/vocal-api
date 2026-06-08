@@ -128,7 +128,7 @@ const INTAKE_COPY = {
     askLocationOnly:
       'Thanks for sharing the place. What problem should we report there — road, drainage, water, something else?',
     confirmSubmit: (issue: string, location: string) =>
-      `Got it:\n• ${issue.slice(0, 200)}\n• ${location}\n\nReply *yes* when you're ready and I'll register this. Our team will pick it up and update you here. You can still send a photo before or after.`,
+      `Got it:\n• ${issue.slice(0, 200)}\n• ${location}\n\nReply *yes* when you're ready and I'll register this. Our team will pick it up and update you here.`,
     readyOneField: (issue: string) =>
       `Understood — "${issue.slice(0, 120)}${issue.length > 120 ? '…' : ''}". Where exactly is this? And if you have a photo, send it on WhatsApp — really helps.`,
     askSpecificLocation: (hint?: string) =>
@@ -136,9 +136,13 @@ const INTAKE_COPY = {
         ? `"${hint}" helps, but our team needs a pinpoint — colony name, street/gali, house or shop number, or landmark near the spot (e.g. "near Charminar, Hussaini Alam, H.No 12").`
         : 'Which exact spot is this? Please share colony, street/gali, house or shop number, or a nearby landmark — not just the city name.',
     askPhoto:
-      'A photo of the problem on WhatsApp would really help our team verify and act faster. Could you send one when you can? (Reply *skip* if you cannot right now.)',
+      'Please send a photo of the problem here on WhatsApp — it helps our ground team verify and act faster. You can send more than one. When done (or if you cannot), reply *skip*.',
     askPhotoReminder:
-      'Whenever you can, a quick photo of the spot helps a lot. Reply *skip* if not possible — we will still register your complaint.',
+      'Still waiting on a photo if you can — send it here on WhatsApp, then reply *yes* to register. Reply *skip* if not possible.',
+    askPhotoNow:
+      'Yes — please send your photo(s) here on WhatsApp now. I will attach them to your report. When you are done sending, reply *yes* to register (or *skip* if you have no photo).',
+    photoReceivedAck:
+      'Thanks — got your photo. That will help the ground team.',
     askDuration: (issuePreview: string) =>
       `Thanks for explaining. About "${issuePreview.slice(0, 80)}…" — how long has this been going on?`,
   },
@@ -160,9 +164,12 @@ const INTAKE_COPY = {
         ? `"${hint}" से अंदाज़ा लगा, लेकिन टीम को सही जगह चाहिए — कॉलोनी, गली, मकान/दुकान नंबर, या नज़दीकी लैंडमार्क बताइए।`
         : 'ठीक जगह कहाँ है? कॉलोनी, गली, मकान नंबर या पास का लैंडमार्क लिखिए — सिर्फ शहर का नाम काफी नहीं।',
     askPhoto:
-      'समस्या की एक फोटो WhatsApp पर भेज दीजिए — टीम को साबित करने और जल्दी काम में बहुत मदद मिलती है। अभी न हो तो *skip* लिख दीजिए।',
+      'कृपया समस्या की फोटो यहीं WhatsApp पर भेज दीजिए — ग्राउंड टीम को verify करने में मदद मिलती है। एक से ज़्यादा भेज सकते हैं। हो जाए तो *yes* लिखें, नहीं तो *skip*।',
     askPhotoReminder:
-      'जब भी हो सके एक फोटो भेज दीजिए। नहीं भेज सकते तो *skip* लिखिए — फिर भी शिकायत दर्ज करेंगे।',
+      'फोटो भेज सकें तो यहीं WhatsApp पर भेज दीजिए, फिर *yes* लिखें। नहीं तो *skip* — फिर भी शिकायत दर्ज करेंगे।',
+    askPhotoNow:
+      'हाँ — अभी अपनी फोटो यहीं WhatsApp पर भेज दीजिए, मैं रिपोर्ट में जोड़ दूँगा/दूँगी। भेजने के बाद *yes* लिखें (या *skip* अगर फोटो नहीं है)।',
+    photoReceivedAck: 'धन्यवाद — फोटो मिल गई। ग्राउंड टीम को इससे मदद मिलेगी।',
     askDuration: (issuePreview: string) =>
       `"${issuePreview.slice(0, 80)}…" — यह कब से चल रहा है?`,
   },
@@ -184,9 +191,12 @@ const INTAKE_COPY = {
         ? `"${hint}" కాస్త సహాయం — కానీ బృందానికి ఖచ్చితమైన చిరునామా కావాలి: కాలనీ, గలి, ఇల్లు/షాప్ నంబర్, లేదా దగ్గరి ల్యాండ్‌మార్క్.`
         : 'ఖచ్చితంగా ఎక్కడ? కాలనీ, గలి, ఇల్లు నంబర్ లేదా పక్కన ల్యాండ్‌మార్క్ చెప్పండి — సిటీ పేరు మాత్రం సరిపోదు.',
     askPhoto:
-      'సమస్య ఫోటో WhatsApp లో పంపితే బృందానికి చాలా ఉపయోగం. సాధ్యమైతే పంపండి — లేకపోతే *skip* అని రాయండి.',
+      'దయచేసి సమస్య ఫోటో ఇక్కడే WhatsApp లో పంపండి — గ్రౌండ్ బృందానికి verify చేయడానికి సహాయం. ఒకటికంటే ఎక్కువ పంపవచ్చు. అయితే *yes* రాయండి, లేకపోతే *skip*.',
     askPhotoReminder:
-      'ఫోటో పంపగలిగితే పంపండి — లేకపోతే *skip* — మీ ఫిర్యాదు నమోదు చేస్తాం.',
+      'ఫోటో పంపగలిగితే ఇప్పుడు పంపండి, తర్వాత *yes* రాయండి. లేకపోతే *skip* — ఫిర్యాదు నమోదు చేస్తాం.',
+    askPhotoNow:
+      'అవును — ఇప్పుడు మీ ఫోటో(లు) ఇక్కడే WhatsApp లో పంపండి. నేను రిపోర్ట్‌లో జోడిస్తాను. పంపిన తర్వాత *yes* రాయండి (లేకపోతే *skip*).',
+    photoReceivedAck: 'ధన్యవాదాలు — ఫోటో వచ్చింది. గ్రౌండ్ బృందానికి ఇది సహాయపడుతుంది.',
     askDuration: (issuePreview: string) =>
       `"${issuePreview.slice(0, 80)}…" — ఇది ఎప్పటి నుంచి ఉంది?`,
   },
@@ -200,7 +210,7 @@ const INTAKE_COPY = {
     askLocationOnly:
       'Location ke liye thanks. Wahan kya register karein — road, drainage, paani?',
     confirmSubmit: (issue: string, location: string) =>
-      `Theek hai:\n• ${issue.slice(0, 200)}\n• ${location}\n\nReady ho to *yes* likho — register kar dunga. Team dekhegi, yahin WhatsApp par update milega.`,
+      `Theek hai:\n• ${issue.slice(0, 200)}\n• ${location}\n\nSab clear hai. Ready ho to *yes* likho — register kar dunga. Team dekhegi, yahin WhatsApp par update milega.`,
     readyOneField: (issue: string) =>
       `Samjha — "${issue.slice(0, 120)}". Exactly kahan? Photo ho to bhej dena.`,
     askSpecificLocation: (hint?: string) =>
@@ -208,9 +218,12 @@ const INTAKE_COPY = {
         ? `"${hint}" thoda idea mila, par team ko exact jagah chahiye — colony, gali, house/shop number, ya paas ka landmark (jaise Charminar ke paas, Hussaini Alam, H.No 12).`
         : 'Exact spot kahan hai? Colony, gali, makan/dukan number ya nazdeek landmark batao — sirf city name kaafi nahi.',
     askPhoto:
-      'Problem ki ek photo WhatsApp par bhej doge to team ko verify karke jaldi kaam mein bahut help milegi. Abhi nahi to *skip* likh dena.',
+      'Please problem ki photo yahin WhatsApp par bhej do — ground team ko verify karne mein bahut help milti hai. Ek se zyada bhej sakte ho. Ho jaye to *yes* likho, warna *skip*.',
     askPhotoReminder:
-      'Jab ho sake ek photo bhej dena. Nahi ho to *skip* likho — phir bhi complaint register karenge.',
+      'Photo bhej sakte ho to abhi WhatsApp par bhej do, phir *yes* likho. Nahi to *skip* — phir bhi register karenge.',
+    askPhotoNow:
+      'Haan — abhi apni photo(s) yahin WhatsApp par bhej do, main report mein attach kar dunga. Bhejne ke baad *yes* likho (ya *skip* agar photo nahi hai).',
+    photoReceivedAck: 'Shukriya — photo mil gayi. Ground team ko isse help milegi.',
     askDuration: (issuePreview: string) =>
       `"${issuePreview.slice(0, 80)}…" — yeh kab se chal raha hai?`,
   },
@@ -232,9 +245,12 @@ const INTAKE_COPY = {
         ? `"${hint}" konchem help — kani team ki exact address kavali: colony, gali, inti/shop number, leda daggara landmark.`
         : 'Exact ekkada? Colony, gali, house number leda pakkana landmark cheppandi — city peru matrame saripodu.',
     askPhoto:
-      'Problem photo WhatsApp lo pampite team ki chala help. Sadyam aithe pampandi — lekapothe *skip* ani rayandi.',
+      'Dayachesi problem photo ikkade WhatsApp lo pampandi — ground team verify cheyadaniki help. Okatinundi ekkuva pampochu. Aithe *yes* rayandi, lekapothe *skip*.',
     askPhotoReminder:
-      'Photo pampagaligite pampandi — lekapothe *skip* — complaint register chestam.',
+      'Photo pampagaligite ippudu pampandi, tarvata *yes* rayandi. Lekapothe *skip* — complaint register chestam.',
+    askPhotoNow:
+      'Avunu — ippudu mee photo(s) ikkade WhatsApp lo pampandi. Report lo attach chestanu. Pampina tarvata *yes* rayandi (leda *skip*).',
+    photoReceivedAck: 'Dhanyavadalu — photo vachindi. Ground team ki help avtundi.',
     askDuration: (issuePreview: string) =>
       `"${issuePreview.slice(0, 80)}…" — eppati nunchi idi undi?`,
   },
