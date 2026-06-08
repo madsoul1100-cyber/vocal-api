@@ -225,7 +225,7 @@ router.post('/status', requireAuth, async (req, res) => {
   res.json(body)
 })
 
-/** Field intake — worker files ticket on behalf of citizen; auto-assigned to creator. */
+/** Field intake — worker files ticket on behalf of citizen; queued for CS triage. */
 router.post('/worker-intake', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> }).vocalUser
   const result = await createWorkerIntakeTicket(

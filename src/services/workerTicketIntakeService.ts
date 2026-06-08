@@ -6,13 +6,12 @@
  *
  * Required: name, number, address, description.
  * Optional: geo coordinates, photos.
- * Ticket is linked to a citizen record and auto-assigned to the creator.
+ * Ticket is linked to a citizen record and queued for central support triage.
  */
 
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
 import { canCreateWorkerIntakeTicket } from '@/lib/roleHierarchy.js'
 import { uploadWorkerAttachment } from '@/services/attachmentService.js'
-import { directAssignTicketToWorker } from '@/services/assignmentService.js'
 import { resolveCitizenForWorkerIntake } from '@/services/citizenService.js'
 import { enrichTicketFromIssueText } from '@/services/ticketIntakeAi.js'
 import { addTicketNote, createTicket } from '@/services/ticketService.js'
@@ -39,9 +38,9 @@ export interface WorkerTicketIntakeInput {
 export interface WorkerTicketIntakeResult {
   ticket_id: string
   ticket_number: string
-  assignment_id: string
   stage: string
   sub_status: string
+  needs_triage: true
   citizen_id: string
   citizen_verified: boolean
   citizen_is_new: boolean
@@ -65,15 +64,33 @@ export type WorkerFileTicketResult =
       ok: true
       ticket_id: string
       ticket_number: string
-      assignment_id: string
       stage: string
       sub_status: string
+      needs_triage: true
       citizen_id: string
       citizen_verified: boolean
       citizen_is_new: boolean
       attachment_count: number
     }
   | { ok: false; status: number; error: string }
+
+/** Mirrors createTicket initial stage/sub_status for manual intake responses. */
+function initialIntakeTicketStatus(input: WorkerTicketIntakeInput): {
+  stage: string
+  sub_status: string
+} {
+  const hasUsableLocation = !!(
+    input.address.trim() ||
+    (input.latitude != null && input.longitude != null)
+  )
+  const incompleteInfo = !input.description.trim()
+  const sub_status = incompleteInfo
+    ? 'incomplete_information'
+    : !hasUsableLocation
+      ? 'needs_location_validation'
+      : 'new_awaiting_triage'
+  return { stage: 'to_do', sub_status }
+}
 
 function parseCoord(raw: unknown): number | undefined {
   if (typeof raw === 'number' && Number.isFinite(raw)) return raw
@@ -392,20 +409,7 @@ async function runWorkerIntakeCore(
     input.files ?? [],
   )
 
-  const assign = await directAssignTicketToWorker({
-    ticketId: created.ticketId,
-    workerId: workerUserId,
-    assignedByUserId: workerUserId,
-    reason: 'Self-assigned — ticket created by worker at field intake',
-  })
-
-  if (!assign.ok) {
-    return {
-      ok: false,
-      status: 500,
-      error: assign.error ?? 'Ticket created but assignment failed',
-    }
-  }
+  const { stage, sub_status } = initialIntakeTicketStatus(input)
 
   enrichTicketFromIssueText({
     ticketId: created.ticketId,
@@ -428,7 +432,7 @@ async function runWorkerIntakeCore(
       citizen_verified: citizen.verified,
       citizen_is_new: citizen.isNew,
       attachment_count: attachmentCount,
-      assignment_id: assign.assignmentId,
+      needs_triage: true,
     },
   })
 
@@ -437,9 +441,9 @@ async function runWorkerIntakeCore(
     result: {
       ticket_id: created.ticketId,
       ticket_number: created.ticketNumber,
-      assignment_id: assign.assignmentId,
-      stage: 'in_progress',
-      sub_status: 'accepted_by_worker',
+      stage,
+      sub_status,
+      needs_triage: true,
       citizen_id: citizen.citizenId,
       citizen_verified: citizen.verified,
       citizen_is_new: citizen.isNew,
@@ -515,9 +519,9 @@ export async function fileTicketAsWorker(
     ok: true,
     ticket_id: r.ticket_id,
     ticket_number: r.ticket_number,
-    assignment_id: r.assignment_id,
     stage: r.stage,
     sub_status: r.sub_status,
+    needs_triage: r.needs_triage,
     citizen_id: r.citizen_id,
     citizen_verified: r.citizen_verified,
     citizen_is_new: r.citizen_is_new,

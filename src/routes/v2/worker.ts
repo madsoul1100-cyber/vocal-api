@@ -116,9 +116,9 @@ router.post(
       ok: true,
       ticket_id: result.ticket_id,
       ticket_number: result.ticket_number,
-      assignment_id: result.assignment_id,
       stage: result.stage,
       sub_status: result.sub_status,
+      needs_triage: result.needs_triage,
       citizen: {
         id: result.citizen_id,
         verified: result.citizen_verified,
