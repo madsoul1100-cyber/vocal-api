@@ -1,5 +1,5 @@
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
-import { resolveIssueCategoryId } from '@/services/ticketIntakeAi.js'
+import { enrichTicketFromIssueText, resolveIssueCategoryId } from '@/services/ticketIntakeAi.js'
 import { applyCriticalSeveritySideEffects } from '@/services/ticketService.js'
 import { buildTriageCompletePatch } from '@/services/ticketTriageService.js'
 import { stripTicketAiMirrorFields } from '@/services/ticketQueries.js'
@@ -26,26 +26,10 @@ export function shouldFetchAiSuggestion(
   return canAccessAiSuggestions(role) && needsTriage
 }
 
-/** Latest completed, unconfirmed suggestion for a ticket (same filter as monolith ticket page). */
-export async function getPendingAiSuggestion(
+async function fetchPendingAiSuggestionRow(
   ticketId: string,
 ): Promise<AiTicketSuggestion | null> {
   const supabase = createSupabaseServiceClient()
-
-  const { data: ticket, error: ticketErr } = await supabase
-    .from('tickets')
-    .select('needs_triage')
-    .eq('id', ticketId)
-    .maybeSingle()
-
-  if (ticketErr) {
-    console.error('[getPendingAiSuggestion] ticket lookup', ticketErr)
-    return null
-  }
-  if (!ticket?.needs_triage) {
-    return null
-  }
-
   const { data, error } = await supabase
     .from('ai_ticket_suggestions')
     .select('*')
@@ -62,6 +46,44 @@ export async function getPendingAiSuggestion(
   }
 
   return data as AiTicketSuggestion | null
+}
+
+/** Latest completed, unconfirmed suggestion for a ticket (same filter as monolith ticket page). */
+export async function getPendingAiSuggestion(
+  ticketId: string,
+): Promise<AiTicketSuggestion | null> {
+  const supabase = createSupabaseServiceClient()
+
+  const { data: ticket, error: ticketErr } = await supabase
+    .from('tickets')
+    .select('needs_triage, organization_id, original_issue_text')
+    .eq('id', ticketId)
+    .maybeSingle()
+
+  if (ticketErr) {
+    console.error('[getPendingAiSuggestion] ticket lookup', ticketErr)
+    return null
+  }
+  if (!ticket?.needs_triage) {
+    return null
+  }
+
+  const existing = await fetchPendingAiSuggestionRow(ticketId)
+  if (existing) return existing
+
+  const issueText = String(ticket.original_issue_text ?? '').trim()
+  if (!issueText) return null
+
+  await enrichTicketFromIssueText({
+    ticketId,
+    organizationId: String(ticket.organization_id),
+    issueText,
+    ensureSeverity: false,
+  }).catch((err) => {
+    console.error('[getPendingAiSuggestion] backfill enrich', err)
+  })
+
+  return fetchPendingAiSuggestionRow(ticketId)
 }
 
 export async function confirmAiSuggestion(

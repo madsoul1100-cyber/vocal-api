@@ -164,7 +164,9 @@ export async function fileTicketAsWorker(
     organizationId: input.organizationId,
     issueText: input.description,
     ensureSeverity: true,
-  }).catch(() => {})
+  }).catch((err) => {
+    console.error('[fileTicketAsWorker] enrichTicketFromIssueText', err)
+  })
 
   await supabase.from('audit_logs').insert({
     organization_id: input.organizationId,

@@ -12,6 +12,36 @@ import type { Severity } from '@/types/database.js'
 import { generateTicketSuggestions, type AiSuggestionResult } from '@/services/aiService.js'
 import { applyCriticalSeveritySideEffects } from '@/services/ticketService.js'
 
+const FALLBACK_CATEGORY = 'Other / Uncategorized'
+
+/** Rule-based triage draft when OpenRouter is down or unconfigured. */
+export function buildFallbackAiSuggestion(
+  issueText: string,
+  aiError?: string,
+): AiSuggestionResult {
+  const text = issueText.trim()
+  const title =
+    text.length > 80 ? `${text.slice(0, 77).trimEnd()}…` : text || 'Citizen issue report'
+  return {
+    suggested_title: title,
+    suggested_summary: text || null,
+    suggested_category: FALLBACK_CATEGORY,
+    suggested_severity: DEFAULT_TICKET_SEVERITY,
+    suggested_department: null,
+    suggested_location_text: null,
+    confidence_json: {},
+    raw_ai_response: { source: 'fallback', ai_error: aiError ?? null },
+  }
+}
+
+function modelUsedForSuggestion(result: AiSuggestionResult): string {
+  const raw = result.raw_ai_response
+  if (raw && typeof raw === 'object' && 'source' in raw && raw.source === 'fallback') {
+    return 'fallback'
+  }
+  return process.env.OPENROUTER_MODEL ?? 'unknown'
+}
+
 export async function resolveIssueCategoryId(
   organizationId: string,
   categoryLabel: string | null | undefined,
@@ -57,23 +87,22 @@ export async function persistAiSuggestionAndApplyToTicket(args: {
   const supabase = createSupabaseServiceClient()
   const fieldsApplied: string[] = []
 
-  if (!result.error) {
-    const { error: insErr } = await supabase.from('ai_ticket_suggestions').insert({
-      ticket_id: ticketId,
-      model_used: process.env.OPENROUTER_MODEL ?? 'unknown',
-      suggested_title: result.suggested_title,
-      suggested_summary: result.suggested_summary,
-      suggested_category: result.suggested_category,
-      suggested_severity: result.suggested_severity,
-      suggested_department: result.suggested_department,
-      suggested_location_text: result.suggested_location_text,
-      confidence_json: result.confidence_json,
-      raw_ai_response: result.raw_ai_response as Record<string, unknown>,
-      status: 'completed',
-    })
-    if (insErr) {
-      console.error('[ticketIntakeAi] suggestion insert', insErr)
-    }
+  const { error: insErr } = await supabase.from('ai_ticket_suggestions').insert({
+    ticket_id: ticketId,
+    model_used: modelUsedForSuggestion(result),
+    suggested_title: result.suggested_title,
+    suggested_summary: result.suggested_summary,
+    suggested_category: result.suggested_category,
+    suggested_severity: result.suggested_severity,
+    suggested_department: result.suggested_department,
+    suggested_location_text: result.suggested_location_text,
+    confidence_json: result.confidence_json,
+    raw_ai_response: result.raw_ai_response as Record<string, unknown>,
+    status: 'completed',
+  })
+  if (insErr) {
+    console.error('[ticketIntakeAi] suggestion insert', insErr)
+    return { suggestionInserted: false, fieldsApplied }
   }
 
   const { data: ticket } = await supabase
@@ -82,7 +111,7 @@ export async function persistAiSuggestionAndApplyToTicket(args: {
     .eq('id', ticketId)
     .single()
 
-  if (!ticket) return { suggestionInserted: !result.error, fieldsApplied }
+  if (!ticket) return { suggestionInserted: true, fieldsApplied }
 
   const patch: Record<string, unknown> = { updated_at: new Date().toISOString() }
 
@@ -115,7 +144,7 @@ export async function persistAiSuggestionAndApplyToTicket(args: {
     }
   }
 
-  return { suggestionInserted: !result.error, fieldsApplied }
+  return { suggestionInserted: true, fieldsApplied }
 }
 
 /**
@@ -184,18 +213,20 @@ export async function enrichTicketFromIssueText(args: {
     return { ok: false, error: 'empty_issue_text' }
   }
 
-  const result = await generateTicketSuggestions(text)
-  const fieldsApplied: string[] = []
-
-  if (!result.error) {
-    const applied = await persistAiSuggestionAndApplyToTicket({
-      ticketId: args.ticketId,
-      organizationId: args.organizationId,
-      result,
-      overrideCategory: args.overrideCategory ?? false,
-    })
-    fieldsApplied.push(...applied.fieldsApplied)
+  let result = await generateTicketSuggestions(text)
+  if (result.error) {
+    console.warn('[ticketIntakeAi] AI unavailable, storing fallback suggestion:', result.error)
+    result = buildFallbackAiSuggestion(text, result.error)
   }
+
+  const fieldsApplied: string[] = []
+  const applied = await persistAiSuggestionAndApplyToTicket({
+    ticketId: args.ticketId,
+    organizationId: args.organizationId,
+    result,
+    overrideCategory: args.overrideCategory ?? false,
+  })
+  fieldsApplied.push(...applied.fieldsApplied)
 
   let severity: Severity | undefined
   if (args.ensureSeverity !== false) {
@@ -207,14 +238,5 @@ export async function enrichTicketFromIssueText(args: {
     if (ensured.applied) fieldsApplied.push('severity')
   }
 
-  if (result.error) {
-    return {
-      ok: args.ensureSeverity !== false && !!severity,
-      error: result.error,
-      fieldsApplied,
-      severity,
-    }
-  }
-
-  return { ok: true, fieldsApplied, severity }
+  return { ok: applied.suggestionInserted, fieldsApplied, severity }
 }
