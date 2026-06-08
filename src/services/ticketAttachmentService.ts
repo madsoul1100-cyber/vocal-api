@@ -6,6 +6,7 @@ import {
   isValidTicketAttachmentStoragePath,
   parseTicketAttachmentStorageRef,
   readTicketAttachmentObject,
+  resolveTicketAttachmentPreviewUrl,
   signedUrlFor,
   signedUrlsFor,
   ticketAttachmentMediaPath,
@@ -205,7 +206,9 @@ async function mapAttachmentRows(
           const onDisk = await resolveExistingLocalObjectPath(BUCKET_NAME, key)
           preview_url = onDisk ? ticketAttachmentMediaPath(r.ticket_id, r.id) : null
         } else {
-          preview_url = signed[r.storage_path] ?? null
+          preview_url =
+            signed[r.storage_path] ??
+            (await resolveTicketAttachmentPreviewUrl(r.ticket_id, r.id, r.storage_path))
         }
       }
       return {
@@ -576,10 +579,11 @@ export async function createTicketNotesAndAttachments(
       return { error: insErr?.message ?? 'Attachment insert failed', status: 500 }
     }
 
-    const useLocalMedia = usesLocalTicketAttachmentFiles()
-    const preview_url = useLocalMedia
-      ? ticketAttachmentMediaPath(ticketId, row.id as string)
-      : await signedUrlFor(stored.storage_path)
+    const preview_url = await resolveTicketAttachmentPreviewUrl(
+      ticketId,
+      row.id as string,
+      stored.storage_path,
+    )
     attachment = {
       id: row.id as string,
       ticket_id: row.ticket_id as string,
@@ -781,10 +785,11 @@ export async function completeTicketAttachmentUpload(
     return { error: insErr?.message ?? 'Attachment insert failed', status: 500 }
   }
 
-  const useLocalMedia = usesLocalTicketAttachmentFiles()
-  const preview_url = useLocalMedia
-    ? ticketAttachmentMediaPath(ticketId, row.id as string)
-    : await signedUrlFor(storage_path)
+  const preview_url = await resolveTicketAttachmentPreviewUrl(
+    ticketId,
+    row.id as string,
+    storage_path,
+  )
   attachment = {
     id: row.id as string,
     ticket_id: row.ticket_id as string,

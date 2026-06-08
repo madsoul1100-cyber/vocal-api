@@ -336,6 +336,67 @@ export interface StoredAttachment {
   telegram_file_id: string
 }
 
+/** Write ticket attachment bytes to S3 (when configured) or local disk / Supabase. */
+export async function storeTicketAttachmentBuffer(args: {
+  buffer: Buffer
+  org_id: string
+  ticket_id: string
+  mime: string
+  source_id?: string
+}): Promise<StoredAttachment | null> {
+  const objectKey = buildPath({ org_id: args.org_id, ticket_id: args.ticket_id, mime: args.mime })
+
+  if (isS3Configured()) {
+    try {
+      await s3Client().send(
+        new PutObjectCommand({
+          Bucket: process.env.AWS_S3_BUCKET!,
+          Key: objectKey,
+          Body: args.buffer,
+          ContentType: args.mime,
+        }),
+      )
+      return {
+        storage_path: ticketAttachmentStorageRef(objectKey),
+        mime_type: args.mime,
+        size_bytes: args.buffer.length,
+        attachment_type: attachmentTypeFromMime(args.mime),
+        telegram_file_id: args.source_id ?? '',
+      }
+    } catch (err) {
+      console.error(
+        '[attachmentService] S3 upload failed',
+        JSON.stringify({ key: objectKey, error: err instanceof Error ? err.message : String(err) }),
+      )
+      return null
+    }
+  }
+
+  try {
+    const supabase = createSupabaseServiceClient()
+    const { error: upErr } = await supabase.storage
+      .from(BUCKET_NAME)
+      .upload(objectKey, args.buffer, { contentType: args.mime, upsert: false })
+    if (upErr) {
+      console.error('[attachmentService] storage upload failed', JSON.stringify({ key: objectKey, error: upErr.message }))
+      return null
+    }
+    return {
+      storage_path: objectKey,
+      mime_type: args.mime,
+      size_bytes: args.buffer.length,
+      attachment_type: attachmentTypeFromMime(args.mime),
+      telegram_file_id: args.source_id ?? '',
+    }
+  } catch (err) {
+    console.error(
+      '[attachmentService] storage upload exception',
+      JSON.stringify({ key: objectKey, error: err instanceof Error ? err.message : String(err) }),
+    )
+    return null
+  }
+}
+
 // ─── Path + MIME helpers ─────────────────────────────────────────────────────
 
 function attachmentTypeFromMime(mime: string | null | undefined): StoredAttachment['attachment_type'] {
@@ -509,33 +570,22 @@ export async function downloadFromTelegramAndStore(args: {
     }
     const mime = resolved
 
-    // 3. Upload to Supabase Storage.
-    const supabase = createSupabaseServiceClient()
-    const storagePath = buildPath({ org_id: args.org_id, ticket_id: args.ticket_id, mime })
-    const { error: upErr } = await supabase.storage
-      .from(BUCKET_NAME)
-      .upload(storagePath, buffer, {
-        contentType: mime,
-        upsert: false,
-      })
-    if (upErr) {
-      log('FAIL: Supabase Storage upload error', {
-        bucket: BUCKET_NAME,
-        path: storagePath,
-        mime,
-        size: buffer.length,
-        error: upErr.message,
-      })
+    const stored = await storeTicketAttachmentBuffer({
+      buffer,
+      org_id: args.org_id,
+      ticket_id: args.ticket_id,
+      mime,
+      source_id: args.file_id,
+    })
+    if (!stored) {
+      log('FAIL: storage upload error', { mime, size: buffer.length })
       return null
     }
 
-    log('OK: stored', { path: storagePath, size: buffer.length, mime })
+    log('OK: stored', { path: stored.storage_path, size: buffer.length, mime })
     return {
-      storage_path: storagePath,
-      mime_type: mime,
-      size_bytes: declaredSize ?? buffer.length,
-      attachment_type: attachmentTypeFromMime(mime),
-      telegram_file_id: args.file_id,
+      ...stored,
+      size_bytes: declaredSize ?? stored.size_bytes,
     }
   } catch (err) {
     log('FAIL: unexpected exception', { error: err instanceof Error ? err.message : String(err) })
@@ -590,24 +640,20 @@ export async function downloadFromTwilioAndStore(args: {
       return null
     }
 
-    const supabase = createSupabaseServiceClient()
-    const storagePath = buildPath({ org_id: args.org_id, ticket_id: args.ticket_id, mime: resolved })
-    const { error: upErr } = await supabase.storage
-      .from(BUCKET_NAME)
-      .upload(storagePath, buffer, { contentType: resolved, upsert: false })
-    if (upErr) {
-      log('FAIL: Supabase upload', { error: upErr.message })
+    const stored = await storeTicketAttachmentBuffer({
+      buffer,
+      org_id: args.org_id,
+      ticket_id: args.ticket_id,
+      mime: resolved,
+      source_id: args.message_sid,
+    })
+    if (!stored) {
+      log('FAIL: storage upload')
       return null
     }
 
-    log('OK: stored', { path: storagePath, size: buffer.length })
-    return {
-      storage_path: storagePath,
-      mime_type: resolved,
-      size_bytes: buffer.length,
-      attachment_type: attachmentTypeFromMime(resolved),
-      telegram_file_id: args.message_sid ?? '',
-    }
+    log('OK: stored', { path: stored.storage_path, size: buffer.length })
+    return stored
   } catch (err) {
     log('FAIL: exception', { error: err instanceof Error ? err.message : String(err) })
     return null
@@ -634,45 +680,19 @@ export async function uploadWorkerAttachment(args: {
     }))
   }
   try {
-    const objectKey = buildPath({ org_id: args.org_id, ticket_id: args.ticket_id, mime: args.mime })
     const buffer = args.bytes instanceof Buffer ? args.bytes : Buffer.from(args.bytes)
-
-    if (isS3Configured()) {
-      await s3Client().send(
-        new PutObjectCommand({
-          Bucket: process.env.AWS_S3_BUCKET!,
-          Key: objectKey,
-          Body: buffer,
-          ContentType: args.mime,
-        }),
-      )
-      const storage_path = ticketAttachmentStorageRef(objectKey)
-      log('OK: uploaded to S3', { path: storage_path, size: buffer.length })
-      return {
-        storage_path,
-        mime_type: args.mime,
-        size_bytes: buffer.length,
-        attachment_type: attachmentTypeFromMime(args.mime),
-        telegram_file_id: '',
-      }
-    }
-
-    const supabase = createSupabaseServiceClient()
-    const { error: upErr } = await supabase.storage
-      .from(BUCKET_NAME)
-      .upload(objectKey, buffer, { contentType: args.mime, upsert: false })
-    if (upErr) {
-      log('FAIL: upload error', { error: upErr.message, mime: args.mime, size: buffer.length })
+    const stored = await storeTicketAttachmentBuffer({
+      buffer,
+      org_id: args.org_id,
+      ticket_id: args.ticket_id,
+      mime: args.mime,
+    })
+    if (!stored) {
+      log('FAIL: upload error', { mime: args.mime, size: buffer.length })
       return null
     }
-    log('OK: uploaded', { path: objectKey, size: buffer.length })
-    return {
-      storage_path: objectKey,
-      mime_type: args.mime,
-      size_bytes: buffer.length,
-      attachment_type: attachmentTypeFromMime(args.mime),
-      telegram_file_id: '',
-    }
+    log('OK: uploaded', { path: stored.storage_path, size: buffer.length })
+    return stored
   } catch (err) {
     log('FAIL: exception', { error: err instanceof Error ? err.message : String(err) })
     return null
@@ -680,6 +700,26 @@ export async function uploadWorkerAttachment(args: {
 }
 
 // ─── Signed URL for previews ─────────────────────────────────────────────────
+
+/**
+ * Resolves a browser-loadable preview URL: S3/Supabase signed GET, or the
+ * vocal-api media route when the file lives on local disk (RDS without S3).
+ */
+export async function resolveTicketAttachmentPreviewUrl(
+  ticketId: string,
+  attachmentId: string,
+  storagePath: string,
+): Promise<string | null> {
+  if (storagePath.startsWith('telegram:') || storagePath.startsWith('twilio:')) return null
+
+  const signed = await signedUrlFor(storagePath)
+  if (signed) return signed
+
+  const { key } = parseTicketAttachmentStorageRef(storagePath)
+  const onDisk = await resolveExistingLocalObjectPath(BUCKET_NAME, key)
+  if (onDisk) return ticketAttachmentMediaPath(ticketId, attachmentId)
+  return null
+}
 
 /**
  * Generates a short-lived signed URL for reading an attachment. Used by
