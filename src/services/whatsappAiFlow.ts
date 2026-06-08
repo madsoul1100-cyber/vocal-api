@@ -293,6 +293,74 @@ function replyLang(ctx: AiFlowContext, userText?: string): WhatsAppLang {
   return resolveReplyLanguage(userText ?? ctx.msg.text ?? '', ctx.meta.preferredLanguage)
 }
 
+async function persistTicketMediaRows(
+  ctx: AiFlowContext,
+  ticketId: string,
+  mediaList: DraftMedia[],
+): Promise<number> {
+  if (!mediaList.length) return 0
+  const rows = await Promise.all(
+    mediaList.map(async (m) => {
+      const isUrl = m.file_id.startsWith('http')
+      let stored = null
+      if (isUrl) {
+        stored = await downloadFromTwilioAndStore({
+          media_url: m.file_id,
+          org_id: ctx.organizationId,
+          ticket_id: ticketId,
+          mime_hint: m.mime_type ?? null,
+          message_sid: m.message_sid ?? undefined,
+        })
+      }
+      return {
+        ticket_id: ticketId,
+        file_name: m.message_sid ?? m.file_id.slice(0, 64),
+        storage_path: stored?.storage_path ?? `twilio:${m.message_sid ?? m.file_id}`,
+        mime_type: stored?.mime_type ?? m.mime_type ?? null,
+        file_size_bytes: stored?.size_bytes ?? null,
+        attachment_type:
+          stored?.attachment_type ??
+          (m.type === 'voice'
+            ? 'audio'
+            : m.type === 'image'
+              ? 'image'
+              : m.type === 'video'
+                ? 'video'
+                : m.type === 'document'
+                  ? 'document'
+                  : 'other'),
+      }
+    }),
+  )
+  const { error } = await ctx.supabase.from('ticket_attachments').insert(rows)
+  if (error) {
+    waLogError('ai.media', 'attachment insert failed', error, { ticketId })
+    return 0
+  }
+  waLog('ai.media', 'attachments saved', { ticketId, count: rows.length })
+  return rows.length
+}
+
+/** Attach WhatsApp media to an already-filed ticket (post_ticket follow-up). */
+async function attachMediaToTicketByNumber(
+  ctx: AiFlowContext,
+  ticketNumber: string,
+): Promise<{ ok: boolean; ticketId?: string }> {
+  if (!ctx.msg.media) return { ok: false }
+  const { data: ticket, error } = await ctx.supabase
+    .from('tickets')
+    .select('id')
+    .eq('organization_id', ctx.organizationId)
+    .eq('ticket_number', ticketNumber)
+    .maybeSingle()
+  if (error || !ticket?.id) {
+    waLogError('ai.media', 'ticket lookup for attachment failed', error, { ticketNumber })
+    return { ok: false }
+  }
+  const saved = await persistTicketMediaRows(ctx, ticket.id as string, [ctx.msg.media])
+  return { ok: saved > 0, ticketId: ticket.id as string }
+}
+
 async function handleTicketStatusRequest(
   ctx: AiFlowContext,
   preferredTicket: string | null,
@@ -318,6 +386,8 @@ async function handleTicketStatusRequest(
 }
 
 async function finalizeTicket(ctx: AiFlowContext, aiDraft: AiDraftState) {
+  aiDraft = mergeAiDraft(aiDraft, {}, ctx)
+
   const issueText =
     (aiDraft.issue_text_native ?? aiDraft.issue_text ?? '').trim() ||
     (ctx.msg.text ?? '').trim()
@@ -393,36 +463,7 @@ async function finalizeTicket(ctx: AiFlowContext, aiDraft: AiDraftState) {
 
   if (aiDraft.media?.length) {
     try {
-      const rows = await Promise.all(
-        aiDraft.media.map(async (m) => {
-          const isUrl = m.file_id.startsWith('http')
-          let stored = null
-          if (isUrl) {
-            stored = await downloadFromTwilioAndStore({
-              media_url: m.file_id,
-              org_id: ctx.organizationId,
-              ticket_id: result.ticketId,
-              mime_hint: m.mime_type ?? null,
-              message_sid: m.message_sid ?? undefined,
-            })
-          }
-          return {
-            ticket_id: result.ticketId,
-            file_name: m.message_sid ?? m.file_id.slice(0, 64),
-            storage_path: stored?.storage_path ?? `twilio:${m.message_sid ?? m.file_id}`,
-            mime_type: stored?.mime_type ?? m.mime_type ?? null,
-            file_size_bytes: stored?.size_bytes ?? null,
-            attachment_type:
-              stored?.attachment_type ??
-              (m.type === 'voice' ? 'audio' :
-               m.type === 'image' ? 'image' :
-               m.type === 'video' ? 'video' :
-               m.type === 'document' ? 'document' : 'other'),
-          }
-        }),
-      )
-      await ctx.supabase.from('ticket_attachments').insert(rows)
-      waLog('ai.media', 'attachments saved', { ticketId: result.ticketId, count: rows.length })
+      await persistTicketMediaRows(ctx, result.ticketId, aiDraft.media)
     } catch (err) {
       waLogError('ai.media', 'attachment upload failed', err, { ticketId: result.ticketId })
     }
@@ -532,18 +573,14 @@ export async function handleInboundMessageAi(ctx: AiFlowContext): Promise<void> 
     return
   }
 
-  if (ctx.currentStep === 'post_ticket' && (looksLikeStatusFollowUp(text) || ctx.msg.media)) {
-    await handleTicketStatusRequest(ctx, ctx.meta.last_ticket_number ?? null, text)
-    return
-  }
-
   const existingDraft = ctx.meta.aiDraft ?? {}
   const langEarly = replyLang(ctx, text)
 
   if (ctx.msg.media) {
     const issueM = (existingDraft.issue_text_native ?? existingDraft.issue_text ?? '').trim()
     const locationM = (existingDraft.location_text ?? '').trim()
-    if (issueM && locationM && !isVagueLocation(locationM)) {
+
+    if (issueM && locationM && !isVagueLocation(locationM) && ctx.currentStep === 'ai_intake') {
       const aiDraft = mergeAiDraft(existingDraft, {}, ctx)
       const c = intakeCopy(langEarly)
       const assistantText = `${c.photoReceivedAck}\n\n${c.confirmSubmit(issueM, locationM)}`
@@ -562,24 +599,39 @@ export async function handleInboundMessageAi(ctx: AiFlowContext): Promise<void> 
       })
       return
     }
+
+    const ticketNumber = ctx.meta.last_ticket_number
+    if (ctx.currentStep === 'post_ticket' && ticketNumber) {
+      const attached = await attachMediaToTicketByNumber(ctx, ticketNumber)
+      const c = intakeCopy(langEarly)
+      const msg = attached.ok
+        ? c.photoAttachedToTicket(ticketNumber)
+        : 'Sorry — I could not save that photo on your ticket. Please try sending it again.'
+      await sendWhatsAppMessage(ctx.msg.chat_id, msg)
+      return
+    }
+  }
+
+  if (ctx.currentStep === 'post_ticket' && looksLikeStatusFollowUp(text)) {
+    await handleTicketStatusRequest(ctx, ctx.meta.last_ticket_number ?? null, text)
+    return
   }
 
   if (words.isYes(text)) {
-    if (
-      draftReadyForConfirmation(existingDraft, Boolean(ctx.msg.media))
-    ) {
-      await finalizeTicket(ctx, existingDraft)
+    const mergedForYes = mergeAiDraft(existingDraft, {}, ctx)
+    if (draftReadyForConfirmation(mergedForYes, Boolean(ctx.msg.media))) {
+      await finalizeTicket(ctx, mergedForYes)
       return
     }
     const gateLang = replyLang(ctx, text)
     const gated = applyIntakeGates({
-      draft: existingDraft,
+      draft: mergedForYes,
       modelReadyToFile: true,
       lang: gateLang,
       hasMedia: Boolean(ctx.msg.media),
       userText: text,
     })
-    const merged = { ...existingDraft, ...gated.draftPatch }
+    const merged = { ...mergedForYes, ...gated.draftPatch }
     await sendWhatsAppMessage(ctx.msg.chat_id, gated.replyOverride ?? intakeCopy(gateLang).askIssue)
     await persistMeta(ctx, 'ai_intake', {
       ...ctx.meta,

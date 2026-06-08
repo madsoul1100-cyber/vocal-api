@@ -143,6 +143,8 @@ const INTAKE_COPY = {
       'Yes — please send your photo(s) here on WhatsApp now. I will attach them to your report. When you are done sending, reply *yes* to register (or *skip* if you have no photo).',
     photoReceivedAck:
       'Thanks — got your photo. That will help the ground team.',
+    photoAttachedToTicket: (ticketNumber: string) =>
+      `Thanks — your photo is now saved on ticket *${ticketNumber}*. The ground team can use it.`,
     askDuration: (issuePreview: string) =>
       `Thanks for explaining. About "${issuePreview.slice(0, 80)}…" — how long has this been going on?`,
   },
@@ -170,6 +172,8 @@ const INTAKE_COPY = {
     askPhotoNow:
       'हाँ — अभी अपनी फोटो यहीं WhatsApp पर भेज दीजिए, मैं रिपोर्ट में जोड़ दूँगा/दूँगी। भेजने के बाद *yes* लिखें (या *skip* अगर फोटो नहीं है)।',
     photoReceivedAck: 'धन्यवाद — फोटो मिल गई। ग्राउंड टीम को इससे मदद मिलेगी।',
+    photoAttachedToTicket: (ticketNumber: string) =>
+      `धन्यवाद — फोटो टिकट *${ticketNumber}* में सेव हो गई। ग्राउंड टीम इसे देख सकती है।`,
     askDuration: (issuePreview: string) =>
       `"${issuePreview.slice(0, 80)}…" — यह कब से चल रहा है?`,
   },
@@ -197,6 +201,8 @@ const INTAKE_COPY = {
     askPhotoNow:
       'అవును — ఇప్పుడు మీ ఫోటో(లు) ఇక్కడే WhatsApp లో పంపండి. నేను రిపోర్ట్‌లో జోడిస్తాను. పంపిన తర్వాత *yes* రాయండి (లేకపోతే *skip*).',
     photoReceivedAck: 'ధన్యవాదాలు — ఫోటో వచ్చింది. గ్రౌండ్ బృందానికి ఇది సహాయపడుతుంది.',
+    photoAttachedToTicket: (ticketNumber: string) =>
+      `ధన్యవాదాలు — ఫోటో టికెట్ *${ticketNumber}* లో సేవ్ అయింది. గ్రౌండ్ బృందం చూడగలదు.`,
     askDuration: (issuePreview: string) =>
       `"${issuePreview.slice(0, 80)}…" — ఇది ఎప్పటి నుంచి ఉంది?`,
   },
@@ -224,6 +230,8 @@ const INTAKE_COPY = {
     askPhotoNow:
       'Haan — abhi apni photo(s) yahin WhatsApp par bhej do, main report mein attach kar dunga. Bhejne ke baad *yes* likho (ya *skip* agar photo nahi hai).',
     photoReceivedAck: 'Shukriya — photo mil gayi. Ground team ko isse help milegi.',
+    photoAttachedToTicket: (ticketNumber: string) =>
+      `Shukriya — photo ticket *${ticketNumber}* par save ho gayi. Ground team dekh sakti hai.`,
     askDuration: (issuePreview: string) =>
       `"${issuePreview.slice(0, 80)}…" — yeh kab se chal raha hai?`,
   },
@@ -251,6 +259,8 @@ const INTAKE_COPY = {
     askPhotoNow:
       'Avunu — ippudu mee photo(s) ikkade WhatsApp lo pampandi. Report lo attach chestanu. Pampina tarvata *yes* rayandi (leda *skip*).',
     photoReceivedAck: 'Dhanyavadalu — photo vachindi. Ground team ki help avtundi.',
+    photoAttachedToTicket: (ticketNumber: string) =>
+      `Dhanyavadalu — photo ticket *${ticketNumber}* lo save ayyindi. Ground team chudagaladu.`,
     askDuration: (issuePreview: string) =>
       `"${issuePreview.slice(0, 80)}…" — eppati nunchi idi undi?`,
   },
