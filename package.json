@@ -14,7 +14,12 @@
     "seed:passwords": "tsx scripts/seed-passwords.ts",
     "seed:staff-profile-placeholder": "tsx scripts/seed-staff-profile-placeholder.ts",
     "seed:directory-categories": "tsx scripts/seed-directory-categories.ts",
+    "convert:territories": "node scripts/xlsx-to-territories-json.mjs",
+    "build:territories:lgd": "python3 scripts/build-telangana-from-lgd.py",
+    "import:territories:full": "python3 scripts/build-telangana-from-lgd.py && tsx scripts/import-territories.ts data/territories/telangana-full.json",
     "seed:territories": "tsx scripts/import-territories.ts",
+    "audit:territories": "tsx scripts/audit-territories.ts",
+    "cleanup:territories": "tsx scripts/deactivate-junk-territories.ts",
     "generate:ai-suggestion": "tsx scripts/generate-ai-suggestion.ts"
   },
   "dependencies": {
@@ -45,6 +50,7 @@
     "@types/ws": "^8.18.1",
     "tsc-alias": "^1.8.17",
     "tsx": "^4.19.2",
-    "typescript": "^5"
+    "typescript": "^5",
+    "xlsx": "^0.18.5"
   }
 }

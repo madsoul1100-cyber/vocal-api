@@ -11,6 +11,7 @@ import {
 import type { Severity } from '@/types/database.js'
 import { generateTicketSuggestions, type AiSuggestionResult } from '@/services/aiService.js'
 import { applyCriticalSeveritySideEffects } from '@/services/ticketService.js'
+import { resolveAndApplyTicketTerritory } from '@/services/territoryResolveService.js'
 
 const FALLBACK_CATEGORY = 'Other / Uncategorized'
 
@@ -237,6 +238,13 @@ export async function enrichTicketFromIssueText(args: {
     severity = ensured.severity
     if (ensured.applied) fieldsApplied.push('severity')
   }
+
+  const territory = await resolveAndApplyTicketTerritory({
+    ticketId: args.ticketId,
+    organizationId: args.organizationId,
+    issueText: text,
+  })
+  if (territory.applied) fieldsApplied.push('territory_id')
 
   return { ok: applied.suggestionInserted, fieldsApplied, severity }
 }

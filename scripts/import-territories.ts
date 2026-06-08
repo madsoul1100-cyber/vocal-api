@@ -205,10 +205,36 @@ async function main() {
   invalidateTerritoryTreeCache(ORG_ID)
   const repaired = await repairTelanganaDistrictParents(ORG_ID)
 
+  const seedKeys = new Set(doc.territories.map((n) => n.key))
+  const dbOnlyCount = (existingTerritories ?? []).filter((t) => {
+    const meta = (t.metadata_json ?? {}) as { source_key?: string }
+    return !meta.source_key || !seedKeys.has(meta.source_key)
+  }).length
+
   console.log(
-    `\nDone. inserted=${inserted} updated=${updated} skipped(no parent)=${skippedNoParent} ` +
-      `repaired_district_parents=${repaired} total=${doc.territories.length}`,
+    `\nDone. seed_nodes=${doc.territories.length} inserted=${inserted} updated=${updated} ` +
+      `skipped(no parent)=${skippedNoParent} repaired_district_parents=${repaired}`,
   )
+  if (inserted === 0 && updated === doc.territories.length) {
+    console.log(
+      '  All seed rows already exist (matched by metadata_json.source_key) — refreshed in place, nothing new to insert.',
+    )
+  }
+  if (dbOnlyCount > 0) {
+    console.log(
+      `  DB has ${dbOnlyCount} territory row(s) not in this seed file (e.g. manual/junk entries). ` +
+        'They are left unchanged. Run npm run audit:territories to list them.',
+    )
+  }
+  if (doc.territories.length < 200) {
+    console.log(
+      '\n  Note: this seed is a small sample (~68 nodes). Full Telangana needs ~589 mandals + ~150 GHMC wards.',
+    )
+    console.log(
+      '  Your Excel only has that sample — convert+seed cannot add rows that are not in the workbook.',
+    )
+    console.log('  For full data: bulk-load LGD CSV (see Excel sheet 12_data_sources), then convert+seed again.')
+  }
   if (skippedNoParent > 0) {
     console.warn('Some nodes were skipped because their parent was missing. Re-run to retry.')
   }
