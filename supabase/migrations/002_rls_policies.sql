@@ -8,6 +8,19 @@
 --   - Policies use auth.uid() mapped to users.clerk_user_id
 -- =============================================================================
 
+-- Supabase ships auth.uid(); plain Postgres (RDS / pgAdmin) needs this stub.
+-- vocal-api connects as the DB owner and bypasses RLS; policies matter only for
+-- direct Supabase client access.
+create schema if not exists auth;
+
+create or replace function auth.uid()
+returns uuid
+language sql
+stable
+as $$
+  select nullif(current_setting('request.jwt.claim.sub', true), '')::uuid;
+$$;
+
 -- Helper function: get current user's internal record
 create or replace function current_user_record()
 returns users language sql security definer stable as $$

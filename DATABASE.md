@@ -15,14 +15,38 @@ Also set `JWT_SECRET` (min 32 characters) and `ORG_ID`.
 
 ## 2. Run schema migrations
 
+### Fresh empty database (all tables in one step)
+
 ```bash
 cd vocal-api
 npm install
-npm run db:check      # test connection
+npm run db:check        # test connection
+npm run db:build-schema # build supabase/schema.sql from migrations (optional; committed file)
+npm run db:setup        # applies full schema.sql, records all migrations
+```
+
+Or apply the SQL file directly in pgAdmin or psql:
+
+```bash
+psql "$DATABASE_URL" -f supabase/schema.sql
+```
+
+`schema.sql` includes a stub `auth.uid()` function so RLS policies work on plain RDS Postgres (not only Supabase). vocal-api connects as the DB owner and bypasses RLS; the policies are for legacy Supabase client access.
+
+### Incremental migrations (existing workflow)
+
+```bash
 npm run db:migrate    # applies supabase/migrations/*.sql (skips already recorded)
 
 # One migration only (e.g. DB already has schema but schema_migrations is empty):
 npm run db:migrate:one -- 012_ticket_closure_review.sql
+```
+
+### Database already has tables but schema_migrations is incomplete
+
+```bash
+npm run db:setup -- --migrate   # apply only pending migration files
+npm run db:setup -- --sync      # mark all migrations applied without running SQL
 ```
 
 ## 3. Migrate data from old Supabase

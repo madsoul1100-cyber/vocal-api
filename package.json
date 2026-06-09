@@ -10,6 +10,8 @@
     "typecheck": "tsc --noEmit",
     "db:migrate": "tsx scripts/db-migrate.ts",
     "db:migrate:one": "tsx scripts/db-migrate.ts",
+    "db:setup": "tsx scripts/db-setup-fresh.ts",
+    "db:build-schema": "tsx scripts/build-schema-sql.ts",
     "db:check": "tsx scripts/db-check.ts",
     "seed:passwords": "tsx scripts/seed-passwords.ts",
     "seed:staff-profile-placeholder": "tsx scripts/seed-staff-profile-placeholder.ts",
