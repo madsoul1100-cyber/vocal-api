@@ -1,8 +1,12 @@
 import { SESClient, SendEmailCommand } from '@aws-sdk/client-ses'
 import type { OtpEmailProvider, OtpSendPayload } from '@/lib/otp/types.js'
 
+function sesRegion(): string | null {
+  return process.env.AWS_SES_REGION?.trim() || process.env.AWS_REGION?.trim() || null
+}
+
 function sesClient(): SESClient | null {
-  const region = process.env.AWS_REGION?.trim()
+  const region = sesRegion()
   if (!region) return null
   return new SESClient({
     region,
@@ -18,7 +22,7 @@ function sesClient(): SESClient | null {
 
 function isConfigured(): boolean {
   const from = process.env.AWS_SES_FROM_EMAIL?.trim().toLowerCase() ?? ''
-  if (!from || !process.env.AWS_REGION?.trim()) return false
+  if (!from || !sesRegion()) return false
   // Placeholder from .env.example — treat as not set up
   if (from.includes('yourdomain.com') || from === 'noreply@example.com') return false
   return true
@@ -41,7 +45,7 @@ export const sesEmailProvider: OtpEmailProvider = {
       return {
         ok: false,
         provider: 'aws-ses',
-        error: 'AWS SES not configured (AWS_REGION, AWS_SES_FROM_EMAIL)',
+        error: 'AWS SES not configured (AWS_SES_REGION or AWS_REGION, AWS_SES_FROM_EMAIL)',
       }
     }
 
