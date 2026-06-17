@@ -1,7 +1,9 @@
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
 import { isPostgresMode, dbQuery } from '@/lib/db.js'
 import {
-  findNearestAvailableWorker,
+  advanceTerritoryRoundRobinCursor,
+  directAssignTicketToWorker,
+  findTerritoryOwner,
   offerTicketToWorker,
   type CandidateWorker,
 } from '@/services/assignmentService.js'
@@ -413,32 +415,39 @@ export async function autoAssignTicket(
   const ticketCheck = await assertTicketInOrg(ticketId, user.organization_id)
   if (!ticketCheck.ok) return { ok: false, status: ticketCheck.status, error: ticketCheck.error }
 
-  const candidate = await findNearestAvailableWorker(ticketId)
-  if (!candidate) {
+  const match = await findTerritoryOwner(ticketId)
+  if (!match) {
     return {
       ok: false,
       status: 409,
-      error: "No eligible workers in this ticket's territory.",
+      error: "No worker mapped to this ticket's territory hierarchy.",
     }
   }
 
-  const offer = await offerTicketToWorker({
+  const direct = await directAssignTicketToWorker({
     ticketId,
-    workerId: candidate.id,
+    workerId: match.worker.id,
     assignedByUserId: user.id,
-    reason: 'Auto-assigned to nearest available worker',
+    reason: 'Auto-assigned to territory worker by central support',
+    matchedTerritoryId: match.matchedTerritoryId,
   })
 
-  if (!offer.ok) {
-    const mapped = mapOfferError(offer.error)
+  if (!direct.ok) {
+    const mapped = mapOfferError(direct.error)
     return { ok: false, status: mapped.status, error: mapped.message }
   }
 
+  await advanceTerritoryRoundRobinCursor(
+    user.organization_id,
+    match.matchedTerritoryId,
+    match.worker.id,
+  )
+
   return {
     ok: true,
-    assignment_id: offer.assignmentId,
-    expires_at: offer.expiresAt,
-    worker: candidate,
+    assignment_id: direct.assignmentId,
+    expires_at: new Date().toISOString(),
+    worker: match.worker,
   }
 }
 

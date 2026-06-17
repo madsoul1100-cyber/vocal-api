@@ -493,6 +493,9 @@ async function finalizeTicket(ctx: AiFlowContext, aiDraft: AiDraftState) {
   await whatsappAutoOfferWorker({
     ticketId: result.ticketId,
     ticketNumber: result.ticketNumber,
+    organizationId: ctx.organizationId,
+    locationText: locationText,
+    issueText: issueText,
     intake: 'ai',
   })
 

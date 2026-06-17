@@ -70,7 +70,7 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 | `GET /v2/tickets/:id` | Ticket detail; `classification`, `sla`, `citizen_identity`, `status_history`; `current_assignment`, `assignable_worker_count`, `can_assign`, `can_respond_to_offer`; `has_notes_or_attachments` → skip `GET .../attachments` when `false` |
 | `GET /v2/tickets/:id/assignable-workers` | Paginated assign dropdown (`super_admin` / `central_support`); `limit`/`offset`/`keyword`/`territory_id`; `in_ticket_territory=true` filters to ticket territory |
 | `POST /v2/tickets/assign` | Offer ticket to worker (`super_admin` / `central_support`); body `{ ticket_id, worker_id }` → `{ ok, assignment_id, expires_at }` |
-| `POST /v2/tickets/auto-assign` | Auto-pick nearest eligible worker; body `{ ticket_id }` → `{ ok, assignment_id, expires_at, worker }` or `409` if none |
+| `POST /v2/tickets/auto-assign` | Territory-hierarchy auto-pick + direct assign (`super_admin` / `central_support`); round-robin when multiple workers share a level |
 | `GET /v2/tickets/status-options` | Status picker catalog for current role (`groups`, `sub_statuses_requiring_worker`, `worker_allowed_sub_statuses`) |
 | `POST /v2/tickets/status` | Update sub-status; body `{ ticket_id, sub_status }`. For `assigned_awaiting_acceptance` also send `worker_id` (same as assign). Close requires `citizen_contacted` in history + closure note (422) |
 | `POST /v2/tickets/request-closure` | Worker soft-close: body `{ ticket_id, note }` → `pending_closure_approval` + closure note; `stage` stays non-`closed` until CS approves via `/status` |

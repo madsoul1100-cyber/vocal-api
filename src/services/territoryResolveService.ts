@@ -137,6 +137,8 @@ export async function resolveAndApplyTicketTerritory(args: {
   organizationId: string
   locationText?: string | null
   issueText?: string | null
+  /** Re-resolve from location even when territory_id is already set. */
+  force?: boolean
 }): Promise<TerritoryMatchResult & { applied: boolean }> {
   const supabase = createSupabaseServiceClient()
   const { data: ticket } = await supabase
@@ -145,7 +147,7 @@ export async function resolveAndApplyTicketTerritory(args: {
     .eq('id', args.ticketId)
     .maybeSingle()
 
-  if (ticket?.territory_id) {
+  if (ticket?.territory_id && !args.force) {
     return {
       territoryId: ticket.territory_id as string,
       territoryName: null,

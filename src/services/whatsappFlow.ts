@@ -420,6 +420,9 @@ async function fileTicket(ctx: FlowContext) {
   await whatsappAutoOfferWorker({
     ticketId: result.ticketId,
     ticketNumber: result.ticketNumber,
+    organizationId: ctx.organizationId,
+    locationText: draft.location_text,
+    issueText: draft.issue_text,
     intake: 'script',
   })
 }

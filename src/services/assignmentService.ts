@@ -15,11 +15,13 @@
  */
 
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
+import { isPostgresMode, dbQuery } from '@/lib/db.js'
 import {
   buildTerritoryAncestorChain,
   loadTerritoryParentMap,
   workerTerritoryCoversTicket,
 } from '@/services/territoryService.js'
+import { resolveAndApplyTicketTerritory } from '@/services/territoryResolveService.js'
 import {  applyDevOfferWorkerPin,
   isDevOfferWorkerPinEnabled,
   resolveDevPinnedWorkerId,
@@ -57,6 +59,73 @@ export interface CandidateWorker {
   full_name: string
   distance_km: number | null
   active_ticket_count: number
+}
+
+export interface TerritoryOwnerMatch {
+  worker: CandidateWorker
+  matchedTerritoryId: string
+}
+
+export type TerritoryAutoAssignResult =
+  | { routed: 'direct'; workerId: string; matchedTerritoryId: string }
+  | { routed: 'none'; reason: 'no_territory' | 'no_worker' | 'assign_failed' }
+
+function pickNextWorkerRoundRobin(sortedWorkerIds: string[], lastWorkerId: string | null): string {
+  if (sortedWorkerIds.length === 0) {
+    throw new Error('pickNextWorkerRoundRobin: empty worker list')
+  }
+  if (sortedWorkerIds.length === 1) return sortedWorkerIds[0]!
+  if (!lastWorkerId || !sortedWorkerIds.includes(lastWorkerId)) return sortedWorkerIds[0]!
+  const idx = sortedWorkerIds.indexOf(lastWorkerId)
+  return sortedWorkerIds[(idx + 1) % sortedWorkerIds.length]!
+}
+
+async function getTerritoryAssignmentCursor(
+  organizationId: string,
+  territoryId: string,
+): Promise<string | null> {
+  if (isPostgresMode()) {
+    const res = await dbQuery<{ last_worker_id: string | null }>(
+      `SELECT last_worker_id FROM territory_assignment_cursors
+       WHERE organization_id = $1 AND territory_id = $2`,
+      [organizationId, territoryId],
+    )
+    return res.rows[0]?.last_worker_id ?? null
+  }
+
+  const supabase = createSupabaseServiceClient()
+  const { data } = await supabase
+    .from('territory_assignment_cursors')
+    .select('last_worker_id')
+    .eq('organization_id', organizationId)
+    .eq('territory_id', territoryId)
+    .maybeSingle()
+  return (data?.last_worker_id as string | null) ?? null
+}
+
+export async function advanceTerritoryRoundRobinCursor(
+  organizationId: string,
+  territoryId: string,
+  workerId: string,
+): Promise<void> {
+  if (isPostgresMode()) {
+    await dbQuery(
+      `INSERT INTO territory_assignment_cursors (organization_id, territory_id, last_worker_id, updated_at)
+       VALUES ($1, $2, $3, now())
+       ON CONFLICT (organization_id, territory_id)
+       DO UPDATE SET last_worker_id = EXCLUDED.last_worker_id, updated_at = now()`,
+      [organizationId, territoryId, workerId],
+    )
+    return
+  }
+
+  const supabase = createSupabaseServiceClient()
+  await supabase.from('territory_assignment_cursors').upsert({
+    organization_id: organizationId,
+    territory_id: territoryId,
+    last_worker_id: workerId,
+    updated_at: new Date().toISOString(),
+  })
 }
 
 /**
@@ -204,20 +273,13 @@ export async function findNearestAvailableWorker(ticketId: string): Promise<Cand
 }
 
 /**
- * Resolve the worker who "owns" the ticket's territory, walking UP the
- * territory hierarchy.
+ * Resolve the worker mapped to the ticket's territory hierarchy.
  *
- * Workers are linked to territories via user_territories. A ticket may be
- * tagged at a deep level (e.g. a Ward), while the responsible worker is
- * assigned at a higher level (e.g. the Mandal or District). We therefore walk
- * the parent chain starting from the ticket's territory and return the worker
- * mapped to the CLOSEST level. When multiple workers cover the same level, we
- * pick the least-loaded one (fewest active tickets) for fair distribution.
- *
- * Returns null when the ticket has no territory or no worker covers any
- * ancestor — callers should then fall back to the offer/nearest flow.
+ * Walks from the ticket's territory up through parents (ward → mandal → district → …).
+ * At each level, finds workers whose user_territories row matches that exact node.
+ * When multiple workers share a level, round-robin picks the next worker in rotation.
  */
-export async function findTerritoryOwner(ticketId: string): Promise<CandidateWorker | null> {
+export async function findTerritoryOwner(ticketId: string): Promise<TerritoryOwnerMatch | null> {
   const supabase = createSupabaseServiceClient()
 
   const { data: ticket } = await supabase
@@ -232,7 +294,6 @@ export async function findTerritoryOwner(ticketId: string): Promise<CandidateWor
 
   const excluded = new Set<string>((ticket.offered_worker_ids as string[] | null) ?? [])
 
-  // Active ground workers in the org with their territory memberships.
   const { data: workers } = await supabase
     .from('users')
     .select(`id, full_name, user_territories(territory_id)`)
@@ -241,36 +302,44 @@ export async function findTerritoryOwner(ticketId: string): Promise<CandidateWor
     .eq('active', true)
   if (!workers || workers.length === 0) return null
 
-  // Load active ticket counts for fair distribution.
-  const { data: activeCounts } = await supabase
-    .from('tickets')
-    .select('owner_user_id')
-    .eq('organization_id', ticket.organization_id)
-    .neq('stage', 'closed')
-    .not('owner_user_id', 'is', null)
-  const loadMap = new Map<string, number>()
-  for (const t of activeCounts ?? []) {
-    if (t.owner_user_id) loadMap.set(t.owner_user_id, (loadMap.get(t.owner_user_id) ?? 0) + 1)
+  if (isDevOfferWorkerPinEnabled()) {
+    const pinId = await resolveDevPinnedWorkerId(ticket.organization_id)
+    if (pinId) {
+      const pinned = (workers as { id: string; full_name: string }[]).find((w) => w.id === pinId)
+      if (pinned) {
+        return {
+          worker: {
+            id: pinned.id,
+            full_name: pinned.full_name,
+            distance_km: null,
+            active_ticket_count: 0,
+          },
+          matchedTerritoryId: ticket.territory_id as string,
+        }
+      }
+      return null
+    }
   }
 
-  // Walk the chain closest-first; return the least-loaded worker at the first
-  // level that has any eligible worker.
   for (const territoryId of chain) {
     const matches: CandidateWorker[] = []
-    for (const w of workers as any[]) {
+    for (const w of workers as Array<{ id: string; full_name: string; user_territories?: Array<{ territory_id: string }> | null }>) {
       if (excluded.has(w.id)) continue
-      const memberships = (w.user_territories ?? []) as Array<{ territory_id: string }>
+      const memberships = w.user_territories ?? []
       if (!memberships.some((m) => m.territory_id === territoryId)) continue
       matches.push({
         id: w.id,
         full_name: w.full_name,
         distance_km: null,
-        active_ticket_count: loadMap.get(w.id) ?? 0,
+        active_ticket_count: 0,
       })
     }
     if (matches.length > 0) {
-      matches.sort((a, b) => a.active_ticket_count - b.active_ticket_count)
-      return matches[0]!
+      const sortedIds = matches.map((m) => m.id).sort()
+      const lastId = await getTerritoryAssignmentCursor(ticket.organization_id, territoryId)
+      const pickedId = pickNextWorkerRoundRobin(sortedIds, lastId)
+      const picked = matches.find((m) => m.id === pickedId)!
+      return { worker: picked, matchedTerritoryId: territoryId }
     }
   }
 
@@ -437,6 +506,9 @@ export async function directAssignTicketToWorker(args: {
   workerId: string
   assignedByUserId?: string | null
   reason?: string
+  /** Intake: assign while CS triage continues (`needs_triage` stays true). */
+  parallelWithTriage?: boolean
+  matchedTerritoryId?: string | null
 }): Promise<{ ok: true; assignmentId: string } | { ok: false; error: string }> {
   const supabase = createSupabaseServiceClient()
 
@@ -447,8 +519,10 @@ export async function directAssignTicketToWorker(args: {
     .single()
   if (!ticket) return { ok: false, error: 'ticket_not_found' }
 
-  const triageCheck = await assertTicketReadyForWorkerAssignment(args.ticketId)
-  if (!triageCheck.ok) return { ok: false, error: TRIAGE_REQUIRED_ERROR }
+  if (!args.parallelWithTriage) {
+    const triageCheck = await assertTicketReadyForWorkerAssignment(args.ticketId)
+    if (!triageCheck.ok) return { ok: false, error: TRIAGE_REQUIRED_ERROR }
+  }
 
   const now = new Date()
   const nowIso = now.toISOString()
@@ -488,23 +562,24 @@ export async function directAssignTicketToWorker(args: {
   const offeredList = new Set<string>(((ticket.offered_worker_ids as string[] | null) ?? []))
   offeredList.add(args.workerId)
 
-  await supabase
-    .from('tickets')
-    .update({
-      owner_user_id: args.workerId,
-      needs_triage: false,
-      stage: 'in_progress',
-      sub_status: 'accepted_by_worker',
-      accepted_at: nowIso,
-      sla_first_contact_due_at: slaFirstContactDueAt,
-      sla_resolution_due_at: slaResolutionDueAt,
-      sla_breached_flag: false,
-      assignment_attempt_count: ((ticket as any).assignment_attempt_count ?? 0) + 1,
-      offered_worker_ids: Array.from(offeredList),
-      last_updated_by_user_id: args.assignedByUserId ?? null,
-      updated_at: nowIso,
-    })
-    .eq('id', args.ticketId)
+  const ticketPatch: Record<string, unknown> = {
+    owner_user_id: args.workerId,
+    stage: 'in_progress',
+    sub_status: 'accepted_by_worker',
+    accepted_at: nowIso,
+    sla_first_contact_due_at: slaFirstContactDueAt,
+    sla_resolution_due_at: slaResolutionDueAt,
+    sla_breached_flag: false,
+    assignment_attempt_count: ((ticket as { assignment_attempt_count?: number }).assignment_attempt_count ?? 0) + 1,
+    offered_worker_ids: Array.from(offeredList),
+    last_updated_by_user_id: args.assignedByUserId ?? null,
+    updated_at: nowIso,
+  }
+  if (!args.parallelWithTriage) {
+    ticketPatch.needs_triage = false
+  }
+
+  await supabase.from('tickets').update(ticketPatch).eq('id', args.ticketId)
 
   await supabase.from('ticket_stage_history').insert({
     ticket_id: args.ticketId,
@@ -525,6 +600,9 @@ export async function directAssignTicketToWorker(args: {
     actor_type: args.assignedByUserId ? 'user' : 'system',
     actor_user_id: args.assignedByUserId ?? null,
     new_value_json: { worker_id: args.workerId, assignment_id: assignment.id },
+    metadata_json: args.matchedTerritoryId
+      ? { territory_id: args.matchedTerritoryId }
+      : null,
   })
 
   notifyCitizenOfTicketUpdate({
@@ -543,40 +621,148 @@ export async function directAssignTicketToWorker(args: {
 }
 
 /**
- * Route a ticket to a worker after intake.
- * Disabled at create time — callers must wait until triage is complete
- * (`needs_triage = false`). CS assigns via POST /v2/tickets/assign or auto-assign.
+ * Territory-hierarchy auto-assign: resolve territory (if needed), walk up the
+ * tree, round-robin among workers at the closest matching level, direct-assign.
  */
+export async function autoAssignTicketByTerritory(
+  ticketId: string,
+  opts?: {
+    parallelWithTriage?: boolean
+    resolveTerritory?: boolean
+    locationText?: string | null
+    issueText?: string | null
+    organizationId?: string
+  },
+): Promise<TerritoryAutoAssignResult> {
+  const supabase = createSupabaseServiceClient()
+  const { data: ticketRow } = await supabase
+    .from('tickets')
+    .select('organization_id, territory_id, location_text, original_issue_text')
+    .eq('id', ticketId)
+    .maybeSingle()
+
+  if (!ticketRow) return { routed: 'none', reason: 'assign_failed' }
+
+  const organizationId = opts?.organizationId ?? (ticketRow.organization_id as string)
+  const locationText = opts?.locationText ?? (ticketRow.location_text as string | null)
+  const issueText = opts?.issueText ?? (ticketRow.original_issue_text as string | null)
+
+  if (opts?.resolveTerritory !== false) {
+    const shouldResolve =
+      !ticketRow.territory_id || !!(locationText?.trim() || issueText?.trim())
+    if (shouldResolve) {
+      await resolveAndApplyTicketTerritory({
+        ticketId,
+        organizationId,
+        locationText,
+        issueText,
+        force: !!(locationText?.trim() || issueText?.trim()),
+      })
+    }
+  }
+
+  if (!opts?.parallelWithTriage) {
+    const triageCheck = await assertTicketReadyForWorkerAssignment(ticketId)
+    if (!triageCheck.ok) return { routed: 'none', reason: 'assign_failed' }
+  }
+
+  const match = await findTerritoryOwner(ticketId)
+  if (!match) {
+    const { data: refreshed } = await supabase
+      .from('tickets')
+      .select('territory_id')
+      .eq('id', ticketId)
+      .maybeSingle()
+    return {
+      routed: 'none',
+      reason: refreshed?.territory_id ? 'no_worker' : 'no_territory',
+    }
+  }
+
+  const res = await directAssignTicketToWorker({
+    ticketId,
+    workerId: match.worker.id,
+    assignedByUserId: null,
+    reason: opts?.parallelWithTriage
+      ? 'Auto-assigned to territory worker at intake (CS triage continues)'
+      : 'Auto-assigned to territory worker',
+    parallelWithTriage: opts?.parallelWithTriage,
+    matchedTerritoryId: match.matchedTerritoryId,
+  })
+
+  if (!res.ok) return { routed: 'none', reason: 'assign_failed' }
+
+  await advanceTerritoryRoundRobinCursor(organizationId, match.matchedTerritoryId, match.worker.id)
+
+  return {
+    routed: 'direct',
+    workerId: match.worker.id,
+    matchedTerritoryId: match.matchedTerritoryId,
+  }
+}
+
+/** Called from WhatsApp, Telegram, and manual intake after ticket creation. */
+export async function intakeTerritoryAutoAssign(args: {
+  ticketId: string
+  ticketNumber?: string
+  organizationId: string
+  locationText?: string | null
+  issueText?: string | null
+  source: string
+}): Promise<TerritoryAutoAssignResult> {
+  console.log('[territoryAssign] start', {
+    ticketId: args.ticketId,
+    ticketNumber: args.ticketNumber,
+    source: args.source,
+  })
+
+  try {
+    const result = await autoAssignTicketByTerritory(args.ticketId, {
+      parallelWithTriage: true,
+      resolveTerritory: true,
+      organizationId: args.organizationId,
+      locationText: args.locationText,
+      issueText: args.issueText,
+    })
+
+    if (result.routed === 'direct') {
+      console.log('[territoryAssign] assigned', {
+        ticketId: args.ticketId,
+        ticketNumber: args.ticketNumber,
+        source: args.source,
+        workerId: result.workerId,
+        matchedTerritoryId: result.matchedTerritoryId,
+      })
+    } else {
+      console.log('[territoryAssign] skipped', {
+        ticketId: args.ticketId,
+        ticketNumber: args.ticketNumber,
+        source: args.source,
+        reason: result.reason,
+      })
+    }
+
+    return result
+  } catch (err) {
+    console.error('[territoryAssign] error', {
+      ticketId: args.ticketId,
+      ticketNumber: args.ticketNumber,
+      source: args.source,
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return { routed: 'none', reason: 'assign_failed' }
+  }
+}
+
+/** Post-triage territory auto-assign (CS flows, confirm-ai hook). */
 export async function autoRouteNewTicket(ticketId: string): Promise<
   | { routed: 'direct'; workerId: string }
-  | { routed: 'offered'; workerId: string }
   | { routed: 'none' }
 > {
-  const triageCheck = await assertTicketReadyForWorkerAssignment(ticketId)
-  if (!triageCheck.ok) return { routed: 'none' }
-
-  const owner = await findTerritoryOwner(ticketId)
-  if (owner) {
-    const res = await directAssignTicketToWorker({
-      ticketId,
-      workerId: owner.id,
-      assignedByUserId: null,
-      reason: 'Auto-assigned to territory owner at ticket creation',
-    })
-    if (res.ok) return { routed: 'direct', workerId: owner.id }
+  const result = await autoAssignTicketByTerritory(ticketId, { parallelWithTriage: false })
+  if (result.routed === 'direct') {
+    return { routed: 'direct', workerId: result.workerId }
   }
-
-  const nearest = await findNearestAvailableWorker(ticketId)
-  if (nearest) {
-    const offer = await offerTicketToWorker({
-      ticketId,
-      workerId: nearest.id,
-      assignedByUserId: null,
-      reason: 'Auto-assigned at ticket creation',
-    })
-    if (offer.ok) return { routed: 'offered', workerId: nearest.id }
-  }
-
   return { routed: 'none' }
 }
 

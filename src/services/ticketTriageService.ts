@@ -1,8 +1,8 @@
 /**
  * Triage gates CS manual assign / direct assign / re-offer after reject.
- * WhatsApp intake uses `offerTicketToWorker({ parallelWithTriage: true })` so
- * nearest-worker offer and CS triage queue run in parallel.
- * Ground-worker filed tickets (`source_channel=manual`) stay here until CS approves.
+ * Intake auto-assign uses `directAssignTicketToWorker({ parallelWithTriage: true })`
+ * so territory workers receive tickets while CS triage continues in parallel.
+ * Ground-worker filed tickets (`source_channel=manual`) follow the same path.
  */
 
 import { createSupabaseServiceClient } from '@/lib/supabase.js'

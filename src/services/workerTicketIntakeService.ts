@@ -14,6 +14,7 @@ import { canCreateWorkerIntakeTicket } from '@/lib/roleHierarchy.js'
 import { uploadWorkerAttachment } from '@/services/attachmentService.js'
 import { resolveCitizenForWorkerIntake } from '@/services/citizenService.js'
 import { enrichTicketFromIssueText } from '@/services/ticketIntakeAi.js'
+import { intakeTerritoryAutoAssign } from '@/services/assignmentService.js'
 import { addTicketNote, createTicket } from '@/services/ticketService.js'
 
 const PRIVILEGED_INTAKE_ROLES = new Set(['super_admin', 'central_support'])
@@ -436,6 +437,15 @@ async function runWorkerIntakeCore(
       attachment_count: attachmentCount,
       needs_triage: true,
     },
+  })
+
+  await intakeTerritoryAutoAssign({
+    ticketId: created.ticketId,
+    ticketNumber: created.ticketNumber,
+    organizationId,
+    locationText: address,
+    issueText: description,
+    source: 'manual',
   })
 
   return {

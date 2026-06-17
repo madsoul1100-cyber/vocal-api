@@ -37,6 +37,7 @@ import { classifyIntent } from './aiService'
 import { createTicket } from './ticketService'
 import { generateTicketSuggestions } from './aiService'
 import { enrichTicketFromIssueText } from './ticketIntakeAi.js'
+import { intakeTerritoryAutoAssign } from './assignmentService.js'
 import { downloadFromTelegramAndStore } from './attachmentService'
 
 export type Step =
@@ -420,8 +421,6 @@ async function fileTicket(ctx: FlowContext) {
     console.error(`[telegramFlow] no media on draft for ticket ${result.ticketNumber}`)
   }
 
-  // Worker assignment waits until central support completes triage (needs_triage = false).
-
   if (draft.issue_text) {
     const enrich = await enrichTicketFromIssueText({
       ticketId: result.ticketId,
@@ -435,6 +434,15 @@ async function fileTicket(ctx: FlowContext) {
       )
     }
   }
+
+  await intakeTerritoryAutoAssign({
+    ticketId: result.ticketId,
+    ticketNumber: result.ticketNumber,
+    organizationId: ctx.organizationId,
+    locationText: draft.location_text,
+    issueText: draft.issue_text,
+    source: 'telegram',
+  })
 }
 
 async function replyStatus(ctx: FlowContext, ticketNumber: string | null) {
