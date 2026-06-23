@@ -11,7 +11,7 @@
 
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
 import { canCreateWorkerIntakeTicket } from '@/lib/roleHierarchy.js'
-import { uploadWorkerAttachment } from '@/services/attachmentService.js'
+import { uploadWorkerAttachment, validateTicketUploadSize } from '@/services/attachmentService.js'
 import { resolveCitizenForWorkerIntake } from '@/services/citizenService.js'
 import { enrichTicketFromIssueText } from '@/services/ticketIntakeAi.js'
 import { intakeTerritoryAutoAssign } from '@/services/assignmentService.js'
@@ -174,6 +174,14 @@ function validateWorkerIntakeInput(
   }
   if (hasLng && (input.longitude! < -180 || input.longitude! > 180)) {
     return { ok: false, status: 400, error: 'longitude out of range' }
+  }
+
+  for (const file of input.files ?? []) {
+    const mime = file.mimetype?.trim() || 'application/octet-stream'
+    const sizeCheck = validateTicketUploadSize(mime, file.buffer.length)
+    if ('error' in sizeCheck) {
+      return { ok: false, status: 400, error: sizeCheck.error }
+    }
   }
 
   return { ok: true }

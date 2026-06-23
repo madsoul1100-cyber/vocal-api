@@ -51,7 +51,10 @@ const SIGNED_URL_TTL_SECONDS = 60 * 60
 /** Presigned PUT for dashboard direct-to-storage uploads (v2). */
 export const TICKET_UPLOAD_URL_TTL_SECONDS = 15 * 60
 
-export const TICKET_UPLOAD_MAX_BYTES = 20 * 1024 * 1024
+export const TICKET_UPLOAD_IMAGE_MAX_BYTES = 20 * 1024 * 1024
+export const TICKET_UPLOAD_VIDEO_PDF_MAX_BYTES = 60 * 1024 * 1024
+/** Multer ceiling — must be >= largest per-type ticket upload limit. */
+export const TICKET_UPLOAD_MULTER_MAX_BYTES = TICKET_UPLOAD_VIDEO_PDF_MAX_BYTES
 
 const ALLOWED_TICKET_UPLOAD_MIMES = new Set([
   'image/jpeg',
@@ -101,6 +104,29 @@ export function parseTicketAttachmentStorageRef(ref: string): {
 
 export function isAllowedTicketUploadMime(mime: string): boolean {
   return ALLOWED_TICKET_UPLOAD_MIMES.has(mime.trim().toLowerCase())
+}
+
+export function ticketUploadMaxBytes(mime: string): number {
+  const normalized = mime.trim().toLowerCase()
+  if (normalized.startsWith('video/') || normalized === 'application/pdf') {
+    return TICKET_UPLOAD_VIDEO_PDF_MAX_BYTES
+  }
+  return TICKET_UPLOAD_IMAGE_MAX_BYTES
+}
+
+export function validateTicketUploadSize(
+  mime_type: string,
+  file_size_bytes: number,
+): { ok: true } | { error: string } {
+  const mime = mime_type.trim().toLowerCase()
+  if (!isAllowedTicketUploadMime(mime)) {
+    return { error: `File type not allowed: ${mime_type}` }
+  }
+  const max = ticketUploadMaxBytes(mime)
+  if (!Number.isFinite(file_size_bytes) || file_size_bytes < 1 || file_size_bytes > max) {
+    return { error: `file_size_bytes must be between 1 and ${max}` }
+  }
+  return { ok: true }
 }
 
 export function ticketUploadPathPrefix(orgId: string, ticketId: string): string {
@@ -236,13 +262,9 @@ export async function createTicketAttachmentUploadUrl(args: {
   file_size_bytes: number
 }): Promise<TicketAttachmentUploadUrlResult | { error: string }> {
   const mime = args.mime_type.trim().toLowerCase()
-  if (!isAllowedTicketUploadMime(mime)) {
-    return { error: `File type not allowed: ${args.mime_type}` }
-  }
-  if (args.file_size_bytes < 1 || args.file_size_bytes > TICKET_UPLOAD_MAX_BYTES) {
-    return {
-      error: `file_size_bytes must be between 1 and ${TICKET_UPLOAD_MAX_BYTES}`,
-    }
+  const sizeCheck = validateTicketUploadSize(mime, args.file_size_bytes)
+  if ('error' in sizeCheck) {
+    return { error: sizeCheck.error }
   }
 
   if (isPostgresMode() && !isS3Configured()) {

@@ -8,7 +8,7 @@ export interface StaffKycDocument {
 
 export const STAFF_KYC_MAX_FILES = 10
 export const STAFF_PROFILE_IMAGE_MAX_BYTES = 5 * 1024 * 1024
-export const STAFF_KYC_FILE_MAX_BYTES = 10 * 1024 * 1024
+export const STAFF_KYC_FILE_MAX_BYTES = 20 * 1024 * 1024
 
 /** Strip API-only fields (e.g. download_url) before persisting to jsonb. */
 export function sanitizeKycDocumentsForDb(docs: unknown): StaffKycDocument[] {

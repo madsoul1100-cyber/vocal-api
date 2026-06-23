@@ -47,7 +47,10 @@ import {
   ticketHasAttachments,
   ticketHasNotes,
 } from '@/services/ticketAttachmentService.js'
-import { ticketAttachmentStorageBackend } from '@/services/attachmentService.js'
+import {
+  ticketAttachmentStorageBackend,
+  TICKET_UPLOAD_MULTER_MAX_BYTES,
+} from '@/services/attachmentService.js'
 import { listTicketStageHistory } from '@/services/ticketStageHistoryService.js'
 import { updateTicketSeverity } from '@/services/ticketSeverityService.js'
 import {
@@ -59,7 +62,7 @@ import { TRIAGE_REQUIRED_MESSAGE } from '@/services/ticketTriageService.js'
 const router = Router()
 const upload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024 },
+  limits: { fileSize: TICKET_UPLOAD_MULTER_MAX_BYTES },
 })
 
 /** v2: paginated list with sort, filters (incl. SLA), and keyword search */

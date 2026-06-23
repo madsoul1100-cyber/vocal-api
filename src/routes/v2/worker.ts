@@ -13,11 +13,12 @@ import {
   parseWorkerAssignmentsBucketQuery,
   parseWorkerAssignmentsListQuery,
 } from '@/services/workerAssignmentsListService.js'
+import { TICKET_UPLOAD_MULTER_MAX_BYTES } from '@/services/attachmentService.js'
 
 const router = Router()
 const intakeUpload = multer({
   storage: multer.memoryStorage(),
-  limits: { fileSize: 20 * 1024 * 1024, files: 5 },
+  limits: { fileSize: TICKET_UPLOAD_MULTER_MAX_BYTES, files: 5 },
 })
 
 function requireGroundWorker(

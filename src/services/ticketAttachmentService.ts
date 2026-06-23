@@ -13,6 +13,7 @@ import {
   type TicketAttachmentUploadUrlResult,
   uploadWorkerAttachment,
   usesLocalTicketAttachmentFiles,
+  validateTicketUploadSize,
   verifyTicketAttachmentObject,
 } from '@/services/attachmentService.js'
 import { resolveExistingLocalObjectPath } from '@/lib/postgresCompat/storage.js'
@@ -549,6 +550,11 @@ export async function createTicketNotesAndAttachments(
 
   if (hasFile && input.file) {
     const mime = input.file.mimetype?.trim() || 'application/octet-stream'
+    const sizeCheck = validateTicketUploadSize(mime, input.file.buffer.length)
+    if ('error' in sizeCheck) {
+      return { error: sizeCheck.error, status: 400 }
+    }
+
     const stored = await uploadWorkerAttachment({
       bytes: input.file.buffer,
       filename: input.file.originalname,
@@ -729,6 +735,11 @@ export async function completeTicketAttachmentUpload(
   const file_size_bytes = Number(input.file_size_bytes)
   if (!Number.isFinite(file_size_bytes) || file_size_bytes < 1) {
     return { error: 'file_size_bytes required', status: 400 }
+  }
+
+  const sizeCheck = validateTicketUploadSize(mime_type, file_size_bytes)
+  if ('error' in sizeCheck) {
+    return { error: sizeCheck.error, status: 400 }
   }
 
   const ticketRes = await assertTicketInOrg(ticketId, organizationId)

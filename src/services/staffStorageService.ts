@@ -208,7 +208,7 @@ export async function uploadStaffKycDocument(args: {
     return { error: `File type not allowed: ${args.mime}. Use PDF, Word, or images.` }
   }
   if (args.buffer.length > STAFF_KYC_FILE_MAX_BYTES) {
-    return { error: 'Each KYC document must be under 10 MB' }
+    return { error: 'Each KYC document must be under 20 MB' }
   }
 
   const key = buildStaffObjectKey(args.orgId, 'kyc', mime, args.originalName)
