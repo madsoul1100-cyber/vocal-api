@@ -36,6 +36,35 @@ import {
 
 const GROUND_WORKER_ROLE_ID = '00000000-0000-0000-0000-000000000005'
 
+const WORKER_FILED_TICKET_EVENT = 'worker_filed_ticket'
+
+/** Ground worker who filed this ticket on behalf of a citizen (null if not worker-filed). */
+export async function resolveWorkerFiledByUserId(ticketId: string): Promise<string | null> {
+  if (isPostgresMode()) {
+    const res = await dbQuery<{ actor_user_id: string | null }>(
+      `SELECT actor_user_id FROM audit_logs
+       WHERE entity_type = 'ticket' AND entity_id = $1 AND event_type = $2
+       ORDER BY created_at ASC
+       LIMIT 1`,
+      [ticketId, WORKER_FILED_TICKET_EVENT],
+    )
+    return res.rows[0]?.actor_user_id ?? null
+  }
+
+  const supabase = createSupabaseServiceClient()
+  const { data } = await supabase
+    .from('audit_logs')
+    .select('actor_user_id')
+    .eq('entity_type', 'ticket')
+    .eq('entity_id', ticketId)
+    .eq('event_type', WORKER_FILED_TICKET_EVENT)
+    .order('created_at', { ascending: true })
+    .limit(1)
+    .maybeSingle()
+
+  return (data?.actor_user_id as string | null) ?? null
+}
+
 // ---------------------------------------------------------------------------
 // Geo helpers
 // ---------------------------------------------------------------------------
@@ -149,6 +178,8 @@ export async function listCandidateWorkers(ticketId: string): Promise<CandidateW
   if (!ticket) return []
 
   const excluded = new Set<string>((ticket.offered_worker_ids as string[] | null) ?? [])
+  const filedByWorkerId = await resolveWorkerFiledByUserId(ticketId)
+  if (filedByWorkerId) excluded.add(filedByWorkerId)
 
   // Fetch all active ground workers in the org with their territory memberships.
   const { data: workers } = await supabase
@@ -293,6 +324,8 @@ export async function findTerritoryOwner(ticketId: string): Promise<TerritoryOwn
   const chain = buildTerritoryAncestorChain(ticket.territory_id as string, parentOf)
 
   const excluded = new Set<string>((ticket.offered_worker_ids as string[] | null) ?? [])
+  const filedByWorkerId = await resolveWorkerFiledByUserId(ticketId)
+  if (filedByWorkerId) excluded.add(filedByWorkerId)
 
   const { data: workers } = await supabase
     .from('users')

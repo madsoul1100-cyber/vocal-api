@@ -49,7 +49,7 @@ router.get('/assignments/summary', requireAuth, async (req, res) => {
 
 /**
  * Without `bucket`: legacy payload (offered + activeTickets + telegramLinked).
- * With `bucket=offered|active|closed`: paginated list for that tab.
+ * With `bucket=offered|active|closed|raised`: paginated list for that tab.
  */
 router.get('/assignments', requireAuth, async (req, res) => {
   const user = requireGroundWorker(req, res)

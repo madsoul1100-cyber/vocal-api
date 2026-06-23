@@ -17,7 +17,7 @@ import {
   type WorkerOfferCategory,
 } from '@/services/workerOfferFields.js'
 
-export type WorkerAssignmentBucket = 'offered' | 'active' | 'closed'
+export type WorkerAssignmentBucket = 'offered' | 'active' | 'closed' | 'raised'
 
 export const WORKER_ASSIGNMENTS_DEFAULT_LIMIT = 20
 export const WORKER_ASSIGNMENTS_MAX_LIMIT = 100
@@ -82,6 +82,9 @@ export interface WorkerTicketListItem {
   primary_action?: WorkerPrimaryAction
   /** Active bucket: true when POST /v2/tickets/request-closure is allowed. */
   can_request_closure?: boolean
+  /** Raised bucket: awaiting CS triage before assignment. */
+  needs_triage?: boolean
+  created_at?: string | null
 }
 
 export interface WorkerOfferedListItem {
@@ -101,9 +104,11 @@ export interface WorkerAssignmentsListResult {
 }
 
 export interface WorkerAssignmentsSummary {
-  counts: { offered: number; active: number; closed: number }
+  counts: { offered: number; active: number; closed: number; raised: number }
   telegramLinked: boolean
 }
+
+const WORKER_FILED_TICKET_EVENT = 'worker_filed_ticket'
 
 function sanitizeKeyword(raw: string): string {
   return raw.replace(/[,()."'%_\\]/g, '').trim().slice(0, 100)
@@ -117,13 +122,14 @@ function parseBooleanQuery(value: unknown): boolean | undefined {
 
 function parseBucket(raw: unknown): WorkerAssignmentBucket | null {
   const b = typeof raw === 'string' ? raw.trim().toLowerCase() : ''
-  if (b === 'offered' || b === 'active' || b === 'closed') return b
+  if (b === 'offered' || b === 'active' || b === 'closed' || b === 'raised') return b
   return null
 }
 
 function defaultSortForBucket(bucket: WorkerAssignmentBucket): WorkerAssignmentsListOptions['sort'] {
   if (bucket === 'offered') return 'expires_at'
   if (bucket === 'closed') return 'closed_at'
+  if (bucket === 'raised') return 'created_at'
   return 'accepted_at'
 }
 
@@ -170,7 +176,11 @@ export function parseWorkerAssignmentsListQuery(
   const orderExplicit =
     typeof query.order === 'string' && query.order.trim() ? query.order.trim() : undefined
   const defaultOrder: 'asc' | 'desc' =
-    bucket === 'closed' ? 'desc' : bucket === 'offered' ? 'asc' : 'asc'
+    bucket === 'closed' || bucket === 'raised'
+      ? 'desc'
+      : bucket === 'offered'
+        ? 'asc'
+        : 'asc'
   const order =
     orderExplicit?.toLowerCase() === 'asc'
       ? 'asc'
@@ -421,6 +431,68 @@ async function loadCitizenDisplayNames(
   return nameMap
 }
 
+async function loadRaisedCitizenPhones(citizenIds: string[]): Promise<Record<string, string>> {
+  const uniqueIds = [...new Set(citizenIds.filter(Boolean))]
+  const phoneMap: Record<string, string> = {}
+  if (uniqueIds.length === 0) return phoneMap
+
+  if (isPostgresMode()) {
+    const phones = await dbQuery<{ citizen_id: string; phone: string }>(
+      `SELECT citizen_id, phone FROM citizen_channel_identities
+       WHERE citizen_id = ANY($1::uuid[]) AND phone IS NOT NULL`,
+      [uniqueIds],
+    )
+    for (const row of phones.rows) {
+      if (!phoneMap[row.citizen_id]) phoneMap[row.citizen_id] = row.phone
+    }
+    return phoneMap
+  }
+
+  const supabase = createSupabaseServiceClient()
+  const { data: identities } = await supabase
+    .from('citizen_channel_identities')
+    .select('citizen_id, phone')
+    .in('citizen_id', uniqueIds)
+    .not('phone', 'is', null)
+
+  for (const row of identities ?? []) {
+    if (!phoneMap[row.citizen_id]) phoneMap[row.citizen_id] = row.phone
+  }
+  return phoneMap
+}
+
+async function loadRaisedCitizenDisplayNames(citizenIds: string[]): Promise<Record<string, string>> {
+  const uniqueIds = [...new Set(citizenIds.filter(Boolean))]
+  const nameMap: Record<string, string> = {}
+  if (uniqueIds.length === 0) return nameMap
+
+  if (isPostgresMode()) {
+    const names = await dbQuery<{ citizen_id: string; display_name: string | null }>(
+      `SELECT id AS citizen_id, display_name
+       FROM citizens
+       WHERE id = ANY($1::uuid[])
+         AND display_name IS NOT NULL`,
+      [uniqueIds],
+    )
+    for (const row of names.rows) {
+      if (!nameMap[row.citizen_id] && row.display_name) nameMap[row.citizen_id] = row.display_name
+    }
+    return nameMap
+  }
+
+  const supabase = createSupabaseServiceClient()
+  const { data: citizens } = await supabase
+    .from('citizens')
+    .select('id, display_name')
+    .in('id', uniqueIds)
+    .not('display_name', 'is', null)
+
+  for (const row of citizens ?? []) {
+    if (!nameMap[row.id] && row.display_name) nameMap[row.id] = row.display_name
+  }
+  return nameMap
+}
+
 function mapTicketRow(
   t: Record<string, unknown>,
   phoneMap: Record<string, string>,
@@ -456,6 +528,30 @@ function mapTicketRow(
     item.closure_pending = String(t.sub_status) === PENDING_CLOSURE_SUB_STATUS
   }
   return item
+}
+
+function mapRaisedTicketRow(
+  row: Record<string, unknown>,
+  phoneMap: Record<string, string>,
+  nameMap: Record<string, string>,
+  aiLabels: Map<string, string>,
+): WorkerTicketListItem {
+  const catId = row.category_id as string | null | undefined
+  const catName = row.category_name as string | null | undefined
+  const ticketId = String(row.id)
+  const category = resolveOfferCategory(ticketId, catId, catName, aiLabels)
+  const citizenId = row.citizen_id as string | null
+  const base = mapTicketRow(row, phoneMap, nameMap, true)
+  return {
+    ...base,
+    citizen_phone: citizenId ? (phoneMap[citizenId] ?? null) : null,
+    citizen_display_name: citizenId ? (nameMap[citizenId] ?? null) : null,
+    critical_flag: row.critical_flag === true,
+    category,
+    category_name: categoryNameFromOfferCategory(category),
+    needs_triage: row.needs_triage === true,
+    created_at: (row.created_at as string | null) ?? null,
+  }
 }
 
 function enrichActiveWorkerCard(item: WorkerTicketListItem): WorkerTicketListItem {
@@ -883,6 +979,162 @@ async function listOwnedTicketsSupabase(
   }
 }
 
+function raisedTicketsJoinSql(workerIdParam = '$1'): string {
+  return `INNER JOIN audit_logs al ON al.entity_id = t.id
+    AND al.entity_type = 'ticket'
+    AND al.event_type = '${WORKER_FILED_TICKET_EVENT}'
+    AND al.actor_user_id = ${workerIdParam}`
+}
+
+async function listRaisedPg(
+  workerId: string,
+  opts: WorkerAssignmentsListOptions,
+): Promise<WorkerAssignmentsListResult> {
+  const params: unknown[] = [workerId]
+  const paramIndex = { i: 2 }
+  let where = `1=1`
+  where = appendTicketFilters(where, params, paramIndex, opts)
+
+  const countRes = await dbQuery<{ c: string }>(
+    `SELECT COUNT(*)::text AS c
+     FROM tickets t
+     ${raisedTicketsJoinSql('$1')}
+     WHERE ${where}`,
+    params,
+  )
+  const total = Number(countRes.rows[0]?.c ?? 0)
+
+  const listParams = [...params, opts.limit, opts.offset]
+  const limitParam = paramIndex.i++
+  const offsetParam = paramIndex.i++
+  const order = orderSql('raised', opts.sort, opts.order)
+
+  const res = await dbQuery<Record<string, unknown>>(
+    `SELECT t.id, t.ticket_number, t.title, t.original_issue_text, t.location_text,
+            t.latitude, t.longitude, t.severity, t.stage, t.sub_status,
+            t.accepted_at, t.first_contacted_at, t.updated_at, t.closed_at, t.outcome,
+            t.sla_first_contact_due_at, t.sla_resolution_due_at,
+            t.citizen_id, t.citizen_identity_revealed_at, t.critical_flag,
+            t.needs_triage, t.created_at,
+            ic.id AS category_id, ic.name AS category_name
+     FROM tickets t
+     ${raisedTicketsJoinSql('$1')}
+     LEFT JOIN issue_categories ic ON ic.id = t.category_id
+     WHERE ${where}
+     ORDER BY ${order}
+     LIMIT $${limitParam} OFFSET $${offsetParam}`,
+    listParams,
+  )
+
+  const citizenIds = res.rows
+    .map((r) => r.citizen_id as string | null)
+    .filter((id): id is string => !!id)
+  const phoneMap = await loadRaisedCitizenPhones(citizenIds)
+  const nameMap = await loadRaisedCitizenDisplayNames(citizenIds)
+  const ticketIds = res.rows.map((r) => String(r.id))
+  const aiLabels = await loadAiSuggestedCategoryLabels(ticketIds)
+  const items = res.rows.map((row) => mapRaisedTicketRow(row, phoneMap, nameMap, aiLabels))
+
+  return {
+    bucket: 'raised',
+    items,
+    pagination: buildPagination(opts.offset, opts.limit, total),
+    filters: filtersEcho('raised', opts),
+  }
+}
+
+async function listRaisedSupabase(
+  workerId: string,
+  opts: WorkerAssignmentsListOptions,
+): Promise<WorkerAssignmentsListResult> {
+  const supabase = createSupabaseServiceClient()
+  const ascending = opts.order === 'asc'
+
+  const { data: audits, count, error: auditErr } = await supabase
+    .from('audit_logs')
+    .select('entity_id', { count: 'exact' })
+    .eq('actor_user_id', workerId)
+    .eq('event_type', WORKER_FILED_TICKET_EVENT)
+    .eq('entity_type', 'ticket')
+    .order('created_at', { ascending })
+    .range(opts.offset, opts.offset + opts.limit - 1)
+
+  if (auditErr) throw new Error(auditErr.message)
+
+  const ticketIds = (audits ?? []).map((a) => a.entity_id as string).filter(Boolean)
+  if (ticketIds.length === 0) {
+    return {
+      bucket: 'raised',
+      items: [],
+      pagination: buildPagination(opts.offset, opts.limit, count ?? 0),
+      filters: filtersEcho('raised', opts),
+    }
+  }
+
+  let query = supabase
+    .from('tickets')
+    .select(
+      `id, ticket_number, title, original_issue_text, location_text, latitude, longitude,
+       severity, stage, sub_status, accepted_at, first_contacted_at, updated_at,
+       closed_at, outcome, sla_first_contact_due_at, sla_resolution_due_at,
+       citizen_id, citizen_identity_revealed_at, critical_flag, sla_breached_flag,
+       needs_triage, created_at,
+       category:issue_categories!tickets_category_id_fkey(id, name)`,
+    )
+    .in('id', ticketIds)
+
+  if (opts.severity) query = query.eq('severity', opts.severity)
+  if (opts.subStatus) query = query.eq('sub_status', opts.subStatus)
+  if (opts.critical === true) query = query.eq('critical_flag', true)
+  else if (opts.critical === false) query = query.eq('critical_flag', false)
+  if (opts.slaBreached === true) query = query.eq('sla_breached_flag', true)
+  else if (opts.slaBreached === false) query = query.eq('sla_breached_flag', false)
+
+  if (opts.keyword) {
+    const k = opts.keyword
+    query = query.or(
+      `title.ilike.%${k}%,original_issue_text.ilike.%${k}%,ticket_number.ilike.%${k}%,location_text.ilike.%${k}%`,
+    )
+  }
+
+  const { data, error } = await query
+  if (error) throw new Error(error.message)
+
+  const ticketById = new Map(
+    (data ?? []).map((row) => [String((row as { id: string }).id), row as Record<string, unknown>]),
+  )
+  const orderedRows = ticketIds
+    .map((id) => ticketById.get(id))
+    .filter((row): row is Record<string, unknown> => !!row)
+
+  const citizenIds = orderedRows
+    .map((r) => r.citizen_id as string | null)
+    .filter((id): id is string => !!id)
+  const phoneMap = await loadRaisedCitizenPhones(citizenIds)
+  const nameMap = await loadRaisedCitizenDisplayNames(citizenIds)
+  const aiLabels = await loadAiSuggestedCategoryLabels(orderedRows.map((r) => String(r.id)))
+  const items = orderedRows.map((row) => {
+    const cat = normalizeTicketJoin(row.category)
+    return mapRaisedTicketRow(
+      {
+        ...row,
+        category_id: cat?.id,
+        category_name: cat?.name,
+      },
+      phoneMap,
+      nameMap,
+      aiLabels,
+    )
+  })
+
+  return {
+    bucket: 'raised',
+    items,
+    pagination: buildPagination(opts.offset, opts.limit, count ?? 0),
+    filters: filtersEcho('raised', opts),
+  }
+}
+
 export async function listWorkerAssignmentsV2(
   workerId: string,
   bucket: WorkerAssignmentBucket,
@@ -890,9 +1142,11 @@ export async function listWorkerAssignmentsV2(
 ): Promise<WorkerAssignmentsListResult> {
   if (isPostgresMode()) {
     if (bucket === 'offered') return listOfferedPg(workerId, opts)
+    if (bucket === 'raised') return listRaisedPg(workerId, opts)
     return listOwnedTicketsPg(workerId, bucket, opts)
   }
   if (bucket === 'offered') return listOfferedSupabase(workerId, opts)
+  if (bucket === 'raised') return listRaisedSupabase(workerId, opts)
   return listOwnedTicketsSupabase(workerId, bucket, opts)
 }
 
@@ -929,12 +1183,23 @@ async function countClosedPg(workerId: string): Promise<number> {
   return Number(res.rows[0]?.c ?? 0)
 }
 
+async function countRaisedPg(workerId: string): Promise<number> {
+  const res = await dbQuery<{ c: string }>(
+    `SELECT COUNT(*)::text AS c
+     FROM tickets t
+     ${raisedTicketsJoinSql('$1')}`,
+    [workerId],
+  )
+  return Number(res.rows[0]?.c ?? 0)
+}
+
 export async function getWorkerAssignmentsSummary(workerId: string): Promise<WorkerAssignmentsSummary> {
   if (isPostgresMode()) {
-    const [offered, active, closed] = await Promise.all([
+    const [offered, active, closed, raised] = await Promise.all([
       countOfferedPg(workerId),
       countActivePg(workerId),
       countClosedPg(workerId),
+      countRaisedPg(workerId),
     ])
     const userRes = await dbQuery<{ metadata_json: Record<string, unknown> | null }>(
       `SELECT metadata_json FROM users WHERE id = $1`,
@@ -942,7 +1207,7 @@ export async function getWorkerAssignmentsSummary(workerId: string): Promise<Wor
     )
     const meta = userRes.rows[0]?.metadata_json
     return {
-      counts: { offered, active, closed },
+      counts: { offered, active, closed, raised },
       telegramLinked: typeof meta?.telegram_chat_id === 'number',
     }
   }
@@ -950,7 +1215,7 @@ export async function getWorkerAssignmentsSummary(workerId: string): Promise<Wor
   const supabase = createSupabaseServiceClient()
   const nowISO = new Date().toISOString()
 
-  const [offeredRes, activeRes, closedRes, userRes] = await Promise.all([
+  const [offeredRes, activeRes, closedRes, raisedRes, userRes] = await Promise.all([
     supabase
       .from('ticket_assignments')
       .select('id', { count: 'exact', head: true })
@@ -970,6 +1235,12 @@ export async function getWorkerAssignmentsSummary(workerId: string): Promise<Wor
       .select('id', { count: 'exact', head: true })
       .eq('owner_user_id', workerId)
       .or(`stage.eq.closed,sub_status.eq.${PENDING_CLOSURE_SUB_STATUS}`),
+    supabase
+      .from('audit_logs')
+      .select('id', { count: 'exact', head: true })
+      .eq('actor_user_id', workerId)
+      .eq('event_type', WORKER_FILED_TICKET_EVENT)
+      .eq('entity_type', 'ticket'),
     supabase.from('users').select('metadata_json').eq('id', workerId).single(),
   ])
 
@@ -979,6 +1250,7 @@ export async function getWorkerAssignmentsSummary(workerId: string): Promise<Wor
       offered: offeredRes.count ?? 0,
       active: activeRes.count ?? 0,
       closed: closedRes.count ?? 0,
+      raised: raisedRes.count ?? 0,
     },
     telegramLinked: typeof meta?.telegram_chat_id === 'number',
   }

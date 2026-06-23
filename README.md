@@ -91,7 +91,7 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 | Endpoint | Description |
 |----------|-------------|
 | `GET /v2/worker/assignments` (no query) | Legacy: `{ offered, activeTickets, telegramLinked }` |
-| `GET /v2/worker/assignments/summary` | Tab counts: `{ counts: { offered, active, closed }, telegramLinked }` |
+| `GET /v2/worker/assignments/summary` | Tab counts: `{ counts: { offered, active, closed, raised }, telegramLinked }` |
 | `GET /v2/worker/assignments?bucket=…` | Paginated tab list (see below) |
 | `GET /v2/worker/current-offer` | Poll single pending offer (`offered_at`, `expires_at`, ticket with `category` / `category_name`, `critical_flag`) |
 | `POST /v2/worker/tickets` | File ticket on behalf of citizen (`multipart/form-data`). Required: `citizen_name`, `citizen_phone`, `address`, `description`. Optional: `latitude`, `longitude`, `files` (max 5). Creates `source_channel=manual`, `needs_triage=true` — **CS approval only** (no worker offer at create). Filter CS queue: `GET /v2/tickets?needs_triage=true&source_channel=manual` |
@@ -104,6 +104,7 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 | `offered` | Current assignment offer (`status=offered`, not expired); items `{ id, offered_at, expires_at, ticket }` — ticket includes `category` (`{ id, name, source: confirmed \| ai_suggestion }`), `category_name`, `critical_flag` |
 | `active` | Owned tickets `in_progress` or `on_hold`, excluding `assigned_awaiting_acceptance`. Each item includes `sub_status_label`, `citizen_display_name`, `citizen_phone`, `category` / `category_name`, `sla_first_contact` (timer footer), `primary_action` (suggested card button), `can_request_closure` |
 | `closed` | Owned tickets with `stage=closed` **or** `sub_status=pending_closure_approval` (`closure_pending: true` on pending items) |
+| `raised` | Tickets filed by this worker (`worker_filed_ticket` audit). Includes all stages (awaiting triage through closed). Citizen name/phone shown (filer entered them). Filer is **never** auto-assigned; CS / admin must assign explicitly. |
 
 | Query param | Description |
 |-------------|-------------|
@@ -116,8 +117,8 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 | `sla_first_contact_overdue` | `true` |
 | `sla_resolution_overdue` | `true` |
 | `sla_at_risk` | `true` — due within 24h |
-| `sort` | `offered`: `expires_at` (default), `offered_at`. `active`: `accepted_at` (default). `closed`: `closed_at` (default). Also `updated_at`, `created_at` |
-| `order` | `asc` or `desc` (default `desc` for closed, `asc` for offered/active) |
+| `sort` | `offered`: `expires_at` (default), `offered_at`. `active`: `accepted_at` (default). `closed`: `closed_at` (default). `raised`: `created_at` (default). Also `updated_at`, `created_at` |
+| `order` | `asc` or `desc` (default `desc` for closed/raised, `asc` for offered/active) |
 
 Paginated response: `{ bucket, items, pagination, filters }`.
 

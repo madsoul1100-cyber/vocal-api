@@ -369,6 +369,8 @@ type IntakeCoreParams = {
   workerUserId: string
   input: WorkerTicketIntakeInput
   territoryId?: string | null
+  /** Ground-worker field intake: CS must assign; no territory auto-route to filer. */
+  skipTerritoryAutoAssign?: boolean
 }
 
 async function runWorkerIntakeCore(
@@ -447,14 +449,16 @@ async function runWorkerIntakeCore(
     },
   })
 
-  await intakeTerritoryAutoAssign({
-    ticketId: created.ticketId,
-    ticketNumber: created.ticketNumber,
-    organizationId,
-    locationText: address,
-    issueText: description,
-    source: 'manual',
-  })
+  if (!params.skipTerritoryAutoAssign) {
+    await intakeTerritoryAutoAssign({
+      ticketId: created.ticketId,
+      ticketNumber: created.ticketNumber,
+      organizationId,
+      locationText: address,
+      issueText: description,
+      source: 'manual',
+    })
+  }
 
   return {
     ok: true,
@@ -528,6 +532,7 @@ export async function fileTicketAsWorker(
     workerUserId: input.workerUserId,
     input: intakeInput,
     territoryId: null,
+    skipTerritoryAutoAssign: true,
   })
 
   if (!core.ok) {
