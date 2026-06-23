@@ -47,13 +47,20 @@ export async function createTicket(input: CreateTicketInput): Promise<TicketCrea
     return { ticketId: '', ticketNumber: '', success: false, error: 'Organization not found' }
   }
 
-  // Generate ticket number.
-  // NOTE: once migration 003_org_scoped_ticket_numbers.sql is applied, switch
-  // this call to pass both { org_id: input.organizationId, org_slug: org.slug }.
-  // Until then we call the original global-sequence signature so ticket
-  // creation keeps working.
-  const { data: seqData } = await supabase.rpc('generate_ticket_number', { org_slug: org.slug })
-  const ticketNumber = seqData as string
+  // Org-scoped numbering (migration 003+): pass org id and slug.
+  const { data: seqData, error: seqError } = await supabase.rpc('generate_ticket_number', {
+    org_id: input.organizationId,
+    org_slug: org.slug,
+  })
+  const ticketNumber = typeof seqData === 'string' ? seqData.trim() : ''
+  if (seqError || !ticketNumber) {
+    return {
+      ticketId: '',
+      ticketNumber: '',
+      success: false,
+      error: seqError?.message ?? 'Failed to generate ticket number',
+    }
+  }
 
   // Determine flags
   const hasUsableLocation = !!(input.locationText || (input.latitude && input.longitude))
