@@ -85,6 +85,8 @@ export interface WorkerTicketListItem {
   /** Raised bucket: awaiting CS triage before assignment. */
   needs_triage?: boolean
   created_at?: string | null
+  /** Raised bucket: false until CS assigns this worker and they accept. */
+  can_update_status?: boolean
 }
 
 export interface WorkerOfferedListItem {
@@ -535,6 +537,7 @@ function mapRaisedTicketRow(
   phoneMap: Record<string, string>,
   nameMap: Record<string, string>,
   aiLabels: Map<string, string>,
+  canUpdateStatus: boolean,
 ): WorkerTicketListItem {
   const catId = row.category_id as string | null | undefined
   const catName = row.category_name as string | null | undefined
@@ -551,6 +554,7 @@ function mapRaisedTicketRow(
     category_name: categoryNameFromOfferCategory(category),
     needs_triage: row.needs_triage === true,
     created_at: (row.created_at as string | null) ?? null,
+    can_update_status: canUpdateStatus,
   }
 }
 
@@ -986,6 +990,45 @@ function raisedTicketsJoinSql(workerIdParam = '$1'): string {
     AND al.actor_user_id = ${workerIdParam}`
 }
 
+async function loadTicketsWithActiveWorkerAssignment(
+  workerId: string,
+  ticketIds: string[],
+): Promise<Set<string>> {
+  if (ticketIds.length === 0) return new Set()
+
+  if (isPostgresMode()) {
+    const res = await dbQuery<{ ticket_id: string }>(
+      `SELECT ticket_id FROM ticket_assignments
+       WHERE worker_user_id = $1
+         AND is_current = true
+         AND status IN ('accepted', 'force_assigned')
+         AND ticket_id = ANY($2::uuid[])`,
+      [workerId, ticketIds],
+    )
+    return new Set(res.rows.map((r) => r.ticket_id))
+  }
+
+  const supabase = createSupabaseServiceClient()
+  const { data } = await supabase
+    .from('ticket_assignments')
+    .select('ticket_id')
+    .eq('worker_user_id', workerId)
+    .eq('is_current', true)
+    .in('status', ['accepted', 'force_assigned'])
+    .in('ticket_id', ticketIds)
+
+  return new Set((data ?? []).map((r) => r.ticket_id as string))
+}
+
+function canUpdateRaisedTicket(
+  workerId: string,
+  row: Record<string, unknown>,
+  activelyAssigned: Set<string>,
+): boolean {
+  const ticketId = String(row.id)
+  return row.owner_user_id === workerId && activelyAssigned.has(ticketId)
+}
+
 async function listRaisedPg(
   workerId: string,
   opts: WorkerAssignmentsListOptions,
@@ -1015,7 +1058,7 @@ async function listRaisedPg(
             t.accepted_at, t.first_contacted_at, t.updated_at, t.closed_at, t.outcome,
             t.sla_first_contact_due_at, t.sla_resolution_due_at,
             t.citizen_id, t.citizen_identity_revealed_at, t.critical_flag,
-            t.needs_triage, t.created_at,
+            t.needs_triage, t.created_at, t.owner_user_id,
             ic.id AS category_id, ic.name AS category_name
      FROM tickets t
      ${raisedTicketsJoinSql('$1')}
@@ -1033,7 +1076,16 @@ async function listRaisedPg(
   const nameMap = await loadRaisedCitizenDisplayNames(citizenIds)
   const ticketIds = res.rows.map((r) => String(r.id))
   const aiLabels = await loadAiSuggestedCategoryLabels(ticketIds)
-  const items = res.rows.map((row) => mapRaisedTicketRow(row, phoneMap, nameMap, aiLabels))
+  const activelyAssigned = await loadTicketsWithActiveWorkerAssignment(workerId, ticketIds)
+  const items = res.rows.map((row) =>
+    mapRaisedTicketRow(
+      row,
+      phoneMap,
+      nameMap,
+      aiLabels,
+      canUpdateRaisedTicket(workerId, row, activelyAssigned),
+    ),
+  )
 
   return {
     bucket: 'raised',
@@ -1078,7 +1130,7 @@ async function listRaisedSupabase(
        severity, stage, sub_status, accepted_at, first_contacted_at, updated_at,
        closed_at, outcome, sla_first_contact_due_at, sla_resolution_due_at,
        citizen_id, citizen_identity_revealed_at, critical_flag, sla_breached_flag,
-       needs_triage, created_at,
+       needs_triage, created_at, owner_user_id,
        category:issue_categories!tickets_category_id_fkey(id, name)`,
     )
     .in('id', ticketIds)
@@ -1113,6 +1165,7 @@ async function listRaisedSupabase(
   const phoneMap = await loadRaisedCitizenPhones(citizenIds)
   const nameMap = await loadRaisedCitizenDisplayNames(citizenIds)
   const aiLabels = await loadAiSuggestedCategoryLabels(orderedRows.map((r) => String(r.id)))
+  const activelyAssigned = await loadTicketsWithActiveWorkerAssignment(workerId, ticketIds)
   const items = orderedRows.map((row) => {
     const cat = normalizeTicketJoin(row.category)
     return mapRaisedTicketRow(
@@ -1124,6 +1177,7 @@ async function listRaisedSupabase(
       phoneMap,
       nameMap,
       aiLabels,
+      canUpdateRaisedTicket(workerId, row, activelyAssigned),
     )
   })
 

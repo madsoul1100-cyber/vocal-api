@@ -36,38 +36,7 @@ import {
 
 const GROUND_WORKER_ROLE_ID = '00000000-0000-0000-0000-000000000005'
 
-const WORKER_FILED_TICKET_EVENT = 'worker_filed_ticket'
-
-/** Ground worker who filed this ticket on behalf of a citizen (null if not worker-filed). */
-export async function resolveWorkerFiledByUserId(ticketId: string): Promise<string | null> {
-  if (isPostgresMode()) {
-    const res = await dbQuery<{ actor_user_id: string | null }>(
-      `SELECT actor_user_id FROM audit_logs
-       WHERE entity_type = 'ticket' AND entity_id = $1 AND event_type = $2
-       ORDER BY created_at ASC
-       LIMIT 1`,
-      [ticketId, WORKER_FILED_TICKET_EVENT],
-    )
-    return res.rows[0]?.actor_user_id ?? null
-  }
-
-  const supabase = createSupabaseServiceClient()
-  const { data } = await supabase
-    .from('audit_logs')
-    .select('actor_user_id')
-    .eq('entity_type', 'ticket')
-    .eq('entity_id', ticketId)
-    .eq('event_type', WORKER_FILED_TICKET_EVENT)
-    .order('created_at', { ascending: true })
-    .limit(1)
-    .maybeSingle()
-
-  return (data?.actor_user_id as string | null) ?? null
-}
-
-// ---------------------------------------------------------------------------
-// Geo helpers
-// ---------------------------------------------------------------------------
+import { resolveWorkerFiledByUserId } from '@/lib/workerTicketAccess.js'
 function haversineKm(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
   const R = 6371
   const dLat = (b.lat - a.lat) * Math.PI / 180

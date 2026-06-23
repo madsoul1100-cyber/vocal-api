@@ -104,7 +104,7 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 | `offered` | Current assignment offer (`status=offered`, not expired); items `{ id, offered_at, expires_at, ticket }` — ticket includes `category` (`{ id, name, source: confirmed \| ai_suggestion }`), `category_name`, `critical_flag` |
 | `active` | Owned tickets `in_progress` or `on_hold`, excluding `assigned_awaiting_acceptance`. Each item includes `sub_status_label`, `citizen_display_name`, `citizen_phone`, `category` / `category_name`, `sla_first_contact` (timer footer), `primary_action` (suggested card button), `can_request_closure` |
 | `closed` | Owned tickets with `stage=closed` **or** `sub_status=pending_closure_approval` (`closure_pending: true` on pending items) |
-| `raised` | Tickets filed by this worker (`worker_filed_ticket` audit). Includes all stages (awaiting triage through closed). Citizen name/phone shown (filer entered them). Filer is **never** auto-assigned; CS / admin must assign explicitly. |
+| `raised` | Tickets filed by this worker (`worker_filed_ticket` audit). Includes all stages. Citizen name/phone shown. `can_update_status` is `false` until CS assigns this worker and they accept. Filer is never auto-assigned. |
 
 | Query param | Description |
 |-------------|-------------|

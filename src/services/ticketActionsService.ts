@@ -19,6 +19,7 @@ import {
   validateWorkerStatusTransition,
 } from '@/lib/ticketStatusRules.js'
 import { assignTicketToWorker, canAssignTickets } from '@/services/ticketAssignmentService.js'
+import { groundWorkerMayUpdateTicket } from '@/lib/workerTicketAccess.js'
 import { notifyCitizenOfTicketUpdate } from '@/services/citizenNotifier.js'
 import { addTicketNote } from '@/services/ticketService.js'
 
@@ -321,8 +322,12 @@ export async function requestTicketClosure(
     return { ok: false as const, status: 404, error: 'Ticket not found' }
   }
 
-  if (ticket.owner_user_id !== user.id) {
-    return { ok: false as const, status: 403, error: 'You are not the owner of this ticket' }
+  const updateAccess = await groundWorkerMayUpdateTicket(user.id, ticketId, {
+    owner_user_id: ticket.owner_user_id as string | null,
+    sub_status: String(ticket.sub_status),
+  })
+  if (!updateAccess.allowed) {
+    return { ok: false as const, status: updateAccess.status, error: updateAccess.error }
   }
 
   if (ticket.stage === 'closed') {
@@ -480,8 +485,12 @@ export async function updateTicketStatus(
   const currentStage = ticket.stage as keyof typeof STAGE_ORDER
 
   if (isWorker) {
-    if (ticket.owner_user_id !== user.id) {
-      return { ok: false as const, status: 403, error: 'You are not the owner of this ticket' }
+    const updateAccess = await groundWorkerMayUpdateTicket(user.id, ticketId, {
+      owner_user_id: ticket.owner_user_id as string | null,
+      sub_status: currentSubStatus,
+    })
+    if (!updateAccess.allowed) {
+      return { ok: false as const, status: updateAccess.status, error: updateAccess.error }
     }
     const workerCheck = validateWorkerStatusTransition({
       currentSubStatus,
