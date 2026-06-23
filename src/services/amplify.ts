@@ -30,7 +30,7 @@ router.get('/', requireAuth, async (req, res) => {
   const user = requireAmplifyRole(req, res)
   if (!user) return
 
-  const { sessions, count } = await listAmplifySessions(user.organization_id)
+  const { sessions, count } = await listAmplifySessions(user)
   res.json({ sessions, count })
 })
 
@@ -57,7 +57,7 @@ router.get('/sessions/:id', requireAuth, async (req, res) => {
   if (!user) return
 
   const sessionId = String(req.params.id)
-  const session = await getAmplifySession(user.organization_id, sessionId)
+  const session = await getAmplifySession(user, sessionId)
   if (!session) {
     res.status(404).json({ error: 'Session not found' })
     return
@@ -73,6 +73,7 @@ router.post('/sessions/:id/generate', requireAuth, async (req, res) => {
   const result = await generateAmplifyDraft(user, sessionId, {
     platform: req.body?.platform as AmplifyPlatform,
     tone: req.body?.tone as AmplifyTone | undefined,
+    language: req.body?.language,
     source_ids: req.body?.source_ids,
     extra_context: req.body?.extra_context,
   })

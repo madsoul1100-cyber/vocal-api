@@ -2,9 +2,12 @@ import { createSupabaseServiceClient } from '@/lib/supabase.js'
 import { isPostgresMode, dbQuery } from '@/lib/db.js'
 import {
   generateAmplifyContent,
+  LANGUAGES,
+  parseAmplifyLanguage,
   PLATFORMS,
   TONES,
   VALID_TONE_KEYS,
+  type AmplifyLanguage,
   type AmplifyPlatform,
   type AmplifyTone,
 } from '@/services/amplifyService.js'
@@ -18,10 +21,80 @@ import {
 
 export { updateAmplifySourceSelections }
 
-export const AMPLIFY_ALLOWED_ROLES = ['super_admin', 'central_support']
+export const AMPLIFY_ALLOWED_ROLES = ['super_admin', 'central_support', 'ground_worker'] as const
+
+export const AMPLIFY_STAFF_ROLES = ['super_admin', 'central_support'] as const
+
+export type AmplifyActor = {
+  id: string
+  organization_id: string
+  roles?: { name: string } | null
+}
 
 export function canAccessAmplify(role: string | null | undefined): boolean {
-  return !!role && AMPLIFY_ALLOWED_ROLES.includes(role)
+  return !!role && (AMPLIFY_ALLOWED_ROLES as readonly string[]).includes(role)
+}
+
+function isAmplifyStaff(actor: AmplifyActor): boolean {
+  const role = actor.roles?.name
+  return !!role && (AMPLIFY_STAFF_ROLES as readonly string[]).includes(role)
+}
+
+async function assertWorkerAmplifyTicketAccess(
+  actor: AmplifyActor,
+  ticket: { owner_user_id: string | null },
+): Promise<{ ok: true } | { ok: false; status: number; error: string }> {
+  if (isAmplifyStaff(actor)) return { ok: true }
+  if (actor.roles?.name !== 'ground_worker') {
+    return { ok: false, status: 403, error: 'Insufficient role' }
+  }
+  if (ticket.owner_user_id !== actor.id) {
+    return {
+      ok: false,
+      status: 403,
+      error: 'You can only amplify tickets assigned to you',
+    }
+  }
+  return { ok: true }
+}
+
+async function loadAmplifySessionTicketOwner(
+  sessionId: string,
+  orgId: string,
+): Promise<{ owner_user_id: string | null } | null> {
+  if (isPostgresMode()) {
+    const res = await dbQuery<{ owner_user_id: string | null }>(
+      `SELECT t.owner_user_id
+       FROM amplify_sessions s
+       INNER JOIN tickets t ON t.id = s.ticket_id
+       WHERE s.id = $1 AND s.organization_id = $2`,
+      [sessionId, orgId],
+    )
+    return res.rows[0] ?? null
+  }
+
+  const supabase = createSupabaseServiceClient()
+  const { data } = await supabase
+    .from('amplify_sessions')
+    .select('tickets(owner_user_id)')
+    .eq('id', sessionId)
+    .eq('organization_id', orgId)
+    .maybeSingle()
+
+  if (!data) return null
+  const ticket = Array.isArray(data.tickets) ? data.tickets[0] : data.tickets
+  return ticket ? { owner_user_id: (ticket as { owner_user_id: string | null }).owner_user_id } : null
+}
+
+export async function assertAmplifySessionAccess(
+  actor: AmplifyActor,
+  sessionId: string,
+): Promise<{ ok: true } | { ok: false; status: number; error: string }> {
+  if (isAmplifyStaff(actor)) return { ok: true }
+
+  const row = await loadAmplifySessionTicketOwner(sessionId, actor.organization_id)
+  if (!row) return { ok: false, status: 404, error: 'Session not found' }
+  return assertWorkerAmplifyTicketAccess(actor, row)
 }
 
 export interface AmplifySessionListItem {
@@ -62,23 +135,31 @@ export interface AmplifySessionDetail {
   }>
   platforms: typeof PLATFORMS
   tones: typeof TONES
+  languages: typeof LANGUAGES
 }
 
 export async function listAmplifySessions(
-  orgId: string,
+  user: AmplifyActor,
 ): Promise<{ sessions: AmplifySessionListItem[]; count: number }> {
+  const workerScope = user.roles?.name === 'ground_worker' ? user.id : null
   if (isPostgresMode()) {
-    return listAmplifySessionsPg(orgId)
+    return listAmplifySessionsPg(user.organization_id, workerScope)
   }
-  return listAmplifySessionsSupabase(orgId)
+  return listAmplifySessionsSupabase(user.organization_id, workerScope)
 }
 
 async function listAmplifySessionsPg(
   orgId: string,
+  workerUserId: string | null,
 ): Promise<{ sessions: AmplifySessionListItem[]; count: number }> {
+  const workerClause = workerUserId ? ' AND t.owner_user_id = $2' : ''
+  const countParams = workerUserId ? [orgId, workerUserId] : [orgId]
   const countRes = await dbQuery<{ c: string }>(
-    `SELECT COUNT(*)::text AS c FROM amplify_sessions WHERE organization_id = $1`,
-    [orgId],
+    `SELECT COUNT(*)::text AS c
+     FROM amplify_sessions s
+     INNER JOIN tickets t ON t.id = s.ticket_id
+     WHERE s.organization_id = $1${workerClause}`,
+    countParams,
   )
   const count = Number(countRes.rows[0]?.c ?? 0)
 
@@ -99,10 +180,10 @@ async function listAmplifySessionsPg(
      FROM amplify_sessions s
      LEFT JOIN tickets t ON t.id = s.ticket_id
      LEFT JOIN users u ON u.id = s.created_by
-     WHERE s.organization_id = $1
+     WHERE s.organization_id = $1${workerClause}
      ORDER BY s.created_at DESC
      LIMIT 50`,
-    [orgId],
+    countParams,
   )
 
   return { sessions: res.rows, count }
@@ -110,14 +191,15 @@ async function listAmplifySessionsPg(
 
 async function listAmplifySessionsSupabase(
   orgId: string,
+  workerUserId: string | null,
 ): Promise<{ sessions: AmplifySessionListItem[]; count: number }> {
   const supabase = createSupabaseServiceClient()
-  const { data, count } = await supabase
+  let query = supabase
     .from('amplify_sessions')
     .select(
       `
       id, status, created_at, updated_at,
-      tickets(id, ticket_number, title),
+      tickets!inner(id, ticket_number, title, owner_user_id),
       users!amplify_sessions_created_by_fkey(full_name)
     `,
       { count: 'exact' },
@@ -126,6 +208,12 @@ async function listAmplifySessionsSupabase(
     .order('created_at', { ascending: false })
     .limit(50)
 
+  if (workerUserId) {
+    query = query.eq('tickets.owner_user_id', workerUserId)
+  }
+
+  const { data, count } = await query
+
   return {
     sessions: (data ?? []) as unknown as AmplifySessionListItem[],
     count: count ?? 0,
@@ -133,13 +221,16 @@ async function listAmplifySessionsSupabase(
 }
 
 export async function getAmplifySession(
-  orgId: string,
+  user: AmplifyActor,
   sessionId: string,
 ): Promise<AmplifySessionDetail | null> {
+  const access = await assertAmplifySessionAccess(user, sessionId)
+  if (!access.ok) return null
+
   if (isPostgresMode()) {
-    return getAmplifySessionPg(orgId, sessionId)
+    return getAmplifySessionPg(user.organization_id, sessionId)
   }
-  return getAmplifySessionSupabase(orgId, sessionId)
+  return getAmplifySessionSupabase(user.organization_id, sessionId)
 }
 
 async function getAmplifySessionPg(
@@ -225,6 +316,7 @@ async function getAmplifySessionPg(
     })),
     platforms: PLATFORMS,
     tones: TONES,
+    languages: LANGUAGES,
   }
 }
 
@@ -288,23 +380,31 @@ async function getAmplifySessionSupabase(
     outputs: (outputs ?? []) as AmplifySessionDetail['outputs'],
     platforms: PLATFORMS,
     tones: TONES,
+    languages: LANGUAGES,
   }
 }
 
 export async function createAmplifySession(
-  user: { id: string; organization_id: string },
+  user: AmplifyActor,
   ticketId: string,
 ): Promise<{ ok: true; id: string; reused: boolean } | { ok: false; status: number; error: string }> {
   const supabase = createSupabaseServiceClient()
 
   const { data: ticket } = await supabase
     .from('tickets')
-    .select('id, organization_id, original_issue_text, normalized_summary, stage')
+    .select('id, organization_id, owner_user_id, original_issue_text, normalized_summary, stage')
     .eq('id', ticketId)
     .single()
 
   if (!ticket || ticket.organization_id !== user.organization_id) {
     return { ok: false, status: 404, error: 'Ticket not found' }
+  }
+
+  const ticketAccess = await assertWorkerAmplifyTicketAccess(user, {
+    owner_user_id: ticket.owner_user_id as string | null,
+  })
+  if (!ticketAccess.ok) {
+    return { ok: false, status: ticketAccess.status, error: ticketAccess.error }
   }
 
   const { data: existing } = await supabase
@@ -360,11 +460,12 @@ export async function createAmplifySession(
 }
 
 export async function generateAmplifyDraft(
-  user: { id: string; organization_id: string },
+  user: AmplifyActor,
   sessionId: string,
   body: {
     platform: AmplifyPlatform
     tone?: AmplifyTone
+    language?: AmplifyLanguage | string
     source_ids?: string[]
     extra_context?: string
   },
@@ -372,8 +473,22 @@ export async function generateAmplifyDraft(
   | { ok: true; output: AmplifySessionDetail['outputs'][0] }
   | { ok: false; status: number; error: string }
 > {
+  const access = await assertAmplifySessionAccess(user, sessionId)
+  if (!access.ok) {
+    return { ok: false, status: access.status, error: access.error }
+  }
+
   const platformKeys = new Set(PLATFORMS.map((p) => p.key))
   const tone = body.tone ?? 'informative'
+
+  let language: AmplifyLanguage = 'english'
+  if (body.language !== undefined && body.language !== null && body.language !== '') {
+    const parsed = parseAmplifyLanguage(body.language)
+    if (!parsed) {
+      return { ok: false, status: 400, error: 'Invalid language — use english or telugu' }
+    }
+    language = parsed
+  }
 
   if (!platformKeys.has(body.platform)) {
     return { ok: false, status: 400, error: 'Invalid platform' }
@@ -429,6 +544,7 @@ export async function generateAmplifyDraft(
   const result = await generateAmplifyContent({
     platform: body.platform,
     tone,
+    language,
     sources: labeledSources,
     extraContext: body.extra_context,
   })
@@ -446,6 +562,7 @@ export async function generateAmplifyDraft(
         fallback: result.fallback,
         error: result.error ?? null,
         source_count: labeledSources.length,
+        language,
       },
     })
     .select('id, output_format, tone, content, model_used, generated_at, metadata_json')
@@ -462,7 +579,7 @@ export async function generateAmplifyDraft(
     entity_id: sessionId,
     actor_type: 'user',
     actor_user_id: user.id,
-    metadata_json: { platform: body.platform, tone, fallback: result.fallback },
+    metadata_json: { platform: body.platform, tone, language, fallback: result.fallback },
   })
 
   return {

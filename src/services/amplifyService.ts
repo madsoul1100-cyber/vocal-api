@@ -20,6 +20,27 @@ const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY ?? ''
 // OPENROUTER_MODEL env if you want a specific model.
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL ?? 'google/gemini-2.5-flash'
 
+export type AmplifyLanguage = 'english' | 'telugu'
+
+export interface LanguageMeta {
+  key: AmplifyLanguage
+  label: string
+}
+
+export const LANGUAGES: LanguageMeta[] = [
+  { key: 'english', label: 'English' },
+  { key: 'telugu', label: 'Telugu (తెలుగు)' },
+]
+
+export const VALID_LANGUAGE_KEYS = new Set<AmplifyLanguage>(LANGUAGES.map((l) => l.key))
+
+export function parseAmplifyLanguage(raw: unknown): AmplifyLanguage | null {
+  const v = typeof raw === 'string' ? raw.trim().toLowerCase() : ''
+  if (v === 'english' || v === 'en') return 'english'
+  if (v === 'telugu' || v === 'te' || v === 'tel') return 'telugu'
+  return null
+}
+
 export type AmplifyPlatform =
   | 'tweet'                  // X/Twitter — single tweet or short thread
   | 'instagram_caption'      // IG caption w/ hashtags
@@ -159,7 +180,27 @@ function isCampaignTone(tone: AmplifyTone): boolean {
   return tone === 'activist' || tone === 'opposition' || tone === 'public_shame'
 }
 
-function systemPromptFor(platform: AmplifyPlatform, tone: AmplifyTone): string {
+function languageGuidance(language: AmplifyLanguage): string {
+  if (language === 'telugu') {
+    return (
+      'OUTPUT LANGUAGE: Write the entire draft in Telugu (తెలుగు) using Telugu script (Unicode). ' +
+      'Use natural, conversational Telugu suitable for social media or formal correspondence as ' +
+      'the platform requires. Do not write body text in English. English is allowed only for ' +
+      'hashtags, @-mention placeholders ([@CMO], etc.), ticket numbers, and proper nouns that ' +
+      'appear verbatim in the source material.'
+    )
+  }
+  return (
+    'OUTPUT LANGUAGE: Write the entire draft in English. Use clear Indian English where natural ' +
+    'for civic communication.'
+  )
+}
+
+function systemPromptFor(
+  platform: AmplifyPlatform,
+  tone: AmplifyTone,
+  language: AmplifyLanguage,
+): string {
   const campaign = isCampaignTone(tone)
 
   // Base rules — these never bend.
@@ -169,6 +210,7 @@ function systemPromptFor(platform: AmplifyPlatform, tone: AmplifyTone): string {
     `human review, so it must be immediately usable — no placeholder like "[insert detail]" unless ` +
     `the template specifically calls for one, no meta-commentary, no "here is your draft" preamble, ` +
     `no markdown code fences, no word "Disclaimer". Output plain text only.\n\n` +
+    `${languageGuidance(language)}\n\n` +
     `Legal safety (non-negotiable):\n` +
     `  • Never assert a specific person is guilty of a crime, corruption, or dishonesty unless the ` +
     `source material explicitly establishes it.\n` +
@@ -282,6 +324,7 @@ function systemPromptFor(platform: AmplifyPlatform, tone: AmplifyTone): string {
 export interface GenerateArgs {
   platform: AmplifyPlatform
   tone: AmplifyTone
+  language: AmplifyLanguage
   sources: Array<{ label: string; content: string }>
   extraContext?: string
 }
@@ -301,7 +344,9 @@ export async function generateAmplifyContent(args: GenerateArgs): Promise<Genera
 
   const userPrompt = `Source material for the grievance:\n\n${sourceBlock}${
     args.extraContext ? `\n\nAdditional context: ${args.extraContext}` : ''
-  }\n\nDraft the requested content now.`
+  }\n\nDraft the requested content now in ${
+    args.language === 'telugu' ? 'Telugu (తెలుగు script)' : 'English'
+  }.`
 
   if (!OPENROUTER_API_KEY) {
     return {
@@ -324,7 +369,7 @@ export async function generateAmplifyContent(args: GenerateArgs): Promise<Genera
       body: JSON.stringify({
         model: OPENROUTER_MODEL,
         messages: [
-          { role: 'system', content: systemPromptFor(args.platform, args.tone) },
+          { role: 'system', content: systemPromptFor(args.platform, args.tone, args.language) },
           { role: 'user',   content: userPrompt },
         ],
         temperature: 0.6,
@@ -353,8 +398,30 @@ export async function generateAmplifyContent(args: GenerateArgs): Promise<Genera
 }
 
 function fallbackDraft(args: GenerateArgs, sources: string): string {
-  const tag = `[Auto-generated fallback — AI unavailable. Please edit before publishing.]`
+  const tag =
+    args.language === 'telugu'
+      ? `[స్వయంచాలక ఫాల్‌బ్యాక్ — AI అందుబాటులో లేదు. ప్రచురించే ముందు సవరించండి.]`
+      : `[Auto-generated fallback — AI unavailable. Please edit before publishing.]`
   const summary = sources.slice(0, 500)
+
+  if (args.language === 'telugu') {
+    switch (args.platform) {
+      case 'tweet':
+        return `${tag}\n\nపౌరులు ఒక తీవ్రమైన సమస్యను ఎత్తిపలుకుతున్నారు — వెంటనే దృష్టి సారించాలి.\n#Accountability #MyLeader`
+      case 'instagram_caption':
+      case 'facebook_post':
+        return `${tag}\n\nఒక పౌరుడు దృష్టికి తీసుకురావాల్సిన సమస్యను నమోదు చేశారు:\n\n${summary}\n\nమేము టికెట్ దాఖలు చేసి పురోగతిని ట్రాక్ చేస్తున్నాం. దయచేసి షేర్ చేసి వాయిస్ ఇవ్వండి.`
+      case 'whatsapp_broadcast':
+        return `${tag}\n\n*పౌర ఫిర్యాదు దాఖలు*\n\n${summary}\n\nఎస్కలేట్ చేయగల వారికి ఫార్వర్డ్ చేయండి.`
+      case 'news_article':
+        return `${tag}\n\nశీర్షిక: పౌర ఫిర్యాదుకు చర్య అవసరం\n\nలీడ్: ఒక పౌరుడు అధికారిక దృష్టి అవసరమైన ఫిర్యాదు దాఖలు చేశారు.\n\n${summary}`
+      case 'letter_to_authority':
+        return `${tag}\n\n[తేదీ]\n\nకు,\n[అధికారి పేరు & పదవి]\n\nవిషయం: వెంటనే చర్య అవసరమైన పౌర ఫిర్యాదు\n\nగౌరవనీయులారా,\n\n${summary}\n\nమీ త్వరిత జోక్యం కోసం విన్నతిస్తున్నాం.\n\nభక్తితో,\n[పేరు & సంప్రదింపు]`
+      case 'press_release':
+        return `${tag}\n\nFOR IMMEDIATE RELEASE\n\n[నగరం, తేదీ] — ${tenantApp.name} ఈరోజు అధికారిక దృష్టి అవసరమైన పౌర ఫిర్యాదును వెల్లడించింది.\n\n${summary}`
+    }
+  }
+
   switch (args.platform) {
     case 'tweet':
       return `${tag}\n\nCitizens are raising a serious concern that needs urgent attention. Read below and share.\n#Accountability #MyLeader`

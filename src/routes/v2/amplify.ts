@@ -2,6 +2,7 @@ import { Router } from 'express'
 import { requireAuth } from '@/middleware/requireAuth.js'
 import type { AmplifyPlatform, AmplifyTone } from '@/services/amplifyService.js'
 import {
+  assertAmplifySessionAccess,
   canAccessAmplify,
   createAmplifySession,
   generateAmplifyDraft,
@@ -31,7 +32,7 @@ router.get('/', requireAuth, async (req, res) => {
   const user = requireAmplifyRole(req, res)
   if (!user) return
 
-  const { sessions, count } = await listAmplifySessions(user.organization_id)
+  const { sessions, count } = await listAmplifySessions(user)
   res.json({ sessions, count })
 })
 
@@ -58,7 +59,7 @@ router.get('/sessions/:id', requireAuth, async (req, res) => {
   if (!user) return
 
   const sessionId = String(req.params.id)
-  const session = await getAmplifySession(user.organization_id, sessionId)
+  const session = await getAmplifySession(user, sessionId)
   if (!session) {
     res.status(404).json({ error: 'Session not found' })
     return
@@ -72,6 +73,12 @@ router.patch('/sessions/:id/sources', requireAuth, async (req, res) => {
   if (!user) return
 
   const sessionId = String(req.params.id)
+  const access = await assertAmplifySessionAccess(user, sessionId)
+  if (!access.ok) {
+    res.status(access.status).json({ error: access.error })
+    return
+  }
+
   const raw = req.body?.sources
   if (!Array.isArray(raw)) {
     res.status(400).json({ error: 'sources array is required' })
@@ -93,7 +100,7 @@ router.patch('/sessions/:id/sources', requireAuth, async (req, res) => {
     return
   }
 
-  const session = await getAmplifySession(user.organization_id, sessionId)
+  const session = await getAmplifySession(user, sessionId)
   res.json({ ok: true, sources: session?.sources ?? [] })
 })
 
@@ -105,6 +112,7 @@ router.post('/sessions/:id/generate', requireAuth, async (req, res) => {
   const result = await generateAmplifyDraft(user, sessionId, {
     platform: req.body?.platform as AmplifyPlatform,
     tone: req.body?.tone as AmplifyTone | undefined,
+    language: req.body?.language,
     source_ids: req.body?.source_ids,
     extra_context: req.body?.extra_context,
   })
