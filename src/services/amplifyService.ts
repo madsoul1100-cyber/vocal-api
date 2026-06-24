@@ -85,6 +85,19 @@ export const PLATFORMS: PlatformMeta[] = [
   { key: 'press_release',      label: 'Press Release',       short_hint: 'FOR IMMEDIATE RELEASE header, dateline, body, boilerplate.' },
 ]
 
+/** Ground workers may only generate these formats. */
+export const WORKER_AMPLIFY_PLATFORMS = new Set<AmplifyPlatform>([
+  'letter_to_authority',
+  'whatsapp_broadcast',
+])
+
+export function platformsForAmplifyRole(role: string | null | undefined): PlatformMeta[] {
+  if (role === 'ground_worker') {
+    return PLATFORMS.filter((p) => WORKER_AMPLIFY_PLATFORMS.has(p.key))
+  }
+  return PLATFORMS
+}
+
 export interface ToneMeta {
   key: AmplifyTone
   label: string

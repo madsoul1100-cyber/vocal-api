@@ -4,9 +4,11 @@ import {
   generateAmplifyContent,
   LANGUAGES,
   parseAmplifyLanguage,
+  platformsForAmplifyRole,
   PLATFORMS,
   TONES,
   VALID_TONE_KEYS,
+  WORKER_AMPLIFY_PLATFORMS,
   type AmplifyLanguage,
   type AmplifyPlatform,
   type AmplifyTone,
@@ -227,10 +229,16 @@ export async function getAmplifySession(
   const access = await assertAmplifySessionAccess(user, sessionId)
   if (!access.ok) return null
 
-  if (isPostgresMode()) {
-    return getAmplifySessionPg(user.organization_id, sessionId)
+  const detail = isPostgresMode()
+    ? await getAmplifySessionPg(user.organization_id, sessionId)
+    : await getAmplifySessionSupabase(user.organization_id, sessionId)
+
+  if (!detail) return null
+
+  return {
+    ...detail,
+    platforms: platformsForAmplifyRole(user.roles?.name),
   }
-  return getAmplifySessionSupabase(user.organization_id, sessionId)
 }
 
 async function getAmplifySessionPg(
@@ -492,6 +500,16 @@ export async function generateAmplifyDraft(
 
   if (!platformKeys.has(body.platform)) {
     return { ok: false, status: 400, error: 'Invalid platform' }
+  }
+  if (
+    user.roles?.name === 'ground_worker' &&
+    !WORKER_AMPLIFY_PLATFORMS.has(body.platform)
+  ) {
+    return {
+      ok: false,
+      status: 403,
+      error: 'Workers can only generate Letter to Authority or WhatsApp Broadcast',
+    }
   }
   if (!VALID_TONE_KEYS.has(tone)) {
     return { ok: false, status: 400, error: 'Invalid tone' }
