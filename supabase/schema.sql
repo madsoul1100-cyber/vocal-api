@@ -125,6 +125,14 @@ create index users_org_idx on users(organization_id);
 create index users_clerk_idx on users(clerk_user_id);
 create index users_role_idx on users(role_id);
 
+create unique index users_email_lower_unique_idx
+  on users (lower(trim(email)))
+  where email is not null and trim(email) <> '';
+
+create unique index users_org_phone_unique_idx
+  on users (organization_id, phone)
+  where phone is not null and trim(phone) <> '';
+
 -- User territory assignments (many users can cover many territories)
 create table user_territories (
   id           uuid primary key default uuid_generate_v4(),

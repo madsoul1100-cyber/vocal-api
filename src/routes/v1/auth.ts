@@ -54,12 +54,16 @@ router.post('/otp/request', async (req, res) => {
   const purpose =
     req.body?.purpose === 'forgot_password' ? ('forgot_password' as const) : ('login' as const)
 
-  if (!email.trim() || !phone.trim()) {
-    res.status(400).json({ error: 'email and phone are required' })
+  if (!email.trim() && !phone.trim()) {
+    res.status(400).json({ error: 'email or phone is required' })
     return
   }
 
-  const result = await requestStaffOtp({ email, phone, purpose })
+  const result = await requestStaffOtp({
+    email: email.trim() || undefined,
+    phone: phone.trim() || undefined,
+    purpose,
+  })
   if (!result.ok) {
     res.status(result.status).json({ error: result.error })
     return
@@ -83,12 +87,17 @@ router.post('/otp/verify', async (req, res) => {
   const purpose =
     req.body?.purpose === 'forgot_password' ? ('forgot_password' as const) : ('login' as const)
 
-  if (!email.trim() || !phone.trim() || !otp.trim()) {
-    res.status(400).json({ error: 'email, phone, and otp are required' })
+  if ((!email.trim() && !phone.trim()) || !otp.trim()) {
+    res.status(400).json({ error: 'otp and either email or phone are required' })
     return
   }
 
-  const result = await verifyStaffOtp({ email, phone, otp, purpose })
+  const result = await verifyStaffOtp({
+    email: email.trim() || undefined,
+    phone: phone.trim() || undefined,
+    otp,
+    purpose,
+  })
   if (!result.ok) {
     res.status(result.status).json({ error: result.error })
     return

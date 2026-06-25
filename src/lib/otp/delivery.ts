@@ -68,22 +68,23 @@ export interface DeliverOtpResult {
 export async function deliverStaffOtp(args: {
   code: string
   purpose: OtpPurpose
-  email: string
-  phone: string
+  email?: string
+  phone?: string
+  channelPreference?: 'sms_first' | 'email_first'
 }): Promise<{ ok: true; result: DeliverOtpResult } | { ok: false; error: string }> {
   const payload = buildPayload(args.code, args.purpose)
-  const preference = otpChannelPreference()
+  const preference = args.channelPreference ?? otpChannelPreference()
   const enabled = new Set(otpEnabledChannels())
 
   const ordered: Array<{ channel: OtpChannel; destination: string }> =
     preference === 'email_first'
       ? [
-          { channel: 'email', destination: args.email },
-          { channel: 'sms', destination: args.phone },
+          ...(args.email ? [{ channel: 'email' as const, destination: args.email }] : []),
+          ...(args.phone ? [{ channel: 'sms' as const, destination: args.phone }] : []),
         ]
       : [
-          { channel: 'sms', destination: args.phone },
-          { channel: 'email', destination: args.email },
+          ...(args.phone ? [{ channel: 'sms' as const, destination: args.phone }] : []),
+          ...(args.email ? [{ channel: 'email' as const, destination: args.email }] : []),
         ]
 
   const attempts = ordered.filter((a) => enabled.has(a.channel))
@@ -91,7 +92,9 @@ export async function deliverStaffOtp(args: {
   if (attempts.length === 0) {
     return {
       ok: false,
-      error: 'No OTP channels enabled. Set OTP_CHANNELS=sms and/or email in environment.',
+      error: args.email || args.phone
+        ? 'No OTP delivery channel available for this account. Contact your admin.'
+        : 'No OTP channels enabled. Set OTP_CHANNELS=sms and/or email in environment.',
     }
   }
 

@@ -52,13 +52,34 @@ type StaffOtpLookupResult =
   | { ok: true; user: Record<string, unknown> }
   | { ok: false; error: string; status: number }
 
-async function lookupStaffUserForOtp(email: string, phone: string): Promise<StaffOtpLookupResult> {
-  const normalizedEmail = normalizeEmail(email)
-  const normalizedPhone = normalizePhone(phone)
-  if (!normalizedEmail) {
+export type OtpStaffIdentifier = {
+  email?: string
+  phone?: string
+}
+
+const USER_OTP_SELECT = '*, roles(*), organizations(name)'
+
+function parseOtpStaffIdentifier(ident: OtpStaffIdentifier): {
+  ok: true
+  emailRaw: string
+  phoneRaw: string
+  normalizedEmail: string
+  normalizedPhone: string | null
+} | { ok: false; error: string; status: number } {
+  const emailRaw = ident.email?.trim() ?? ''
+  const phoneRaw = ident.phone?.trim() ?? ''
+
+  if (!emailRaw && !phoneRaw) {
+    return { ok: false, error: 'Enter your email or mobile number', status: 400 }
+  }
+
+  const normalizedEmail = emailRaw ? normalizeEmail(emailRaw) : ''
+  if (emailRaw && !normalizedEmail) {
     return { ok: false, error: 'Enter a valid email address', status: 400 }
   }
-  if (!normalizedPhone) {
+
+  const normalizedPhone = phoneRaw ? normalizePhone(phoneRaw) : null
+  if (phoneRaw && !normalizedPhone) {
     return {
       ok: false,
       error: 'Enter a valid mobile number (10 digits, or +91…)',
@@ -66,36 +87,122 @@ async function lookupStaffUserForOtp(email: string, phone: string): Promise<Staf
     }
   }
 
+  return { ok: true, emailRaw, phoneRaw, normalizedEmail, normalizedPhone }
+}
+
+async function findStaffUserByPhone(
+  normalizedPhone: string,
+  phoneRaw: string,
+): Promise<Record<string, unknown> | null> {
   const supabase = createSupabaseServiceClient()
-  const { data: user } = await supabase
+
+  const { data: exact } = await supabase
     .from('users')
-    .select('*, roles(*), organizations(name)')
-    .eq('email', normalizedEmail)
+    .select(USER_OTP_SELECT)
+    .eq('phone', normalizedPhone)
     .maybeSingle()
+  if (exact) return exact as Record<string, unknown>
 
+  const digits = normalizedPhone.replace(/\D/g, '')
+  const variants = new Set<string>([
+    digits,
+    `+${digits}`,
+    digits.length === 12 && digits.startsWith('91') ? digits.slice(2) : '',
+    digits.length === 10 ? `91${digits}` : '',
+    digits.length === 12 && digits.startsWith('91') ? `+${digits}` : '',
+  ])
+  for (const variant of variants) {
+    if (!variant) continue
+    const { data } = await supabase
+      .from('users')
+      .select(USER_OTP_SELECT)
+      .eq('phone', variant)
+      .maybeSingle()
+    if (data) return data as Record<string, unknown>
+  }
+
+  const { data: rows } = await supabase
+    .from('users')
+    .select(USER_OTP_SELECT)
+    .not('phone', 'is', null)
+
+  const matches = (rows ?? []).filter((row) =>
+    phonesMatch((row as { phone?: string | null }).phone, phoneRaw),
+  )
+  if (matches.length === 1) return matches[0] as Record<string, unknown>
+  return null
+}
+
+async function lookupStaffUserForOtp(ident: OtpStaffIdentifier): Promise<StaffOtpLookupResult> {
+  const parsed = parseOtpStaffIdentifier(ident)
+  if (!parsed.ok) return parsed
+
+  const { emailRaw, phoneRaw, normalizedEmail, normalizedPhone } = parsed
+  const supabase = createSupabaseServiceClient()
+
+  if (normalizedEmail && normalizedPhone) {
+    const { data: user } = await supabase
+      .from('users')
+      .select(USER_OTP_SELECT)
+      .eq('email', normalizedEmail)
+      .maybeSingle()
+
+    if (!user) {
+      return { ok: false, error: 'No account found with this email', status: 404 }
+    }
+
+    const storedPhone = (user as Record<string, unknown>).phone as string | null | undefined
+    if (!storedPhone?.trim()) {
+      return {
+        ok: false,
+        error:
+          'No mobile number on this account. Sign in with email only, or ask your admin to add your phone.',
+        status: 403,
+      }
+    }
+
+    if (!phonesMatch(storedPhone, phoneRaw)) {
+      return {
+        ok: false,
+        error: 'This mobile number does not match the phone saved on your account',
+        status: 404,
+      }
+    }
+
+    return { ok: true, user: user as Record<string, unknown> }
+  }
+
+  if (normalizedEmail) {
+    const { data: user } = await supabase
+      .from('users')
+      .select(USER_OTP_SELECT)
+      .eq('email', normalizedEmail)
+      .maybeSingle()
+
+    if (!user) {
+      return { ok: false, error: 'No account found with this email', status: 404 }
+    }
+
+    return { ok: true, user: user as Record<string, unknown> }
+  }
+
+  const user = await findStaffUserByPhone(normalizedPhone!, phoneRaw)
   if (!user) {
-    return { ok: false, error: 'No account found with this email', status: 404 }
-  }
-
-  const storedPhone = (user as Record<string, unknown>).phone as string | null | undefined
-  if (!storedPhone?.trim()) {
-    return {
-      ok: false,
-      error:
-        'No mobile number on this account. Ask your admin to add your phone on the Workers profile, or sign in with password.',
-      status: 403,
+    const { data: rows } = await supabase.from('users').select(USER_OTP_SELECT).not('phone', 'is', null)
+    const matches = (rows ?? []).filter((row) =>
+      phonesMatch((row as { phone?: string | null }).phone, phoneRaw),
+    )
+    if (matches.length > 1) {
+      return {
+        ok: false,
+        error: 'Multiple accounts match this mobile number. Sign in with your email instead.',
+        status: 409,
+      }
     }
+    return { ok: false, error: 'No account found with this mobile number', status: 404 }
   }
 
-  if (!phonesMatch(storedPhone, phone)) {
-    return {
-      ok: false,
-      error: 'This mobile number does not match the phone saved on your account',
-      status: 404,
-    }
-  }
-
-  return { ok: true, user: user as Record<string, unknown> }
+  return { ok: true, user }
 }
 
 function generateOtpCode(): string {
@@ -119,10 +226,10 @@ function maskDestination(channel: 'sms' | 'email', dest: string): string {
 }
 
 export async function findStaffUserByEmailAndPhone(
-  email: string,
-  phone: string,
+  email?: string,
+  phone?: string,
 ): Promise<Record<string, unknown> | null> {
-  const result = await lookupStaffUserForOtp(email, phone)
+  const result = await lookupStaffUserForOtp({ email, phone })
   return result.ok ? result.user : null
 }
 
@@ -143,8 +250,8 @@ function assertUserCanAuthenticate(
 }
 
 export async function requestStaffOtp(args: {
-  email: string
-  phone: string
+  email?: string
+  phone?: string
   purpose: OtpPurpose
 }): Promise<
   | {
@@ -157,7 +264,7 @@ export async function requestStaffOtp(args: {
     }
   | { ok: false; error: string; status: number }
 > {
-  const lookup = await lookupStaffUserForOtp(args.email, args.phone)
+  const lookup = await lookupStaffUserForOtp({ email: args.email, phone: args.phone })
   if (!lookup.ok) {
     return { ok: false, error: lookup.error, status: lookup.status }
   }
@@ -168,10 +275,28 @@ export async function requestStaffOtp(args: {
     return { ok: false, error: gate.error, status: gate.status ?? 403 }
   }
 
+  const parsedIdent = parseOtpStaffIdentifier({ email: args.email, phone: args.phone })
+  if (!parsedIdent.ok) {
+    return { ok: false, error: parsedIdent.error, status: parsedIdent.status }
+  }
+
   const supabase = createSupabaseServiceClient()
   const userId = user.id as string
-  const email = normalizeEmail(args.email)
-  const phone = normalizePhone(args.phone)!
+  const accountEmail = typeof user.email === 'string' ? normalizeEmail(user.email) : ''
+  const accountPhoneRaw = typeof user.phone === 'string' ? user.phone.trim() : ''
+  const accountPhone = accountPhoneRaw ? normalizePhone(accountPhoneRaw) : null
+
+  if (!accountEmail && !accountPhone) {
+    return {
+      ok: false,
+      error: 'Account has no email or mobile number on file. Contact your admin.',
+      status: 403,
+    }
+  }
+
+  const { emailRaw, phoneRaw } = parsedIdent
+  const channelPreference =
+    phoneRaw && !emailRaw ? ('sms_first' as const) : emailRaw && !phoneRaw ? ('email_first' as const) : undefined
 
   const recent = await supabase
     .from('staff_auth_otps')
@@ -204,8 +329,9 @@ export async function requestStaffOtp(args: {
   const delivery = await deliverStaffOtp({
     code,
     purpose: args.purpose,
-    email,
-    phone,
+    email: accountEmail || undefined,
+    phone: accountPhone || undefined,
+    channelPreference,
   })
 
   if (!delivery.ok) {
@@ -240,8 +366,8 @@ export async function requestStaffOtp(args: {
 }
 
 export async function verifyStaffOtp(args: {
-  email: string
-  phone: string
+  email?: string
+  phone?: string
   otp: string
   purpose: OtpPurpose
 }): Promise<
