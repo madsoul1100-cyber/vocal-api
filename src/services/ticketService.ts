@@ -6,6 +6,7 @@
  */
 
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
+import { buildTriageCompletePatch } from '@/services/ticketTriageService.js'
 
 export interface CreateTicketInput {
   organizationId: string
@@ -24,6 +25,8 @@ export interface CreateTicketInput {
   createdBySystem?: boolean
   createdByUserId?: string | null
   stageHistoryReason?: string
+  /** When false, ticket skips the CS triage queue (e.g. super_admin field intake). Default true. */
+  needsTriage?: boolean
 }
 
 export interface TicketCreationResult {
@@ -67,13 +70,22 @@ export async function createTicket(input: CreateTicketInput): Promise<TicketCrea
   const needsLocationValidation = !hasUsableLocation
   const incompleteInfo = !input.originalIssueText
 
-  const initialSubStatus = incompleteInfo
+  let initialSubStatus = incompleteInfo
     ? 'incomplete_information'
     : needsLocationValidation
       ? 'needs_location_validation'
       : 'new_awaiting_triage'
 
-  // const createdBySystem = input.createdBySystem !== false
+  const needsTriage = input.needsTriage !== false
+  if (!needsTriage) {
+    const triagePatch = buildTriageCompletePatch({
+      stage: 'to_do',
+      sub_status: initialSubStatus,
+    })
+    if (typeof triagePatch.sub_status === 'string') {
+      initialSubStatus = triagePatch.sub_status
+    }
+  }
 
   const { data: ticket, error } = await supabase
     .from('tickets')
@@ -94,7 +106,7 @@ export async function createTicket(input: CreateTicketInput): Promise<TicketCrea
       sub_status: initialSubStatus,
       incomplete_information_flag: incompleteInfo,
       needs_location_validation_flag: needsLocationValidation,
-      needs_triage: true,
+      needs_triage: needsTriage,
       needs_closure_review: false,
       created_by_system: input.createdBySystem ?? true,
       last_updated_by_user_id: input.createdByUserId ?? null,

@@ -6,7 +6,8 @@
  *
  * Required: name, number, address, description.
  * Optional: geo coordinates, photos.
- * Ticket is linked to a citizen record and queued for central support triage.
+ * Ticket is linked to a citizen record and queued for central support triage,
+ * except super_admin intake which skips CS triage (ready for assignment).
  */
 
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
@@ -16,8 +17,10 @@ import { resolveCitizenForWorkerIntake } from '@/services/citizenService.js'
 import { enrichTicketFromIssueText } from '@/services/ticketIntakeAi.js'
 import { intakeTerritoryAutoAssign } from '@/services/assignmentService.js'
 import { addTicketNote, createTicket } from '@/services/ticketService.js'
+import { buildTriageCompletePatch } from '@/services/ticketTriageService.js'
 
 const PRIVILEGED_INTAKE_ROLES = new Set(['super_admin', 'central_support'])
+const SKIP_CS_TRIAGE_INTAKE_ROLES = new Set(['super_admin'])
 
 type VocalUser = {
   id: string
@@ -41,7 +44,7 @@ export interface WorkerTicketIntakeResult {
   ticket_number: string
   stage: string
   sub_status: string
-  needs_triage: true
+  needs_triage: boolean
   citizen_id: string
   citizen_verified: boolean
   citizen_is_new: boolean
@@ -67,7 +70,7 @@ export type WorkerFileTicketResult =
       ticket_number: string
       stage: string
       sub_status: string
-      needs_triage: true
+      needs_triage: boolean
       citizen_id: string
       citizen_verified: boolean
       citizen_is_new: boolean
@@ -76,21 +79,35 @@ export type WorkerFileTicketResult =
   | { ok: false; status: number; error: string }
 
 /** Mirrors createTicket initial stage/sub_status for manual intake responses. */
-function initialIntakeTicketStatus(input: WorkerTicketIntakeInput): {
+function initialIntakeTicketStatus(
+  input: WorkerTicketIntakeInput,
+  skipCsTriage = false,
+): {
   stage: string
   sub_status: string
+  needs_triage: boolean
 } {
   const hasUsableLocation = !!(
     input.address.trim() ||
     (input.latitude != null && input.longitude != null)
   )
   const incompleteInfo = !input.description.trim()
-  const sub_status = incompleteInfo
+  const stage = 'to_do'
+  let sub_status = incompleteInfo
     ? 'incomplete_information'
     : !hasUsableLocation
       ? 'needs_location_validation'
       : 'new_awaiting_triage'
-  return { stage: 'to_do', sub_status }
+
+  if (skipCsTriage) {
+    const triagePatch = buildTriageCompletePatch({ stage, sub_status })
+    if (typeof triagePatch.sub_status === 'string') {
+      sub_status = triagePatch.sub_status
+    }
+    return { stage, sub_status, needs_triage: false }
+  }
+
+  return { stage, sub_status, needs_triage: true }
 }
 
 function parseCoord(raw: unknown): number | undefined {
@@ -371,6 +388,8 @@ type IntakeCoreParams = {
   territoryId?: string | null
   /** Ground-worker field intake: CS must assign; no territory auto-route to filer. */
   skipTerritoryAutoAssign?: boolean
+  /** Super admin intake: skip CS triage and land ready for assignment when possible. */
+  skipCsTriage?: boolean
 }
 
 async function runWorkerIntakeCore(
@@ -382,6 +401,7 @@ async function runWorkerIntakeCore(
   const { organizationId, workerUserId, input } = params
   const description = input.description.trim()
   const address = input.address.trim()
+  const skipCsTriage = params.skipCsTriage === true
 
   const citizenRes = await resolveIntakeCitizen(
     organizationId,
@@ -404,7 +424,10 @@ async function runWorkerIntakeCore(
     attachmentCount: input.files?.length ?? 0,
     createdBySystem: false,
     createdByUserId: workerUserId,
-    stageHistoryReason: 'Ticket filed by worker on behalf of citizen (field intake)',
+    needsTriage: !skipCsTriage,
+    stageHistoryReason: skipCsTriage
+      ? 'Ticket filed by super admin on behalf of citizen (field intake, triage skipped)'
+      : 'Ticket filed by worker on behalf of citizen (field intake)',
   })
 
   if (!created.success || !created.ticketId) {
@@ -420,7 +443,7 @@ async function runWorkerIntakeCore(
     input.files ?? [],
   )
 
-  const { stage, sub_status } = initialIntakeTicketStatus(input)
+  const { stage, sub_status, needs_triage } = initialIntakeTicketStatus(input, skipCsTriage)
 
   enrichTicketFromIssueText({
     ticketId: created.ticketId,
@@ -445,7 +468,7 @@ async function runWorkerIntakeCore(
       citizen_verified: citizen.verified,
       citizen_is_new: citizen.isNew,
       attachment_count: attachmentCount,
-      needs_triage: true,
+      needs_triage,
     },
   })
 
@@ -467,7 +490,7 @@ async function runWorkerIntakeCore(
       ticket_number: created.ticketNumber,
       stage,
       sub_status,
-      needs_triage: true,
+      needs_triage,
       citizen_id: citizen.citizenId,
       citizen_verified: citizen.verified,
       citizen_is_new: citizen.isNew,
@@ -505,6 +528,7 @@ export async function createWorkerIntakeTicket(
     workerUserId: user.id,
     input,
     territoryId: territoryRes.territoryId,
+    skipCsTriage: !!roleName && SKIP_CS_TRIAGE_INTAKE_ROLES.has(roleName),
   })
 }
 
