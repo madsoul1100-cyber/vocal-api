@@ -7,7 +7,7 @@ import {
   canApproveStaffCreation,
   canAssignRoleLevel,
   hierarchyLevelForRoleName,
-  requiresStaffCreationApproval,
+  mustQueueStaffActivationRequest,
   STAFF_WORKER_MANAGER_ROLES,
 } from '@/lib/roleHierarchy.js'
 import {
@@ -1242,7 +1242,7 @@ export async function createOrgUser(
     return { ok: false as const, status: uniqueCheck.status, error: uniqueCheck.error }
   }
 
-  if (requiresStaffCreationApproval(user.roles?.name)) {
+  if (mustQueueStaffActivationRequest(user.roles?.name, active)) {
     const { data: requestRow, error: requestError } = await supabase
       .from('worker_activation_requests')
       .insert({
@@ -1303,7 +1303,7 @@ export async function createOrgUser(
     updated_at: now,
   }
 
-  if (active && AUTO_APPROVE_ROLES.includes(user.roles?.name ?? '')) {
+  if (active) {
     insert.approved_by = user.id
     insert.approved_at = now
   }

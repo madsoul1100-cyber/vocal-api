@@ -11,7 +11,7 @@ export const ROLE_HIERARCHY_BY_NAME: Record<string, number> = {
 
 export const STAFF_CREATION_APPROVER_ROLES = ['super_admin', 'central_support'] as const
 
-/** Roles that can open the workers UI and submit new staff (approval queue for non-approvers). */
+/** Roles that can open the workers UI and submit new staff. */
 export const STAFF_WORKER_MANAGER_ROLES = [
   'super_admin',
   'central_support',
@@ -45,9 +45,17 @@ export function canApproveStaffCreation(roleName: string | null | undefined): bo
   return !!roleName && (STAFF_CREATION_APPROVER_ROLES as readonly string[]).includes(roleName)
 }
 
-/** True when the actor must queue worker_activation_requests instead of inserting users directly. */
+/** True when the actor is not Super Admin / Central Support. */
 export function requiresStaffCreationApproval(roleName: string | null | undefined): boolean {
   return !!roleName && !canApproveStaffCreation(roleName)
+}
+
+/** True when create must go through worker_activation_requests (state/district leaders, inactive only). */
+export function mustQueueStaffActivationRequest(
+  roleName: string | null | undefined,
+  activeRequested: boolean,
+): boolean {
+  return requiresStaffCreationApproval(roleName) && !activeRequested
 }
 
 /** Target role must be strictly lower in the org (higher hierarchy_level number). */
