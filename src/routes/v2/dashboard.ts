@@ -5,8 +5,11 @@ import {
   dashboardRedirectForRole,
   getDashboardStats,
 } from '@/services/dashboardService.js'
+import { registerTerritoryFilterRoutes } from '@/routes/shared/territoryFilterHandlers.js'
 
 const router = Router()
+
+registerTerritoryFilterRoutes(router)
 
 type VocalUser = {
   organization_id: string

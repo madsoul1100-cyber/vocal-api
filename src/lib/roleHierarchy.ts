@@ -23,6 +23,13 @@ export function canAccessWorkersPage(roleName: string | null | undefined): boole
   return !!roleName && (STAFF_WORKER_MANAGER_ROLES as readonly string[]).includes(roleName)
 }
 
+/** Read-only territory cascade filters (Workers + Leadership Dashboard). */
+export const TERRITORY_FILTER_ROLES = STAFF_WORKER_MANAGER_ROLES
+
+export function canAccessTerritoryFilter(roleName: string | null | undefined): boolean {
+  return canAccessWorkersPage(roleName)
+}
+
 /** Roles that may file a ticket on behalf of a citizen (field / org staff). */
 export const WORKER_TICKET_INTAKE_ROLES = [
   'super_admin',

@@ -6,6 +6,7 @@ import {
   workersCreateUpload,
 } from '@/lib/workersUpload.js'
 import { processStaffCreateUploads } from '@/services/staffUploadService.js'
+import { canAccessTerritoryFilter } from '@/lib/roleHierarchy.js'
 import {
   canAccessWorkersPage,
   createOrgUser,
@@ -24,7 +25,13 @@ import {
   getTerritoryPickerBootstrap,
   listTerritoryChildren,
   listTerritoryLevels,
+  loadOrgTerritoryRowsCached,
 } from '@/services/territoryService.js'
+import {
+  filterTerritoryNodesForScope,
+  isTerritoryNodeInScope,
+  resolveTerritoryScopeIds,
+} from '@/services/territoryScopeService.js'
 
 const router = Router()
 
@@ -75,7 +82,7 @@ router.post('/territories', requireAuth, async (req, res) => {
 
 router.get('/territories/bootstrap', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
-  if (!canAccessWorkersPage(user.roles?.name)) {
+  if (!canAccessTerritoryFilter(user.roles?.name)) {
     res.status(403).json({ error: 'Insufficient role' })
     return
   }
@@ -86,12 +93,24 @@ router.get('/territories/bootstrap', requireAuth, async (req, res) => {
     })
     return
   }
+  const scopeIds = await resolveTerritoryScopeIds(
+    user.organization_id,
+    user.roles?.name,
+    user.id,
+  )
+  if (scopeIds) {
+    bootstrap.districts = await filterTerritoryNodesForScope(
+      user.organization_id,
+      bootstrap.districts,
+      scopeIds,
+    )
+  }
   res.json(bootstrap)
 })
 
 router.get('/territories/levels', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
-  if (!canAccessWorkersPage(user.roles?.name)) {
+  if (!canAccessTerritoryFilter(user.roles?.name)) {
     res.status(403).json({ error: 'Insufficient role' })
     return
   }
@@ -101,20 +120,35 @@ router.get('/territories/levels', requireAuth, async (req, res) => {
 
 router.get('/territories/children', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
-  if (!canAccessWorkersPage(user.roles?.name)) {
+  if (!canAccessTerritoryFilter(user.roles?.name)) {
     res.status(403).json({ error: 'Insufficient role' })
     return
   }
   const q = req.query.parent_id
   const parentId =
     typeof q === 'string' && q.trim() && q.trim() !== 'null' ? q.trim() : null
-  const children = await listTerritoryChildren(user.organization_id, parentId)
+  const scopeIds = await resolveTerritoryScopeIds(
+    user.organization_id,
+    user.roles?.name,
+    user.id,
+  )
+  if (scopeIds && parentId) {
+    const rows = await loadOrgTerritoryRowsCached(user.organization_id)
+    if (!isTerritoryNodeInScope(parentId, scopeIds, rows)) {
+      res.status(403).json({ error: 'Territory not in your assigned scope' })
+      return
+    }
+  }
+  let children = await listTerritoryChildren(user.organization_id, parentId)
+  if (scopeIds) {
+    children = await filterTerritoryNodesForScope(user.organization_id, children, scopeIds)
+  }
   res.json({ children })
 })
 
 router.get('/territories/:territoryId/descendants', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
-  if (!canAccessWorkersPage(user.roles?.name)) {
+  if (!canAccessTerritoryFilter(user.roles?.name)) {
     res.status(403).json({ error: 'Insufficient role' })
     return
   }

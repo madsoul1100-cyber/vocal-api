@@ -14,6 +14,16 @@ import {
   type TerritoryHierarchyNode,
   type TerritoryLevelInfo,
 } from '@/services/territoryService.js'
+import {
+  filterTerritoryNodesForScope,
+  isTerritoryNodeInScope,
+  resolveTerritoryScopeIds,
+} from '@/services/territoryScopeService.js'
+
+export interface TerritoryPickerActor {
+  roleName?: string | null
+  userId?: string
+}
 
 export const TERRITORY_PICKER_DEFAULT_LIMIT = 50
 export const TERRITORY_PICKER_MAX_LIMIT = 200
@@ -138,12 +148,36 @@ export async function listTerritoryChildrenV2(
   orgId: string,
   parentTerritoryId: string | null,
   opts: TerritoryPickerListOptions,
+  actor?: TerritoryPickerActor,
 ): Promise<{
   children: TerritoryHierarchyNode[]
   pagination: TerritoryPickerPagination
   filters: ReturnType<typeof territoryPickerFiltersEcho>
+  parent_forbidden?: boolean
 }> {
-  const all = await listTerritoryChildren(orgId, parentTerritoryId)
+  const scopeIds = await resolveTerritoryScopeIds(orgId, actor?.roleName, actor?.userId)
+
+  if (scopeIds && parentTerritoryId) {
+    const rows = await loadOrgTerritoryRowsCached(orgId)
+    if (!isTerritoryNodeInScope(parentTerritoryId, scopeIds, rows)) {
+      return {
+        children: [],
+        pagination: {
+          limit: opts.limit,
+          offset: opts.offset,
+          total: 0,
+          has_more: false,
+        },
+        filters: territoryPickerFiltersEcho(opts, { parent_id: parentTerritoryId }),
+        parent_forbidden: true,
+      }
+    }
+  }
+
+  let all = await listTerritoryChildren(orgId, parentTerritoryId)
+  if (scopeIds) {
+    all = await filterTerritoryNodesForScope(orgId, all, scopeIds)
+  }
   const filtered = filterByKeyword(all, opts.keyword)
   const { items, pagination } = paginate(filtered, opts)
   return {
@@ -158,6 +192,7 @@ export async function listTerritoryChildrenV2(
 export async function getTerritoryPickerBootstrapV2(
   orgId: string,
   opts: TerritoryPickerListOptions,
+  actor?: TerritoryPickerActor,
 ): Promise<
   | {
       ok: true
@@ -172,6 +207,8 @@ export async function getTerritoryPickerBootstrapV2(
   const raw = await getTerritoryPickerBootstrap(orgId)
   if (!raw) return { ok: false }
 
+  const scopeIds = await resolveTerritoryScopeIds(orgId, actor?.roleName, actor?.userId)
+
   const levelsAll = await listTerritoryLevels(orgId)
   const levelsFiltered = filterLevels(levelsAll, opts.keyword)
 
@@ -182,6 +219,10 @@ export async function getTerritoryPickerBootstrapV2(
       const refreshed = await getTerritoryPickerBootstrap(orgId)
       if (refreshed) districts = refreshed.districts
     }
+  }
+
+  if (scopeIds) {
+    districts = await filterTerritoryNodesForScope(orgId, districts, scopeIds)
   }
 
   const districtsFiltered = filterByKeyword(districts, opts.keyword)

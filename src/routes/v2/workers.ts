@@ -6,7 +6,7 @@ import {
   workersCreateUpload,
 } from '@/lib/workersUpload.js'
 import { processStaffCreateUploads } from '@/services/staffUploadService.js'
-import { canApproveStaffCreation } from '@/lib/roleHierarchy.js'
+import { canApproveStaffCreation, canAccessTerritoryFilter } from '@/lib/roleHierarchy.js'
 import {
   canAccessWorkersPage,
   createOrgUser,
@@ -22,8 +22,6 @@ import {
 } from '@/services/workersManagementService.js'
 import { createOrgTerritory } from '@/services/territoryService.js'
 import {
-  getTerritoryPickerBootstrapV2,
-  listTerritoryChildrenV2,
   listTerritoryDescendantsV2,
   listTerritoryLevelsV2,
   parseTerritoryPickerQuery,
@@ -33,8 +31,11 @@ import {
   completeStaffProfileUpload,
   issueStaffUploadUrl,
 } from '@/services/staffPresignService.js'
+import { registerTerritoryFilterRoutes } from '@/routes/shared/territoryFilterHandlers.js'
 
 const router = Router()
+
+registerTerritoryFilterRoutes(router)
 
 function parseUploadMeta(body: Record<string, unknown>) {
   return {
@@ -93,32 +94,9 @@ router.post('/territories', requireAuth, async (req, res) => {
   res.status(201).json({ ok: true, territory: result.territory })
 })
 
-router.get('/territories/bootstrap', requireAuth, async (req, res) => {
-  const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
-  if (!canAccessWorkersPage(user.roles?.name)) {
-    res.status(403).json({ error: 'Insufficient role' })
-    return
-  }
-  const opts = parseTerritoryPickerQuery(req.query as Record<string, unknown>)
-  const bootstrap = await getTerritoryPickerBootstrapV2(user.organization_id, opts)
-  if (!bootstrap.ok) {
-    res.status(404).json({
-      error: 'Telangana territory data not found. Run npm run seed:territories in vocal-api.',
-    })
-    return
-  }
-  res.json({
-    levels: bootstrap.levels,
-    state: bootstrap.state,
-    districts: bootstrap.districts,
-    pagination: bootstrap.pagination,
-    filters: bootstrap.filters,
-  })
-})
-
 router.get('/territories/levels', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
-  if (!canAccessWorkersPage(user.roles?.name)) {
+  if (!canAccessTerritoryFilter(user.roles?.name)) {
     res.status(403).json({ error: 'Insufficient role' })
     return
   }
@@ -127,23 +105,9 @@ router.get('/territories/levels', requireAuth, async (req, res) => {
   res.json(result)
 })
 
-router.get('/territories/children', requireAuth, async (req, res) => {
-  const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
-  if (!canAccessWorkersPage(user.roles?.name)) {
-    res.status(403).json({ error: 'Insufficient role' })
-    return
-  }
-  const q = req.query.parent_id
-  const parentId =
-    typeof q === 'string' && q.trim() && q.trim() !== 'null' ? q.trim() : null
-  const opts = parseTerritoryPickerQuery(req.query as Record<string, unknown>)
-  const result = await listTerritoryChildrenV2(user.organization_id, parentId, opts)
-  res.json(result)
-})
-
 router.get('/territories/:territoryId/descendants', requireAuth, async (req, res) => {
   const user = (req as typeof req & { vocalUser: VocalUser }).vocalUser
-  if (!canAccessWorkersPage(user.roles?.name)) {
+  if (!canAccessTerritoryFilter(user.roles?.name)) {
     res.status(403).json({ error: 'Insufficient role' })
     return
   }
