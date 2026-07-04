@@ -6,10 +6,12 @@ import {
   getDashboardStats,
 } from '@/services/dashboardService.js'
 import { registerTerritoryFilterRoutes } from '@/routes/shared/territoryFilterHandlers.js'
+import dashboardWebRouter from '@/routes/v2/dashboardWeb.js'
 
 const router = Router()
 
 registerTerritoryFilterRoutes(router)
+router.use('/web', dashboardWebRouter)
 
 type VocalUser = {
   organization_id: string
