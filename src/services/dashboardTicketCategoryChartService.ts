@@ -27,10 +27,75 @@ interface RawCategoryRow {
   count: number
 }
 
+export type { RawCategoryRow }
+
 const UNCATEGORIZED_KEY = 'uncategorized'
 const UNCATEGORIZED_LABEL = 'Uncategorized'
 const OTHER_KEY = 'other'
 const OTHER_LABEL = 'Other'
+
+export { UNCATEGORIZED_KEY, UNCATEGORIZED_LABEL, OTHER_KEY, OTHER_LABEL }
+
+export interface CategorySegmentDefinition {
+  key: string
+  label: string
+}
+
+export interface CategorySegmentPlan {
+  segments: CategorySegmentDefinition[]
+  segmentOrder: string[]
+  bucketCategoryRow(row: RawCategoryRow): string | null
+}
+
+/** Pick top categories + Other + Uncategorized buckets (same rules as donut chart). */
+export function planCategorySegments(
+  rows: RawCategoryRow[],
+  segmentLimit: number,
+  options?: { includeUncategorizedWhenEmpty?: boolean },
+): CategorySegmentPlan {
+  let uncategorizedCount = 0
+  const categorized: RawCategoryRow[] = []
+
+  for (const row of rows) {
+    if (!row.category_id || !row.category_name) {
+      uncategorizedCount += row.count
+    } else {
+      categorized.push(row)
+    }
+  }
+
+  categorized.sort((a, b) => b.count - a.count || a.category_name!.localeCompare(b.category_name!))
+
+  const top = categorized.slice(0, segmentLimit)
+  const remainder = categorized.slice(segmentLimit)
+  const topIds = new Set(top.map((r) => r.category_id!))
+
+  const segments: CategorySegmentDefinition[] = top.map((row) => ({
+    key: slugifyCategoryKey(row.category_name!, row.category_id),
+    label: row.category_name!,
+  }))
+
+  if (remainder.length > 0) {
+    segments.push({ key: OTHER_KEY, label: OTHER_LABEL })
+  }
+  if (uncategorizedCount > 0 || (options?.includeUncategorizedWhenEmpty && rows.length === 0)) {
+    segments.push({ key: UNCATEGORIZED_KEY, label: UNCATEGORIZED_LABEL })
+  }
+
+  return {
+    segments,
+    segmentOrder: segments.map((s) => s.key),
+    bucketCategoryRow(row: RawCategoryRow): string | null {
+      if (!row.category_id || !row.category_name) {
+        return UNCATEGORIZED_KEY
+      }
+      if (topIds.has(row.category_id)) {
+        return slugifyCategoryKey(row.category_name, row.category_id)
+      }
+      return OTHER_KEY
+    },
+  }
+}
 
 function slugifyCategoryKey(name: string, id: string | null): string {
   const slug = name

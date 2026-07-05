@@ -26,6 +26,8 @@ export const DASHBOARD_WEB_DEFAULT_REGION_LIMIT = 5
 export const DASHBOARD_WEB_MAX_REGION_LIMIT = 10
 export const DASHBOARD_WEB_DEFAULT_LEADERBOARD_LIMIT = 10
 export const DASHBOARD_WEB_MAX_LEADERBOARD_LIMIT = 20
+export const DASHBOARD_WEB_DEFAULT_MONTH_COUNT = 6
+export const DASHBOARD_WEB_MAX_MONTH_COUNT = 12
 
 export interface DashboardWebChartActor {
   id: string
@@ -64,8 +66,23 @@ export interface ResolvedDashboardWebFilters {
   includeNullTerritory: boolean
 }
 
+/** Territory-only filters for charts that ignore the dashboard date picker. */
+export interface ResolvedDashboardWebTerritoryFilters {
+  territory: DashboardWebTerritoryFilter
+  rawTerritoryId: string | null
+  segmentLimit: number
+  monthCount: number
+  scope: DashboardWebScopeMeta
+  territoryIds: string[]
+  includeNullTerritory: boolean
+}
+
 export type DashboardWebFilterResult =
   | { ok: true; filters: ResolvedDashboardWebFilters }
+  | { ok: false; status: number; error: string }
+
+export type DashboardWebTerritoryFilterResult =
+  | { ok: true; filters: ResolvedDashboardWebTerritoryFilters }
   | { ok: false; status: number; error: string }
 
 function parseIsoDate(raw: unknown): string | null {
@@ -121,48 +138,30 @@ export function assertDashboardWebChartAccess(
   return { ok: true }
 }
 
-export async function resolveDashboardWebChartFilters(
+interface TerritoryScopeInput {
+  orgId: string
+  role: string
+  rawTerritoryId: string | null
+  includeDescendants: boolean
+}
+
+interface TerritoryScopeResolved {
+  filterTerritoryId: string
+  territoryName: string
+  territoryLevel: string
+  autoScopedTerritoryId: string | null
+  territoryIds: string[]
+  includeNullTerritory: boolean
+}
+
+async function resolveTerritoryScope(
   actor: DashboardWebChartActor,
-  query: Record<string, unknown>,
-  options?: { defaultLimit?: number; maxLimit?: number },
-): Promise<DashboardWebFilterResult> {
-  const defaultLimit = options?.defaultLimit ?? DASHBOARD_WEB_DEFAULT_SEGMENT_LIMIT
-  const maxLimit = options?.maxLimit ?? DASHBOARD_WEB_MAX_SEGMENT_LIMIT
-  const role = actor.roles?.name ?? ''
-
-  if (query.parent_id !== undefined && query.parent_id !== null && String(query.parent_id).trim()) {
-    return {
-      ok: false,
-      status: 400,
-      error: 'Use territory_id for dashboard charts, not parent_id',
-    }
-  }
-
-  const from = parseIsoDate(query.from)
-  const to = parseIsoDate(query.to)
-  if (!from || !to) {
-    return {
-      ok: false,
-      status: 400,
-      error: 'from and to are required as ISO dates (YYYY-MM-DD)',
-    }
-  }
-  if (from > to) {
-    return { ok: false, status: 400, error: 'from must be on or before to' }
-  }
-
-  const includeDescendants = parseBooleanQuery(query.include_descendants, true)
-
-  let segmentLimit =
-    parseInt(String(query.limit ?? defaultLimit), 10) || defaultLimit
-  segmentLimit = Math.min(maxLimit, Math.max(1, segmentLimit))
-
-  const orgId = actor.organization_id
-  const rawTerritoryId =
-    typeof query.territory_id === 'string' && query.territory_id.trim()
-      ? query.territory_id.trim()
-      : null
-
+  input: TerritoryScopeInput,
+): Promise<
+  | { ok: true; scope: TerritoryScopeResolved }
+  | { ok: false; status: number; error: string }
+> {
+  const { orgId, role, rawTerritoryId, includeDescendants } = input
   let autoScopedTerritoryId: string | null = null
   let filterTerritoryId = rawTerritoryId
   let territoryIds: string[] = []
@@ -173,21 +172,14 @@ export async function resolveDashboardWebChartFilters(
     if (scopeIds.size === 0) {
       return {
         ok: true,
-        filters: buildResolvedFilters({
-          orgId,
-          role,
-          from,
-          to,
-          rawTerritoryId,
-          segmentLimit,
-          includeDescendants,
-          territoryId: rawTerritoryId ?? '',
+        scope: {
+          filterTerritoryId: rawTerritoryId ?? '',
           territoryName: rawTerritoryId ? 'Unknown' : DEFAULT_TERRITORY_STATE_NAME,
           territoryLevel: rawTerritoryId ? 'unknown' : 'state',
           autoScopedTerritoryId: null,
           territoryIds: [],
           includeNullTerritory: false,
-        }),
+        },
       }
     }
 
@@ -235,6 +227,154 @@ export async function resolveDashboardWebChartFilters(
 
   return {
     ok: true,
+    scope: {
+      filterTerritoryId,
+      territoryName: meta?.name ?? DEFAULT_TERRITORY_STATE_NAME,
+      territoryLevel: meta?.territory_level ?? 'state',
+      autoScopedTerritoryId,
+      territoryIds,
+      includeNullTerritory,
+    },
+  }
+}
+
+export async function resolveDashboardWebTerritoryChartFilters(
+  actor: DashboardWebChartActor,
+  query: Record<string, unknown>,
+  options?: { defaultLimit?: number; maxLimit?: number; defaultMonths?: number; maxMonths?: number },
+): Promise<DashboardWebTerritoryFilterResult> {
+  const defaultLimit = options?.defaultLimit ?? DASHBOARD_WEB_DEFAULT_SEGMENT_LIMIT
+  const maxLimit = options?.maxLimit ?? DASHBOARD_WEB_MAX_SEGMENT_LIMIT
+  const defaultMonths = options?.defaultMonths ?? DASHBOARD_WEB_DEFAULT_MONTH_COUNT
+  const maxMonths = options?.maxMonths ?? DASHBOARD_WEB_MAX_MONTH_COUNT
+  const role = actor.roles?.name ?? ''
+
+  if (query.from !== undefined && query.from !== null && String(query.from).trim()) {
+    return {
+      ok: false,
+      status: 400,
+      error: 'from and to are not supported on this chart; use months instead',
+    }
+  }
+  if (query.to !== undefined && query.to !== null && String(query.to).trim()) {
+    return {
+      ok: false,
+      status: 400,
+      error: 'from and to are not supported on this chart; use months instead',
+    }
+  }
+  if (query.parent_id !== undefined && query.parent_id !== null && String(query.parent_id).trim()) {
+    return {
+      ok: false,
+      status: 400,
+      error: 'Use territory_id for dashboard charts, not parent_id',
+    }
+  }
+
+  const includeDescendants = parseBooleanQuery(query.include_descendants, true)
+
+  let segmentLimit =
+    parseInt(String(query.limit ?? defaultLimit), 10) || defaultLimit
+  segmentLimit = Math.min(maxLimit, Math.max(1, segmentLimit))
+
+  let monthCount =
+    parseInt(String(query.months ?? defaultMonths), 10) || defaultMonths
+  monthCount = Math.min(maxMonths, Math.max(1, monthCount))
+
+  const orgId = actor.organization_id
+  const rawTerritoryId =
+    typeof query.territory_id === 'string' && query.territory_id.trim()
+      ? query.territory_id.trim()
+      : null
+
+  const territory = await resolveTerritoryScope(actor, {
+    orgId,
+    role,
+    rawTerritoryId,
+    includeDescendants,
+  })
+  if (!territory.ok) {
+    return territory
+  }
+
+  const { scope } = territory
+  return {
+    ok: true,
+    filters: {
+      territory: {
+        territory_id: scope.filterTerritoryId,
+        territory_name: scope.territoryName,
+        territory_level: scope.territoryLevel,
+        include_descendants: includeDescendants,
+      },
+      rawTerritoryId,
+      segmentLimit,
+      monthCount,
+      scope: {
+        role,
+        auto_scoped_territory_id: scope.autoScopedTerritoryId,
+      },
+      territoryIds: scope.territoryIds,
+      includeNullTerritory: scope.includeNullTerritory,
+    },
+  }
+}
+
+export async function resolveDashboardWebChartFilters(
+  actor: DashboardWebChartActor,
+  query: Record<string, unknown>,
+  options?: { defaultLimit?: number; maxLimit?: number },
+): Promise<DashboardWebFilterResult> {
+  const defaultLimit = options?.defaultLimit ?? DASHBOARD_WEB_DEFAULT_SEGMENT_LIMIT
+  const maxLimit = options?.maxLimit ?? DASHBOARD_WEB_MAX_SEGMENT_LIMIT
+  const role = actor.roles?.name ?? ''
+
+  if (query.parent_id !== undefined && query.parent_id !== null && String(query.parent_id).trim()) {
+    return {
+      ok: false,
+      status: 400,
+      error: 'Use territory_id for dashboard charts, not parent_id',
+    }
+  }
+
+  const from = parseIsoDate(query.from)
+  const to = parseIsoDate(query.to)
+  if (!from || !to) {
+    return {
+      ok: false,
+      status: 400,
+      error: 'from and to are required as ISO dates (YYYY-MM-DD)',
+    }
+  }
+  if (from > to) {
+    return { ok: false, status: 400, error: 'from must be on or before to' }
+  }
+
+  const includeDescendants = parseBooleanQuery(query.include_descendants, true)
+
+  let segmentLimit =
+    parseInt(String(query.limit ?? defaultLimit), 10) || defaultLimit
+  segmentLimit = Math.min(maxLimit, Math.max(1, segmentLimit))
+
+  const orgId = actor.organization_id
+  const rawTerritoryId =
+    typeof query.territory_id === 'string' && query.territory_id.trim()
+      ? query.territory_id.trim()
+      : null
+
+  const territory = await resolveTerritoryScope(actor, {
+    orgId,
+    role,
+    rawTerritoryId,
+    includeDescendants,
+  })
+  if (!territory.ok) {
+    return territory
+  }
+
+  const { scope } = territory
+  return {
+    ok: true,
     filters: buildResolvedFilters({
       orgId,
       role,
@@ -243,12 +383,12 @@ export async function resolveDashboardWebChartFilters(
       rawTerritoryId,
       segmentLimit,
       includeDescendants,
-      territoryId: filterTerritoryId,
-      territoryName: meta?.name ?? DEFAULT_TERRITORY_STATE_NAME,
-      territoryLevel: meta?.territory_level ?? 'state',
-      autoScopedTerritoryId,
-      territoryIds,
-      includeNullTerritory,
+      territoryId: scope.filterTerritoryId,
+      territoryName: scope.territoryName,
+      territoryLevel: scope.territoryLevel,
+      autoScopedTerritoryId: scope.autoScopedTerritoryId,
+      territoryIds: scope.territoryIds,
+      includeNullTerritory: scope.includeNullTerritory,
     }),
   }
 }
@@ -329,9 +469,41 @@ export function buildDashboardWebMeta(
   }
 }
 
+export function buildDashboardWebTerritoryMeta(
+  orgId: string,
+  resolved: ResolvedDashboardWebTerritoryFilters,
+  extraFilters?: Record<string, unknown>,
+) {
+  const echoTerritory = resolved.rawTerritoryId
+    ? {
+        territory_id: resolved.territory.territory_id,
+        territory_name: resolved.territory.territory_name,
+        territory_level: resolved.territory.territory_level,
+      }
+    : {
+        territory_id: null,
+        territory_name: null,
+        territory_level: null,
+      }
+
+  return {
+    organization_id: orgId,
+    generated_at: new Date().toISOString(),
+    filters: {
+      ...echoTerritory,
+      include_descendants: resolved.territory.include_descendants,
+      months: resolved.monthCount,
+      limit: resolved.segmentLimit,
+      timezone: 'UTC',
+      ...extraFilters,
+    },
+    scope: resolved.scope,
+  }
+}
+
 /** SQL territory predicate for tickets alias (e.g. `t`). Returns FALSE when no IDs and no null allowance. */
 export function buildDashboardWebTerritorySqlClause(
-  resolved: ResolvedDashboardWebFilters,
+  resolved: Pick<ResolvedDashboardWebFilters, 'territoryIds' | 'includeNullTerritory'>,
   alias: string,
   paramIndex: number,
 ): { clause: string; params: unknown[] } {

@@ -8,7 +8,10 @@ import {
   DASHBOARD_WEB_MAX_SEGMENT_LIMIT,
   DASHBOARD_WEB_DEFAULT_LEADERBOARD_LIMIT,
   DASHBOARD_WEB_MAX_LEADERBOARD_LIMIT,
+  DASHBOARD_WEB_DEFAULT_MONTH_COUNT,
+  DASHBOARD_WEB_MAX_MONTH_COUNT,
   resolveDashboardWebChartFilters,
+  resolveDashboardWebTerritoryChartFilters,
 } from '@/services/dashboardWebFiltersService.js'
 import { getTicketCategoryChart } from '@/services/dashboardTicketCategoryChartService.js'
 import { getRegionStageChart } from '@/services/dashboardRegionStageChartService.js'
@@ -17,6 +20,7 @@ import {
   parseWorkerLeaderboardMetric,
 } from '@/services/dashboardWorkerLeaderboardService.js'
 import { getDashboardWebKpis } from '@/services/dashboardWebKpisService.js'
+import { getCategoryMonthlyChart } from '@/services/dashboardCategoryMonthlyChartService.js'
 
 const router = Router()
 
@@ -106,6 +110,39 @@ router.get('/charts/worker-leaderboard', requireAuth, async (req, res) => {
 
   try {
     const chart = await getWorkerLeaderboard(user.organization_id, resolved.filters, metric)
+    res.json(chart)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Chart query failed'
+    res.status(500).json({ error: message })
+  }
+})
+
+/** Stacked bar time series — tickets by top-level category per calendar month (territory only). */
+router.get('/charts/tickets-by-category-monthly', requireAuth, async (req, res) => {
+  const user = vocalUser(req)
+  const access = assertDashboardWebChartAccess(user.roles?.name)
+  if (!access.ok) {
+    res.status(access.status).json({ error: access.error })
+    return
+  }
+
+  const resolved = await resolveDashboardWebTerritoryChartFilters(
+    user,
+    req.query as Record<string, unknown>,
+    {
+      defaultLimit: DASHBOARD_WEB_DEFAULT_SEGMENT_LIMIT,
+      maxLimit: DASHBOARD_WEB_MAX_SEGMENT_LIMIT,
+      defaultMonths: DASHBOARD_WEB_DEFAULT_MONTH_COUNT,
+      maxMonths: DASHBOARD_WEB_MAX_MONTH_COUNT,
+    },
+  )
+  if (!resolved.ok) {
+    res.status(resolved.status).json({ error: resolved.error })
+    return
+  }
+
+  try {
+    const chart = await getCategoryMonthlyChart(user.organization_id, resolved.filters)
     res.json(chart)
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Chart query failed'

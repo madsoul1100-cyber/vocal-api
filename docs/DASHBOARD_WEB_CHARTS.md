@@ -457,3 +457,91 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
 ```
 
 Always **200** with all four metric keys present (counts may be 0).
+
+---
+
+## Chart 5: Tickets by category over time (stacked bar)
+
+```
+GET /v2/dashboard/web/charts/tickets-by-category-monthly
+Authorization: Bearer <token>
+```
+
+Replaces the CRM “revenue” chart slot on the Flutter web leadership dashboard.
+
+### Query parameters
+
+| Param | Required | Default | Notes |
+|-------|----------|---------|-------|
+| `territory_id` | No | whole state | Same as Chart 1 |
+| `include_descendants` | No | `true` | Same as other charts |
+| `months` | No | `6` | Calendar months on X-axis (max 12) |
+| `limit` | No | `8` | Top categories before **Other** bucket (same as donut) |
+
+**Does not accept `from` / `to`** — ignores the dashboard date picker. Sending `from` or `to` returns **400**.
+
+### Count rules
+
+- `tickets.created_at` in each UTC calendar month (current month partial through today)
+- Top-level category only — same grouping/bucketing as Chart 1
+- Territory scoping identical to Chart 1 (whole state includes null `territory_id`)
+- `segment_order` stable across all months (top categories across the full window, then **Other**, then **Uncategorized** when present)
+- Sum of `segments[].count` per month equals `months[].total`
+
+### Example request
+
+Whole state, last 6 months:
+
+```bash
+curl -sS -H "Authorization: Bearer $TOKEN" \
+  "$BASE/v2/dashboard/web/charts/tickets-by-category-monthly?months=6&include_descendants=true"
+```
+
+### Sample response
+
+```json
+{
+  "chart_type": "stacked_bar_time",
+  "title": "Tickets by category over time",
+  "segment_order": ["municipal_and_civic_services", "uncategorized", "other"],
+  "segments_meta": [
+    { "key": "municipal_and_civic_services", "label": "Municipal and Civic Services" },
+    { "key": "uncategorized", "label": "Uncategorized" },
+    { "key": "other", "label": "Other" }
+  ],
+  "months": [
+    {
+      "key": "2026-06",
+      "label": "Jun 2026",
+      "from": "2026-06-01",
+      "to": "2026-06-30",
+      "total": 32,
+      "segments": [
+        { "key": "municipal_and_civic_services", "label": "Municipal and Civic Services", "count": 5 },
+        { "key": "uncategorized", "label": "Uncategorized", "count": 19 },
+        { "key": "other", "label": "Other", "count": 8 }
+      ]
+    }
+  ],
+  "total": 280,
+  "meta": {
+    "organization_id": "uuid",
+    "generated_at": "2026-07-05T12:00:00Z",
+    "filters": {
+      "territory_id": null,
+      "territory_name": null,
+      "territory_level": null,
+      "include_descendants": true,
+      "months": 6,
+      "limit": 8,
+      "end_month": "2026-07",
+      "timezone": "UTC"
+    },
+    "scope": { "role": "state_leader", "auto_scoped_territory_id": null }
+  }
+}
+```
+
+Empty months: `total: 0` with all `segment_order` segments present at `count: 0`.
+
+**Consistency:** For a given month, if the dashboard date filter is set to that full calendar month, Chart 1 `total` should equal that month’s bar `total` (same territory).
