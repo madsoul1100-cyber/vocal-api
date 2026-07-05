@@ -14,12 +14,18 @@ import {
   buildDashboardWebTerritorySqlClause,
   type ResolvedDashboardWebFilters,
 } from '@/services/dashboardWebFiltersService.js'
+import { isDefaultStaffProfilePath } from '@/constants/staffProfileDefaults.js'
+import {
+  ensureDefaultStaffProfileAsset,
+  enrichStaffMediaUrls,
+} from '@/services/staffStorageService.js'
 
 export type WorkerLeaderboardMetric = 'overall' | 'assigned' | 'resolved' | 'pending'
 
 export interface WorkerLeaderboardEntry {
   worker_id: string
   name: string
+  /** Presigned HTTPS URL for profile photo (includes system default placeholder). */
   avatar_url: string | null
   assigned: number
   resolved: number
@@ -262,14 +268,39 @@ async function loadLeaderboardSupabase(
   return entries.slice(0, resolved.segmentLimit)
 }
 
+async function enrichLeaderboardAvatars(
+  entries: WorkerLeaderboardEntry[],
+): Promise<WorkerLeaderboardEntry[]> {
+  if (entries.length === 0) return []
+
+  const needsDefaultAsset = entries.some(
+    (entry) => !entry.avatar_url || isDefaultStaffProfilePath(entry.avatar_url),
+  )
+  if (needsDefaultAsset) {
+    await ensureDefaultStaffProfileAsset()
+  }
+
+  return Promise.all(
+    entries.map(async (entry) => {
+      const { profile_image_url } = await enrichStaffMediaUrls({
+        image_url: entry.avatar_url,
+        kyc_documents: [],
+      })
+      return { ...entry, avatar_url: profile_image_url }
+    }),
+  )
+}
+
 export async function getWorkerLeaderboard(
   orgId: string,
   resolved: ResolvedDashboardWebFilters,
   metric: WorkerLeaderboardMetric,
 ): Promise<WorkerLeaderboardResponse> {
-  const entries = isPostgresMode()
+  const rawEntries = isPostgresMode()
     ? await loadLeaderboardPg(orgId, resolved, metric)
     : await loadLeaderboardSupabase(orgId, resolved, metric)
+
+  const entries = await enrichLeaderboardAvatars(rawEntries)
 
   return {
     chart_type: 'leaderboard',

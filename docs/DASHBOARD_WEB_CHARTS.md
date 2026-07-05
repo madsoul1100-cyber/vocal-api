@@ -293,6 +293,9 @@ All metrics use the **same territory filter** as other dashboard charts.
 
 Only **ground_worker** role users appear.
 
+`avatar_url` is a **presigned HTTPS URL** (same signing as workers `profile_image_url`), including
+the system default placeholder when no custom photo is set. Expires after ~1 hour.
+
 ### Sorting by `metric`
 
 | `metric` | Sort |
@@ -325,7 +328,7 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
     {
       "worker_id": "uuid",
       "name": "Rajesh Kumar",
-      "avatar_url": null,
+      "avatar_url": "https://bucket.s3.region.amazonaws.com/...",
       "assigned": 48,
       "resolved": 41,
       "pending": 7
