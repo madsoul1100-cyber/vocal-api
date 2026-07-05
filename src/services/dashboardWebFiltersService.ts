@@ -24,6 +24,8 @@ export const DASHBOARD_WEB_DEFAULT_SEGMENT_LIMIT = 8
 export const DASHBOARD_WEB_MAX_SEGMENT_LIMIT = 20
 export const DASHBOARD_WEB_DEFAULT_REGION_LIMIT = 5
 export const DASHBOARD_WEB_MAX_REGION_LIMIT = 10
+export const DASHBOARD_WEB_DEFAULT_LEADERBOARD_LIMIT = 10
+export const DASHBOARD_WEB_MAX_LEADERBOARD_LIMIT = 20
 
 export interface DashboardWebChartActor {
   id: string
@@ -293,6 +295,7 @@ function buildResolvedFilters(input: {
 export function buildDashboardWebMeta(
   orgId: string,
   resolved: ResolvedDashboardWebFilters,
+  extraFilters?: Record<string, unknown>,
 ) {
   const echoTerritory = resolved.rawTerritoryId
     ? {
@@ -315,7 +318,33 @@ export function buildDashboardWebMeta(
       from: resolved.dateRange.from,
       to: resolved.dateRange.to,
       limit: resolved.segmentLimit,
+      ...extraFilters,
     },
     scope: resolved.scope,
+  }
+}
+
+/** SQL territory predicate for tickets alias (e.g. `t`). Returns FALSE when no IDs and no null allowance. */
+export function buildDashboardWebTerritorySqlClause(
+  resolved: ResolvedDashboardWebFilters,
+  alias: string,
+  paramIndex: number,
+): { clause: string; params: unknown[] } {
+  const { territoryIds, includeNullTerritory } = resolved
+  if (territoryIds.length === 0 && !includeNullTerritory) {
+    return { clause: 'FALSE', params: [] }
+  }
+  if (territoryIds.length === 0) {
+    return { clause: `${alias}.territory_id IS NULL`, params: [] }
+  }
+  if (includeNullTerritory) {
+    return {
+      clause: `(${alias}.territory_id IS NULL OR ${alias}.territory_id = ANY($${paramIndex}::uuid[]))`,
+      params: [territoryIds],
+    }
+  }
+  return {
+    clause: `${alias}.territory_id = ANY($${paramIndex}::uuid[])`,
+    params: [territoryIds],
   }
 }
