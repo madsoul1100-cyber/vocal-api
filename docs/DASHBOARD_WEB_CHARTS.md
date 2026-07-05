@@ -545,3 +545,84 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
 Empty months: `total: 0` with all `segment_order` segments present at `count: 0`.
 
 **Consistency:** For a given month, if the dashboard date filter is set to that full calendar month, Chart 1 `total` should equal that month’s bar `total` (same territory).
+
+---
+
+## Chart 6: Tickets by stage over time (grouped bar)
+
+```
+GET /v2/dashboard/web/charts/tickets-by-stage-monthly
+Authorization: Bearer <token>
+```
+
+Replaces the CRM “revenue” chart slot on Flutter — **pipeline stage**, not issue category.
+
+### Query parameters
+
+| Param | Required | Default | Notes |
+|-------|----------|---------|-------|
+| `territory_id` | No | whole state | Same as other web charts |
+| `include_descendants` | No | `true` | Same as other charts |
+| `months` | No | `6` | Calendar months on X-axis (max 12) |
+
+**Does not accept `from` / `to`** or `limit` — fixed segments `to_do`, `in_progress`, `on_hold`, `closed`.
+
+### Aggregation: month-end snapshot (Option A)
+
+For each UTC calendar month **M**, count tickets in territory scope whose **stage at the last instant of M** equals each segment. Stage is resolved from `ticket_stage_history` (latest `to_stage` with `created_at <= month-end`). Tickets not yet created at month-end are excluded. Current month uses end-of-today UTC (partial month).
+
+`meta.filters.aggregation`: `"month_end_snapshot"`
+
+### Example request
+
+```bash
+curl -sS -H "Authorization: Bearer $TOKEN" \
+  "$BASE/v2/dashboard/web/charts/tickets-by-stage-monthly?months=6&include_descendants=true"
+```
+
+### Sample response
+
+```json
+{
+  "chart_type": "grouped_bar_time",
+  "dimension": "stage",
+  "title": "Tickets by stage over time",
+  "segment_order": ["to_do", "in_progress", "on_hold", "closed"],
+  "segments_meta": [
+    { "key": "to_do", "label": "To do" },
+    { "key": "in_progress", "label": "In progress" },
+    { "key": "on_hold", "label": "On hold" },
+    { "key": "closed", "label": "Closed" }
+  ],
+  "months": [
+    {
+      "key": "2026-06",
+      "label": "Jun 2026",
+      "from": "2026-06-01",
+      "to": "2026-06-30",
+      "total": 84,
+      "segments": [
+        { "key": "to_do", "label": "To do", "count": 20 },
+        { "key": "in_progress", "label": "In progress", "count": 35 },
+        { "key": "on_hold", "label": "On hold", "count": 12 },
+        { "key": "closed", "label": "Closed", "count": 17 }
+      ]
+    }
+  ],
+  "total": 420,
+  "meta": {
+    "filters": {
+      "territory_id": null,
+      "include_descendants": true,
+      "months": 6,
+      "end_month": "2026-07",
+      "timezone": "UTC",
+      "aggregation": "month_end_snapshot"
+    }
+  }
+}
+```
+
+**Sanity:** `sum(segments[].count) === months[].total` per month.
+
+**Note:** Chart 5 (`tickets-by-category-monthly`) remains issue **category** over time (donut dimension). This chart is **stage** over time — different grouping rule.

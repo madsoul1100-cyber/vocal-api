@@ -473,6 +473,7 @@ export function buildDashboardWebTerritoryMeta(
   orgId: string,
   resolved: ResolvedDashboardWebTerritoryFilters,
   extraFilters?: Record<string, unknown>,
+  options?: { omitLimit?: boolean },
 ) {
   const echoTerritory = resolved.rawTerritoryId
     ? {
@@ -486,17 +487,21 @@ export function buildDashboardWebTerritoryMeta(
         territory_level: null,
       }
 
+  const filters: Record<string, unknown> = {
+    ...echoTerritory,
+    include_descendants: resolved.territory.include_descendants,
+    months: resolved.monthCount,
+    timezone: 'UTC',
+    ...extraFilters,
+  }
+  if (!options?.omitLimit) {
+    filters.limit = resolved.segmentLimit
+  }
+
   return {
     organization_id: orgId,
     generated_at: new Date().toISOString(),
-    filters: {
-      ...echoTerritory,
-      include_descendants: resolved.territory.include_descendants,
-      months: resolved.monthCount,
-      limit: resolved.segmentLimit,
-      timezone: 'UTC',
-      ...extraFilters,
-    },
+    filters,
     scope: resolved.scope,
   }
 }

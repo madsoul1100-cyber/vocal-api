@@ -21,6 +21,7 @@ import {
 } from '@/services/dashboardWorkerLeaderboardService.js'
 import { getDashboardWebKpis } from '@/services/dashboardWebKpisService.js'
 import { getCategoryMonthlyChart } from '@/services/dashboardCategoryMonthlyChartService.js'
+import { getStageMonthlyChart } from '@/services/dashboardStageMonthlyChartService.js'
 
 const router = Router()
 
@@ -143,6 +144,39 @@ router.get('/charts/tickets-by-category-monthly', requireAuth, async (req, res) 
 
   try {
     const chart = await getCategoryMonthlyChart(user.organization_id, resolved.filters)
+    res.json(chart)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Chart query failed'
+    res.status(500).json({ error: message })
+  }
+})
+
+/** Grouped bar time series — tickets by pipeline stage at each month-end snapshot (territory only). */
+router.get('/charts/tickets-by-stage-monthly', requireAuth, async (req, res) => {
+  const user = vocalUser(req)
+  const access = assertDashboardWebChartAccess(user.roles?.name)
+  if (!access.ok) {
+    res.status(access.status).json({ error: access.error })
+    return
+  }
+
+  const resolved = await resolveDashboardWebTerritoryChartFilters(
+    user,
+    req.query as Record<string, unknown>,
+    {
+      defaultLimit: 4,
+      maxLimit: 4,
+      defaultMonths: DASHBOARD_WEB_DEFAULT_MONTH_COUNT,
+      maxMonths: DASHBOARD_WEB_MAX_MONTH_COUNT,
+    },
+  )
+  if (!resolved.ok) {
+    res.status(resolved.status).json({ error: resolved.error })
+    return
+  }
+
+  try {
+    const chart = await getStageMonthlyChart(user.organization_id, resolved.filters)
     res.json(chart)
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Chart query failed'
