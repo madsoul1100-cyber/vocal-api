@@ -22,6 +22,8 @@ import { canAccessTerritoryFilter } from '@/lib/roleHierarchy.js'
 
 export const DASHBOARD_WEB_DEFAULT_SEGMENT_LIMIT = 8
 export const DASHBOARD_WEB_MAX_SEGMENT_LIMIT = 20
+export const DASHBOARD_WEB_DEFAULT_REGION_LIMIT = 5
+export const DASHBOARD_WEB_MAX_REGION_LIMIT = 10
 
 export interface DashboardWebChartActor {
   id: string
@@ -51,6 +53,8 @@ export interface DashboardWebScopeMeta {
 export interface ResolvedDashboardWebFilters {
   dateRange: DashboardWebDateRange
   territory: DashboardWebTerritoryFilter
+  /** Territory UUID from query (null = whole state / auto-scoped). */
+  rawTerritoryId: string | null
   segmentLimit: number
   scope: DashboardWebScopeMeta
   /** Ticket territory_id values that match the filter (empty = no matches). */
@@ -118,7 +122,10 @@ export function assertDashboardWebChartAccess(
 export async function resolveDashboardWebChartFilters(
   actor: DashboardWebChartActor,
   query: Record<string, unknown>,
+  options?: { defaultLimit?: number; maxLimit?: number },
 ): Promise<DashboardWebFilterResult> {
+  const defaultLimit = options?.defaultLimit ?? DASHBOARD_WEB_DEFAULT_SEGMENT_LIMIT
+  const maxLimit = options?.maxLimit ?? DASHBOARD_WEB_MAX_SEGMENT_LIMIT
   const role = actor.roles?.name ?? ''
 
   if (query.parent_id !== undefined && query.parent_id !== null && String(query.parent_id).trim()) {
@@ -145,12 +152,8 @@ export async function resolveDashboardWebChartFilters(
   const includeDescendants = parseBooleanQuery(query.include_descendants, true)
 
   let segmentLimit =
-    parseInt(String(query.limit ?? DASHBOARD_WEB_DEFAULT_SEGMENT_LIMIT), 10) ||
-    DASHBOARD_WEB_DEFAULT_SEGMENT_LIMIT
-  segmentLimit = Math.min(
-    DASHBOARD_WEB_MAX_SEGMENT_LIMIT,
-    Math.max(1, segmentLimit),
-  )
+    parseInt(String(query.limit ?? defaultLimit), 10) || defaultLimit
+  segmentLimit = Math.min(maxLimit, Math.max(1, segmentLimit))
 
   const orgId = actor.organization_id
   const rawTerritoryId =
@@ -173,6 +176,7 @@ export async function resolveDashboardWebChartFilters(
           role,
           from,
           to,
+          rawTerritoryId,
           segmentLimit,
           includeDescendants,
           territoryId: rawTerritoryId ?? '',
@@ -234,6 +238,7 @@ export async function resolveDashboardWebChartFilters(
       role,
       from,
       to,
+      rawTerritoryId,
       segmentLimit,
       includeDescendants,
       territoryId: filterTerritoryId,
@@ -251,6 +256,7 @@ function buildResolvedFilters(input: {
   role: string
   from: string
   to: string
+  rawTerritoryId: string | null
   segmentLimit: number
   includeDescendants: boolean
   territoryId: string
@@ -273,6 +279,7 @@ function buildResolvedFilters(input: {
       territory_level: input.territoryLevel,
       include_descendants: input.includeDescendants,
     },
+    rawTerritoryId: input.rawTerritoryId,
     segmentLimit: input.segmentLimit,
     scope: {
       role: input.role,
@@ -287,13 +294,23 @@ export function buildDashboardWebMeta(
   orgId: string,
   resolved: ResolvedDashboardWebFilters,
 ) {
+  const echoTerritory = resolved.rawTerritoryId
+    ? {
+        territory_id: resolved.territory.territory_id,
+        territory_name: resolved.territory.territory_name,
+        territory_level: resolved.territory.territory_level,
+      }
+    : {
+        territory_id: null,
+        territory_name: null,
+        territory_level: null,
+      }
+
   return {
     organization_id: orgId,
     generated_at: new Date().toISOString(),
     filters: {
-      territory_id: resolved.territory.territory_id,
-      territory_name: resolved.territory.territory_name,
-      territory_level: resolved.territory.territory_level,
+      ...echoTerritory,
       include_descendants: resolved.territory.include_descendants,
       from: resolved.dateRange.from,
       to: resolved.dateRange.to,
