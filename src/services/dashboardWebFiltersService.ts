@@ -296,6 +296,7 @@ export function buildDashboardWebMeta(
   orgId: string,
   resolved: ResolvedDashboardWebFilters,
   extraFilters?: Record<string, unknown>,
+  options?: { omitLimit?: boolean },
 ) {
   const echoTerritory = resolved.rawTerritoryId
     ? {
@@ -309,17 +310,21 @@ export function buildDashboardWebMeta(
         territory_level: null,
       }
 
+  const filters: Record<string, unknown> = {
+    ...echoTerritory,
+    include_descendants: resolved.territory.include_descendants,
+    from: resolved.dateRange.from,
+    to: resolved.dateRange.to,
+    ...extraFilters,
+  }
+  if (!options?.omitLimit) {
+    filters.limit = resolved.segmentLimit
+  }
+
   return {
     organization_id: orgId,
     generated_at: new Date().toISOString(),
-    filters: {
-      ...echoTerritory,
-      include_descendants: resolved.territory.include_descendants,
-      from: resolved.dateRange.from,
-      to: resolved.dateRange.to,
-      limit: resolved.segmentLimit,
-      ...extraFilters,
-    },
+    filters,
     scope: resolved.scope,
   }
 }
@@ -347,4 +352,45 @@ export function buildDashboardWebTerritorySqlClause(
     clause: `${alias}.territory_id = ANY($${paramIndex}::uuid[])`,
     params: [territoryIds],
   }
+}
+
+export interface DashboardWebPreviousPeriod {
+  previous_from: string
+  previous_to: string
+  createdFrom: Date
+  createdTo: Date
+}
+
+/** Same-length calendar window immediately before `from`. */
+export function computePreviousPeriod(from: string, to: string): DashboardWebPreviousPeriod {
+  const fromDate = new Date(`${from}T00:00:00.000Z`)
+  const toDate = new Date(`${to}T00:00:00.000Z`)
+  const durationDays =
+    Math.round((toDate.getTime() - fromDate.getTime()) / (24 * 60 * 60 * 1000)) + 1
+
+  const previousToDate = new Date(fromDate.getTime() - 24 * 60 * 60 * 1000)
+  const previousFromDate = new Date(
+    previousToDate.getTime() - (durationDays - 1) * 24 * 60 * 60 * 1000,
+  )
+
+  const previous_to = previousToDate.toISOString().slice(0, 10)
+  const previous_from = previousFromDate.toISOString().slice(0, 10)
+
+  return {
+    previous_from,
+    previous_to,
+    createdFrom: new Date(`${previous_from}T00:00:00.000Z`),
+    createdTo: new Date(`${previous_to}T23:59:59.999Z`),
+  }
+}
+
+export type DashboardWebTrend = 'up' | 'down' | 'neutral'
+
+export function computeDashboardWebTrend(
+  current: number,
+  previous: number,
+): DashboardWebTrend {
+  if (current > previous) return 'up'
+  if (current < previous) return 'down'
+  return 'neutral'
 }

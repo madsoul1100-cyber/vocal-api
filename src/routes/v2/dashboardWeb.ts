@@ -16,6 +16,7 @@ import {
   getWorkerLeaderboard,
   parseWorkerLeaderboardMetric,
 } from '@/services/dashboardWorkerLeaderboardService.js'
+import { getDashboardWebKpis } from '@/services/dashboardWebKpisService.js'
 
 const router = Router()
 
@@ -108,6 +109,33 @@ router.get('/charts/worker-leaderboard', requireAuth, async (req, res) => {
     res.json(chart)
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Chart query failed'
+    res.status(500).json({ error: message })
+  }
+})
+
+/** KPI row — tickets created/closed, open pipeline, needs action (territory + date scoped). */
+router.get('/kpis', requireAuth, async (req, res) => {
+  const user = vocalUser(req)
+  const access = assertDashboardWebChartAccess(user.roles?.name)
+  if (!access.ok) {
+    res.status(access.status).json({ error: access.error })
+    return
+  }
+
+  const resolved = await resolveDashboardWebChartFilters(user, req.query as Record<string, unknown>, {
+    defaultLimit: 1,
+    maxLimit: 1,
+  })
+  if (!resolved.ok) {
+    res.status(resolved.status).json({ error: resolved.error })
+    return
+  }
+
+  try {
+    const kpis = await getDashboardWebKpis(user.organization_id, resolved.filters)
+    res.json(kpis)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'KPI query failed'
     res.status(500).json({ error: message })
   }
 })
