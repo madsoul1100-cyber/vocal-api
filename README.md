@@ -75,6 +75,7 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 | `GET /v2/dashboard/web/kpis` | KPI row — tickets created/closed, open pipeline, needs action. Same filters; period trend on created/closed. See [`docs/DASHBOARD_WEB_CHARTS.md`](docs/DASHBOARD_WEB_CHARTS.md). |
 | `GET /v2/dashboard/web/charts/tickets-by-category-monthly` | Stacked bar time series — tickets by **issue category** per calendar month (`months` default 6). Territory only; no date filter. |
 | `GET /v2/dashboard/web/charts/tickets-by-stage-monthly` | Grouped bar time series — tickets by **pipeline stage** at month-end snapshot. Territory only; no date filter. |
+| `GET /v2/dashboard/web/charts/territory-heatmap` | District heat map — counts per Telangana district (`metric` + `period`; no dashboard filters). |
 | `GET /v2/tickets/:id` | Ticket detail; `classification`, `sla`, `citizen_identity`, `status_history`; `current_assignment`, `assignable_worker_count`, `can_assign`, `can_respond_to_offer`; `has_notes_or_attachments` → skip `GET .../attachments` when `false` |
 | `GET /v2/tickets/:id/assignable-workers` | Paginated assign dropdown (`super_admin` / `central_support`); `limit`/`offset`/`keyword`/`territory_id`; `in_ticket_territory=true` filters to ticket territory |
 | `POST /v2/tickets/assign` | Offer ticket to worker (`super_admin` / `central_support`); body `{ ticket_id, worker_id }` → `{ ok, assignment_id, expires_at }` |

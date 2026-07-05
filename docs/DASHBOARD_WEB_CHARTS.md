@@ -626,3 +626,95 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
 **Sanity:** `sum(segments[].count) === months[].total` per month.
 
 **Note:** Chart 5 (`tickets-by-category-monthly`) remains issue **category** over time (donut dimension). This chart is **stage** over time — different grouping rule.
+
+---
+
+## Chart 7: Territory heat map (district choropleth)
+
+```
+GET /v2/dashboard/web/charts/territory-heatmap
+Authorization: Bearer <token>
+```
+
+District-level counts for the bundled Telangana GeoJSON choropleth. **Map-local controls only** — does not use the dashboard header territory or date filters.
+
+### Query parameters
+
+| Param | Required | Values | Notes |
+|-------|----------|--------|-------|
+| `metric` | **Yes** | `created` \| `closed` \| `open` | What to count |
+| `period` | **Yes** for `created`/`closed` | `30d` \| `90d` \| `ytd` | Ignored for `open` (optional) |
+
+**Returns 400** if sent: `territory_id`, `from`, `to`, `include_descendants`.
+
+### Metric definitions
+
+| metric | Meaning | Time scope |
+|--------|---------|------------|
+| `created` | Tickets created | `created_at` in UTC window |
+| `closed` | Tickets closed | `stage = 'closed'`, `closed_at` in UTC window |
+| `open` | Open pipeline snapshot | Current `to_do` + `in_progress` + `on_hold` (no date window) |
+
+### Period windows (UTC, inclusive calendar dates)
+
+| period | Window |
+|--------|--------|
+| `30d` | Last 30 calendar days ending today |
+| `90d` | Last 90 calendar days ending today |
+| `ytd` | Jan 1 UTC → today |
+
+### Ticket → district rule
+
+Roll up `tickets.territory_id` to **district ancestor** (`level_order = 2`) using the same territory tree as `GET /v2/dashboard/territories/bootstrap`.
+
+**Null `territory_id`:** excluded (not counted on any district; districts show 0 if no mapped tickets).
+
+### Response
+
+Always returns **all bootstrap districts** (33 for Telangana), including `count: 0`.
+
+| Field | Purpose |
+|-------|---------|
+| `territory_id` | Join to bootstrap `districts[].id` |
+| `dt_code` | LGD district code from `territories.code` — join to GeoJSON `dt_code` |
+| `name` | Tooltip label |
+| `count` | Integer ≥ 0 |
+
+### Example request
+
+```bash
+curl -sS -H "Authorization: Bearer $TOKEN" \
+  "$BASE/v2/dashboard/web/charts/territory-heatmap?metric=created&period=30d"
+```
+
+### Sample response
+
+```json
+{
+  "chart_type": "territory_heatmap",
+  "metric": "created",
+  "period": "30d",
+  "level": "district",
+  "entries": [
+    {
+      "territory_id": "550e8400-e29b-41d4-a716-446655440000",
+      "dt_code": "536",
+      "name": "Hyderabad",
+      "count": 412
+    }
+  ],
+  "meta": {
+    "organization_id": "uuid",
+    "generated_at": "2026-07-05T12:00:00Z",
+    "state": "Telangana",
+    "expected_districts": 33,
+    "window_from": "2026-06-05",
+    "window_to": "2026-07-05",
+    "timezone": "UTC",
+    "null_territory_policy": "excluded",
+    "scope": { "role": "state_leader", "auto_scoped_territory_id": null }
+  }
+}
+```
+
+**Sanity:** Sum of `entries[].count` for `open` ≈ KPI `open_pipeline` on whole state (null-territory tickets excluded from both). Sum for `created` + `period=30d` ≈ KPI `tickets_created` when dashboard date filter matches the same 30-day window.

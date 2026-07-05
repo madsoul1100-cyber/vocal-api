@@ -22,6 +22,7 @@ import {
 import { getDashboardWebKpis } from '@/services/dashboardWebKpisService.js'
 import { getCategoryMonthlyChart } from '@/services/dashboardCategoryMonthlyChartService.js'
 import { getStageMonthlyChart } from '@/services/dashboardStageMonthlyChartService.js'
+import { getTerritoryHeatmapChart, resolveDashboardWebHeatmapFilters } from '@/services/dashboardTerritoryHeatmapService.js'
 
 const router = Router()
 
@@ -177,6 +178,30 @@ router.get('/charts/tickets-by-stage-monthly', requireAuth, async (req, res) => 
 
   try {
     const chart = await getStageMonthlyChart(user.organization_id, resolved.filters)
+    res.json(chart)
+  } catch (err) {
+    const message = err instanceof Error ? err.message : 'Chart query failed'
+    res.status(500).json({ error: message })
+  }
+})
+
+/** District heat map — ticket counts per Telangana district (metric + period controls only). */
+router.get('/charts/territory-heatmap', requireAuth, async (req, res) => {
+  const user = vocalUser(req)
+  const access = assertDashboardWebChartAccess(user.roles?.name)
+  if (!access.ok) {
+    res.status(access.status).json({ error: access.error })
+    return
+  }
+
+  const resolved = resolveDashboardWebHeatmapFilters(user.roles?.name, req.query as Record<string, unknown>)
+  if (!resolved.ok) {
+    res.status(resolved.status).json({ error: resolved.error })
+    return
+  }
+
+  try {
+    const chart = await getTerritoryHeatmapChart(user.organization_id, resolved.filters)
     res.json(chart)
   } catch (err) {
     const message = err instanceof Error ? err.message : 'Chart query failed'
