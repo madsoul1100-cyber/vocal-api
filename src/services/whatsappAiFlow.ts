@@ -30,7 +30,7 @@ import {
   type WhatsAppLang,
 } from './whatsappLocale.js'
 import { createTicket } from './ticketService.js'
-import { resolveTerritoryFromLocationText } from './territoryResolveService.js'
+import { resolveTicketTerritory } from './territoryResolveService.js'
 import { enrichTicketFromIssueText } from './ticketIntakeAi.js'
 import { downloadFromTwilioAndStore } from './attachmentService.js'
 import { maskWhatsAppUserId, waLog, waLogError, whatsappAutoOfferWorker } from '@/lib/whatsappFlowLog.js'
@@ -409,11 +409,13 @@ async function finalizeTicket(ctx: AiFlowContext, aiDraft: AiDraftState) {
   }
 
   const locationText = aiDraft.location_text ?? undefined
-  const territoryMatch = await resolveTerritoryFromLocationText(
-    ctx.organizationId,
-    locationText ?? '',
+  const territoryMatch = await resolveTicketTerritory({
+    organizationId: ctx.organizationId,
+    locationText: locationText ?? '',
     issueText,
-  )
+    latitude: aiDraft.latitude,
+    longitude: aiDraft.longitude,
+  })
   if (territoryMatch.territoryId) {
     waLog('ai.territory', 'resolved from location', {
       conversationId: ctx.conversationId,
@@ -421,6 +423,7 @@ async function finalizeTicket(ctx: AiFlowContext, aiDraft: AiDraftState) {
       territoryName: territoryMatch.territoryName,
       quality: territoryMatch.matchQuality,
       level: territoryMatch.levelOrder,
+      distanceKm: territoryMatch.distanceKm ?? null,
     })
   } else {
     waLog('ai.territory', 'no territory match', {

@@ -1,6 +1,6 @@
 /**
- * Resolve a citizen's free-text location to a territory node for ticket routing.
- * Uses the org territory tree (Telangana sample) with fuzzy name matching.
+ * Resolve a citizen's free-text location or GPS coordinates to a territory node for ticket routing.
+ * Uses the org territory tree (Telangana sample) with fuzzy name matching, then nearest-centroid fallback.
  */
 
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
@@ -8,14 +8,23 @@ import {
   DEFAULT_TERRITORY_STATE_NAME,
   loadOrgTerritoryRowsCached,
 } from '@/services/territoryService.js'
+import {
+  haversineKm,
+  isLikelyCoordinateOnlyText,
+  isValidLatitude,
+  isValidLongitude,
+} from '@/lib/geo.js'
+import { TELANGANA_DISTRICT_CENTROIDS_BY_CODE } from '@/data/telanganaDistrictCentroids.js'
 
-export type TerritoryMatchQuality = 'exact' | 'partial' | 'none'
+export type TerritoryMatchQuality = 'exact' | 'partial' | 'centroid' | 'none'
 
 export interface TerritoryMatchResult {
   territoryId: string | null
   territoryName: string | null
   levelOrder: number | null
   matchQuality: TerritoryMatchQuality
+  /** Distance in km when matched via coordinates (centroid fallback). */
+  distanceKm?: number | null
 }
 
 const LOCATION_TYPO_FIXES: Array<[RegExp, string]> = [
@@ -76,6 +85,18 @@ function buildTelanganaDescendantIds(
   return out
 }
 
+function resolveCentroid(
+  row: Awaited<ReturnType<typeof loadOrgTerritoryRowsCached>>[number],
+): { lat: number; lng: number } | null {
+  if (row.centroid_lat != null && row.centroid_lng != null) {
+    return { lat: row.centroid_lat, lng: row.centroid_lng }
+  }
+  if (row.level_order === 2 && row.code) {
+    return TELANGANA_DISTRICT_CENTROIDS_BY_CODE[row.code] ?? null
+  }
+  return null
+}
+
 /**
  * Match location / issue text to the most specific territory under Telangana.
  * Prefers deeper nodes (ward > mandal > district) when multiple names match.
@@ -86,7 +107,7 @@ export async function resolveTerritoryFromLocationText(
   issueText?: string | null,
 ): Promise<TerritoryMatchResult> {
   const combined = [locationText, issueText].filter(Boolean).join(' ').trim()
-  if (!combined) {
+  if (!combined || isLikelyCoordinateOnlyText(combined)) {
     return { territoryId: null, territoryName: null, levelOrder: null, matchQuality: 'none' }
   }
 
@@ -131,19 +152,105 @@ export async function resolveTerritoryFromLocationText(
   }
 }
 
-/** Set tickets.territory_id when empty, using location_text and/or issue text. */
+/**
+ * Nearest territory node with a known centroid (DB or district fallback table).
+ * Prefers deeper nodes when distances tie within ~500 m.
+ */
+export async function resolveTerritoryFromCoordinates(
+  organizationId: string,
+  latitude: number,
+  longitude: number,
+): Promise<TerritoryMatchResult> {
+  if (!isValidLatitude(latitude) || !isValidLongitude(longitude)) {
+    return { territoryId: null, territoryName: null, levelOrder: null, matchQuality: 'none' }
+  }
+
+  const rows = await loadOrgTerritoryRowsCached(organizationId)
+  const telanganaIds = buildTelanganaDescendantIds(rows)
+  const point = { lat: latitude, lng: longitude }
+
+  type Candidate = {
+    id: string
+    name: string
+    level_order: number
+    distanceKm: number
+  }
+  const candidates: Candidate[] = []
+
+  for (const row of rows) {
+    if (row.level_order < 2) continue
+    if (telanganaIds && !telanganaIds.has(row.id)) continue
+
+    const centroid = resolveCentroid(row)
+    if (!centroid) continue
+
+    candidates.push({
+      id: row.id,
+      name: row.name,
+      level_order: row.level_order,
+      distanceKm: haversineKm(point, centroid),
+    })
+  }
+
+  if (candidates.length === 0) {
+    return { territoryId: null, territoryName: null, levelOrder: null, matchQuality: 'none' }
+  }
+
+  candidates.sort(
+    (a, b) =>
+      a.distanceKm - b.distanceKm ||
+      b.level_order - a.level_order ||
+      a.name.localeCompare(b.name),
+  )
+
+  const best = candidates[0]!
+
+  return {
+    territoryId: best.id,
+    territoryName: best.name,
+    levelOrder: best.level_order,
+    matchQuality: 'centroid',
+    distanceKm: Math.round(best.distanceKm * 100) / 100,
+  }
+}
+
+/** Text match first, then GPS centroid fallback when coordinates are present. */
+export async function resolveTicketTerritory(args: {
+  organizationId: string
+  locationText?: string | null
+  issueText?: string | null
+  latitude?: number | null
+  longitude?: number | null
+}): Promise<TerritoryMatchResult> {
+  const textMatch = await resolveTerritoryFromLocationText(
+    args.organizationId,
+    args.locationText ?? '',
+    args.issueText,
+  )
+  if (textMatch.territoryId) return textMatch
+
+  if (isValidLatitude(args.latitude) && isValidLongitude(args.longitude)) {
+    return resolveTerritoryFromCoordinates(args.organizationId, args.latitude, args.longitude)
+  }
+
+  return { territoryId: null, territoryName: null, levelOrder: null, matchQuality: 'none' }
+}
+
+/** Set tickets.territory_id when empty, using location text, issue text, and/or coordinates. */
 export async function resolveAndApplyTicketTerritory(args: {
   ticketId: string
   organizationId: string
   locationText?: string | null
   issueText?: string | null
+  latitude?: number | null
+  longitude?: number | null
   /** Re-resolve from location even when territory_id is already set. */
   force?: boolean
 }): Promise<TerritoryMatchResult & { applied: boolean }> {
   const supabase = createSupabaseServiceClient()
   const { data: ticket } = await supabase
     .from('tickets')
-    .select('territory_id, location_text, original_issue_text')
+    .select('territory_id, location_text, original_issue_text, latitude, longitude')
     .eq('id', args.ticketId)
     .maybeSingle()
 
@@ -159,7 +266,16 @@ export async function resolveAndApplyTicketTerritory(args: {
 
   const locationText = args.locationText ?? (ticket?.location_text as string | null) ?? ''
   const issueText = args.issueText ?? (ticket?.original_issue_text as string | null) ?? ''
-  const match = await resolveTerritoryFromLocationText(args.organizationId, locationText, issueText)
+  const latitude = args.latitude ?? (ticket?.latitude as number | null) ?? null
+  const longitude = args.longitude ?? (ticket?.longitude as number | null) ?? null
+
+  const match = await resolveTicketTerritory({
+    organizationId: args.organizationId,
+    locationText,
+    issueText,
+    latitude,
+    longitude,
+  })
 
   if (!match.territoryId) {
     return { ...match, applied: false }

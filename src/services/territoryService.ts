@@ -29,6 +29,8 @@ type TerritoryRow = {
   parent_territory_id: string | null
   level_order: number
   level_label: string
+  centroid_lat: number | null
+  centroid_lng: number | null
 }
 
 const WORKERS_PAGE_ROLES = ['super_admin', 'central_support', 'district_leader']
@@ -109,6 +111,7 @@ async function loadOrgTerritoryRows(orgId: string): Promise<TerritoryRow[]> {
   if (isPostgresMode()) {
     const res = await dbQuery<TerritoryRow>(
       `SELECT t.id, t.name, t.code, t.parent_territory_id,
+              t.centroid_lat, t.centroid_lng,
               tld.level_order, tld.label AS level_label
        FROM territories t
        INNER JOIN territory_level_definitions tld ON tld.id = t.level_definition_id
@@ -123,7 +126,7 @@ async function loadOrgTerritoryRows(orgId: string): Promise<TerritoryRow[]> {
   const { data } = await supabase
     .from('territories')
     .select(
-      `id, name, code, parent_territory_id,
+      `id, name, code, parent_territory_id, centroid_lat, centroid_lng,
        territory_level_definitions(level_order, label)`,
     )
     .eq('organization_id', orgId)
@@ -144,6 +147,8 @@ async function loadOrgTerritoryRows(orgId: string): Promise<TerritoryRow[]> {
       parent_territory_id: (t.parent_territory_id as string | null) ?? null,
       level_order: Number(lvl.level_order),
       level_label: lvl.label,
+      centroid_lat: (t.centroid_lat as number | null) ?? null,
+      centroid_lng: (t.centroid_lng as number | null) ?? null,
     })
   }
   rows.sort((a, b) => a.level_order - b.level_order || a.name.localeCompare(b.name))

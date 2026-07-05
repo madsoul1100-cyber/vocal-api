@@ -22,6 +22,7 @@ import {
   workerTerritoryCoversTicket,
 } from '@/services/territoryService.js'
 import { resolveAndApplyTicketTerritory } from '@/services/territoryResolveService.js'
+import { haversineKm } from '@/lib/geo.js'
 import {  applyDevOfferWorkerPin,
   isDevOfferWorkerPinEnabled,
   resolveDevPinnedWorkerId,
@@ -37,16 +38,6 @@ import {
 const GROUND_WORKER_ROLE_ID = '00000000-0000-0000-0000-000000000005'
 
 import { resolveWorkerFiledByUserId } from '@/lib/workerTicketAccess.js'
-function haversineKm(a: { lat: number; lng: number }, b: { lat: number; lng: number }): number {
-  const R = 6371
-  const dLat = (b.lat - a.lat) * Math.PI / 180
-  const dLng = (b.lng - a.lng) * Math.PI / 180
-  const sa =
-    Math.sin(dLat / 2) ** 2 +
-    Math.cos(a.lat * Math.PI / 180) * Math.cos(b.lat * Math.PI / 180) *
-    Math.sin(dLng / 2) ** 2
-  return 2 * R * Math.asin(Math.min(1, Math.sqrt(sa)))
-}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -639,7 +630,7 @@ export async function autoAssignTicketByTerritory(
   const supabase = createSupabaseServiceClient()
   const { data: ticketRow } = await supabase
     .from('tickets')
-    .select('organization_id, territory_id, location_text, original_issue_text')
+    .select('organization_id, territory_id, location_text, original_issue_text, latitude, longitude')
     .eq('id', ticketId)
     .maybeSingle()
 
@@ -648,17 +639,24 @@ export async function autoAssignTicketByTerritory(
   const organizationId = opts?.organizationId ?? (ticketRow.organization_id as string)
   const locationText = opts?.locationText ?? (ticketRow.location_text as string | null)
   const issueText = opts?.issueText ?? (ticketRow.original_issue_text as string | null)
+  const latitude = ticketRow.latitude as number | null
+  const longitude = ticketRow.longitude as number | null
+  const hasCoords = latitude != null && longitude != null
 
   if (opts?.resolveTerritory !== false) {
     const shouldResolve =
-      !ticketRow.territory_id || !!(locationText?.trim() || issueText?.trim())
+      !ticketRow.territory_id ||
+      !!(locationText?.trim() || issueText?.trim()) ||
+      hasCoords
     if (shouldResolve) {
       await resolveAndApplyTicketTerritory({
         ticketId,
         organizationId,
         locationText,
         issueText,
-        force: !!(locationText?.trim() || issueText?.trim()),
+        latitude,
+        longitude,
+        force: !!(locationText?.trim() || issueText?.trim()) || hasCoords,
       })
     }
   }
