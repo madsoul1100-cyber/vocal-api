@@ -121,30 +121,33 @@ async function aggregateMonthlyStageSnapshotsPg(
   const res = await dbQuery<{ month_key: string; stage: string; c: string }>(
     `WITH month_windows AS (
        SELECT * FROM (VALUES ${monthValues}) AS m(month_key, snapshot_end)
+     ),
+     ticket_snapshots AS (
+       SELECT
+         mw.month_key,
+         CASE
+           WHEN COALESCE(latest.to_stage, 'to_do') IN ('to_do', 'in_progress', 'on_hold', 'closed')
+             THEN COALESCE(latest.to_stage, 'to_do')
+           ELSE 'to_do'
+         END AS stage
+       FROM month_windows mw
+       INNER JOIN tickets t
+         ON t.organization_id = $1
+         AND t.created_at <= mw.snapshot_end
+         AND ${territory.clause}
+       LEFT JOIN LATERAL (
+         SELECT h.to_stage
+         FROM ticket_stage_history h
+         WHERE h.ticket_id = t.id
+           AND h.created_at <= mw.snapshot_end
+         ORDER BY h.created_at DESC
+         LIMIT 1
+       ) latest ON true
      )
-     SELECT
-       mw.month_key,
-       CASE
-         WHEN COALESCE(latest.to_stage, 'to_do') IN ('to_do', 'in_progress', 'on_hold', 'closed')
-           THEN COALESCE(latest.to_stage, 'to_do')
-         ELSE 'to_do'
-       END AS stage,
-       COUNT(*)::text AS c
-     FROM month_windows mw
-     INNER JOIN tickets t
-       ON t.organization_id = $1
-       AND t.created_at <= mw.snapshot_end
-       AND ${territory.clause}
-     LEFT JOIN LATERAL (
-       SELECT h.to_stage
-       FROM ticket_stage_history h
-       WHERE h.ticket_id = t.id
-         AND h.created_at <= mw.snapshot_end
-       ORDER BY h.created_at DESC
-       LIMIT 1
-     ) latest ON true
-     GROUP BY mw.month_key, stage
-     ORDER BY mw.month_key ASC, stage ASC`,
+     SELECT month_key, stage, COUNT(*)::text AS c
+     FROM ticket_snapshots
+     GROUP BY month_key, stage
+     ORDER BY month_key ASC, stage ASC`,
     params,
   )
 
