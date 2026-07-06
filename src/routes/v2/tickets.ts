@@ -57,6 +57,7 @@ import {
   createWorkerIntakeTicket,
   parseWorkerIntakeBody,
 } from '@/services/workerTicketIntakeService.js'
+import { extractWorkerIntakeFromChat } from '@/services/workerTicketIntakeExtractService.js'
 import { TRIAGE_REQUIRED_MESSAGE } from '@/services/ticketTriageService.js'
 
 const router = Router()
@@ -226,6 +227,25 @@ router.post('/status', requireAuth, async (req, res) => {
     body.expires_at = result.expires_at
   }
   res.json(body)
+})
+
+/** Extract ticket fields from pasted chat text (pre-fill form; does not create a ticket). */
+router.post('/worker-intake/extract-from-chat', requireAuth, async (req, res) => {
+  const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> }).vocalUser
+  const chatText =
+    typeof req.body?.chat_text === 'string'
+      ? req.body.chat_text
+      : typeof req.body?.text === 'string'
+        ? req.body.text
+        : ''
+
+  const result = await extractWorkerIntakeFromChat(user as any, chatText)
+  if (!result.ok) {
+    res.status(result.status).json({ error: result.error })
+    return
+  }
+
+  res.json({ ok: true, ...result.result })
 })
 
 /** Field intake — worker files ticket on behalf of citizen; queued for CS triage. */
