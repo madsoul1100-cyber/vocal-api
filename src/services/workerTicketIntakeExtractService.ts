@@ -9,6 +9,8 @@
 import { tenantGeography } from '@/config/tenant.config.js'
 import { canCreateWorkerIntakeTicket } from '@/lib/roleHierarchy.js'
 import { normalizePhone } from '@/services/otpService.js'
+import { resolveTicketTerritory } from '@/services/territoryResolveService.js'
+import type { TerritoryCandidate } from '@/services/territoryCandidateService.js'
 
 const OPENROUTER_BASE_URL = process.env.OPENROUTER_BASE_URL ?? 'https://openrouter.ai/api/v1'
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY ?? ''
@@ -34,6 +36,24 @@ export interface WorkerIntakeExtractConfidence {
   longitude: number
 }
 
+export interface WorkerIntakeTerritorySuggestion {
+  suggested_territory_id: string | null
+  suggested_territory_name: string | null
+  district_name: string | null
+  confidence: number
+  match_quality: string
+  should_auto_apply: boolean
+  resolution_notes: string | null
+  candidates: Array<{
+    territory_id: string
+    name: string
+    level_order: number
+    district_name: string | null
+    confidence: number
+    match_reason: string
+  }>
+}
+
 export interface WorkerIntakeExtractResult {
   fields: WorkerIntakeExtractFields
   confidence: WorkerIntakeExtractConfidence
@@ -42,9 +62,11 @@ export interface WorkerIntakeExtractResult {
   /** Short note for the reviewer (e.g. ambiguous phone, multiple names). */
   extraction_notes: string | null
   ai_used: boolean
+  territory: WorkerIntakeTerritorySuggestion
 }
 
 type VocalUser = {
+  organization_id?: string
   roles?: { name: string } | null
 }
 
@@ -86,6 +108,61 @@ function parseCoord(value: unknown): number | null {
 function normalizeExtractedPhone(raw: string | null | undefined): string | null {
   if (!raw?.trim()) return null
   return normalizePhone(raw.trim())
+}
+
+function mapTerritoryCandidates(candidates: TerritoryCandidate[]) {
+  return candidates.map((c) => ({
+    territory_id: c.territory_id,
+    name: c.name,
+    level_order: c.level_order,
+    district_name: c.district_name,
+    confidence: c.confidence,
+    match_reason: c.match_reason,
+  }))
+}
+
+function emptyTerritorySuggestion(): WorkerIntakeTerritorySuggestion {
+  return {
+    suggested_territory_id: null,
+    suggested_territory_name: null,
+    district_name: null,
+    confidence: 0,
+    match_quality: 'none',
+    should_auto_apply: false,
+    resolution_notes: null,
+    candidates: [],
+  }
+}
+
+async function suggestTerritoryFromExtract(
+  organizationId: string | undefined,
+  fields: WorkerIntakeExtractFields,
+): Promise<WorkerIntakeTerritorySuggestion> {
+  if (!organizationId) return emptyTerritorySuggestion()
+
+  const match = await resolveTicketTerritory({
+    organizationId,
+    locationText: fields.address,
+    issueText: fields.description,
+    latitude: fields.latitude,
+    longitude: fields.longitude,
+    applyConfidenceGate: false,
+  })
+
+  const topCandidate = match.candidates[0]
+  const suggestedId = match.territoryId ?? topCandidate?.territory_id ?? null
+  const suggestedName = match.territoryName ?? topCandidate?.name ?? null
+
+  return {
+    suggested_territory_id: suggestedId,
+    suggested_territory_name: suggestedName,
+    district_name: match.districtName ?? topCandidate?.district_name ?? null,
+    confidence: match.confidence,
+    match_quality: match.matchQuality,
+    should_auto_apply: match.shouldAutoApply,
+    resolution_notes: match.resolutionNotes,
+    candidates: mapTerritoryCandidates(match.candidates),
+  }
 }
 
 function computeMissingFields(
@@ -145,8 +222,10 @@ Rules:
 - Do not invent facts not supported by the chat.`
 }
 
+type WorkerIntakeExtractAiPayload = Omit<WorkerIntakeExtractResult, 'territory'>
+
 async function extractWithAi(chatText: string): Promise<
-  | { ok: true; result: WorkerIntakeExtractResult }
+  | { ok: true; result: WorkerIntakeExtractAiPayload }
   | { ok: false; error: string }
 > {
   if (!OPENROUTER_API_KEY) {
@@ -286,7 +365,15 @@ export async function extractWorkerIntakeFromChat(
     return { ok: false, status: 503, error: aiResult.error }
   }
 
-  return { ok: true, result: aiResult.result }
+  const territory = await suggestTerritoryFromExtract(user.organization_id, aiResult.result.fields)
+
+  return {
+    ok: true,
+    result: {
+      ...aiResult.result,
+      territory,
+    },
+  }
 }
 
 /** For tests / fallbacks when AI is unavailable. */
@@ -297,5 +384,6 @@ export function emptyWorkerIntakeExtractResult(): WorkerIntakeExtractResult {
     missing_fields: ['citizen_name', 'citizen_phone', 'address', 'description'],
     extraction_notes: null,
     ai_used: false,
+    territory: emptyTerritorySuggestion(),
   }
 }
