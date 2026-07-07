@@ -24,7 +24,8 @@
     "cleanup:territories": "tsx scripts/deactivate-junk-territories.ts",
     "generate:ai-suggestion": "tsx scripts/generate-ai-suggestion.ts",
     "backfill:worker-filed-tickets": "tsx scripts/backfill-worker-filed-tickets.ts",
-    "backfill:district-centroids": "tsx scripts/backfill-district-centroids.ts"
+    "backfill:district-centroids": "tsx scripts/backfill-district-centroids.ts",
+    "backfill:ticket-territories": "tsx scripts/backfill-ticket-territories.ts"
   },
   "dependencies": {
     "@aws-sdk/client-s3": "^3.1052.0",
