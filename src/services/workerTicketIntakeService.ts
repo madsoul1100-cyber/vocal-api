@@ -13,7 +13,7 @@
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
 import { canCreateWorkerIntakeTicket } from '@/lib/roleHierarchy.js'
 import { uploadWorkerAttachment, validateTicketUploadSize } from '@/services/attachmentService.js'
-import { resolveCitizenForWorkerIntake } from '@/services/citizenService.js'
+import { resolveCitizenForWorkerIntake, normalizeCitizenPhoneE164 } from '@/services/citizenService.js'
 import { enrichTicketFromIssueText } from '@/services/ticketIntakeAi.js'
 import { intakeTerritoryAutoAssign } from '@/services/assignmentService.js'
 import { addTicketNote, createTicket } from '@/services/ticketService.js'
@@ -123,31 +123,39 @@ function parseOptionalCoord(raw: unknown): number | null {
   return Number.isFinite(n) ? n : null
 }
 
+function firstStringField(body: Record<string, unknown>, keys: string[]): string {
+  for (const key of keys) {
+    const value = body[key]
+    if (typeof value === 'string') return value
+    if (Array.isArray(value) && typeof value[0] === 'string') return value[0]
+  }
+  return ''
+}
+
 function parseIntakeFieldsFromBody(body: Record<string, unknown>): WorkerTicketIntakeInput {
-  const citizen_name =
-    (typeof body.citizen_name === 'string' ? body.citizen_name : typeof body.name === 'string' ? body.name : '')
-  const citizen_phone =
-    (typeof body.citizen_phone === 'string'
-      ? body.citizen_phone
-      : typeof body.phone === 'string'
-        ? body.phone
-        : typeof body.number === 'string'
-          ? body.number
-          : '')
-  const address =
-    (typeof body.address === 'string'
-      ? body.address
-      : typeof body.location_text === 'string'
-        ? body.location_text
-        : '')
-  const description =
-    (typeof body.description === 'string'
-      ? body.description
-      : typeof body.issue_text === 'string'
-        ? body.issue_text
-        : typeof body.original_issue_text === 'string'
-          ? body.original_issue_text
-          : '')
+  const citizen_name = firstStringField(body, [
+    'citizen_name',
+    'name',
+    'citizenName',
+    'full_name',
+    'fullName',
+  ])
+  const citizen_phone = firstStringField(body, [
+    'citizen_phone',
+    'phone',
+    'number',
+    'citizenPhone',
+    'phone_number',
+    'phoneNumber',
+  ])
+  const address = firstStringField(body, ['address', 'location_text', 'locationText'])
+  const description = firstStringField(body, [
+    'description',
+    'issue_text',
+    'issueText',
+    'original_issue_text',
+    'originalIssueText',
+  ])
 
   const latitude = parseCoord(body.latitude)
   const longitude = parseCoord(body.longitude)
@@ -173,6 +181,17 @@ function validateWorkerIntakeInput(
   }
   if (!input.citizen_phone.trim()) {
     return { ok: false, status: 400, error: 'number is required' }
+  }
+  if (!normalizeCitizenPhoneE164(input.citizen_phone)) {
+    const digits = input.citizen_phone.replace(/\D/g, '')
+    if (digits.length > 0 && digits.length < 10) {
+      return {
+        ok: false,
+        status: 400,
+        error: `citizen_phone must be a 10-digit Indian mobile number (got ${digits.length} digits)`,
+      }
+    }
+    return { ok: false, status: 400, error: 'Valid citizen phone number is required' }
   }
   if (!input.address.trim()) {
     return { ok: false, status: 400, error: 'address is required' }
@@ -204,9 +223,12 @@ function validateWorkerIntakeInput(
   return { ok: true }
 }
 
-/** Normalize JSON body for POST /tickets/worker-intake. */
-export function parseWorkerIntakeBody(body: Record<string, unknown>): WorkerTicketIntakeInput {
-  return parseIntakeFieldsFromBody(body)
+/** Normalize JSON or multipart body for POST /tickets/worker-intake. */
+export function parseWorkerIntakeBody(
+  body: Record<string, unknown>,
+  files?: Array<{ buffer: Buffer; originalname: string; mimetype: string }>,
+): WorkerTicketIntakeInput {
+  return { ...parseIntakeFieldsFromBody(body), files }
 }
 
 /** Parse + validate multipart fields for POST /worker/tickets. */
@@ -473,13 +495,15 @@ async function runWorkerIntakeCore(
   })
 
   if (!params.skipTerritoryAutoAssign) {
-    await intakeTerritoryAutoAssign({
+    intakeTerritoryAutoAssign({
       ticketId: created.ticketId,
       ticketNumber: created.ticketNumber,
       organizationId,
       locationText: address,
       issueText: description,
       source: 'manual',
+    }).catch((err) => {
+      console.error('[workerIntake] intakeTerritoryAutoAssign', err)
     })
   }
 
