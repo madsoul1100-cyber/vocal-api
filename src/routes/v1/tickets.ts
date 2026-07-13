@@ -1,7 +1,9 @@
 import { Router } from 'express'
+import multer from 'multer'
 import { requireAuth } from '@/middleware/requireAuth.js'
 import { getCurrentVocalUser } from '@/lib/auth.js'
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
+import { TICKET_UPLOAD_MULTER_MAX_BYTES } from '@/services/attachmentService.js'
 import { queryTickets } from '@/services/ticketQueries.js'
 import { acceptTicket, rejectTicket, updateTicketStatus } from '@/services/ticketActionsService.js'
 import {
@@ -12,9 +14,12 @@ import {
   extractWorkerIntakeFromChat,
   extractWorkerIntakeFromChatScreenshots,
 } from '@/services/workerTicketIntakeExtractService.js'
-import multer from 'multer'
 
 const router = Router()
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: TICKET_UPLOAD_MULTER_MAX_BYTES, files: 5 },
+})
 
 const chatScreenshotUpload = multer({
   storage: multer.memoryStorage(),
@@ -148,11 +153,20 @@ router.post('/worker-intake/extract-from-chat', requireAuth, async (req, res) =>
 })
 
 /** Field intake — worker files ticket on behalf of citizen; queued for CS triage. */
-router.post('/worker-intake', requireAuth, async (req, res) => {
+router.post(
+  '/worker-intake',
+  requireAuth,
+  upload.array('files', 5),
+  async (req, res) => {
   const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> }).vocalUser
+  const files = (req.files as Express.Multer.File[] | undefined)?.map((f) => ({
+    buffer: f.buffer,
+    originalname: f.originalname,
+    mimetype: f.mimetype,
+  }))
   const result = await createWorkerIntakeTicket(
     user as any,
-    parseWorkerIntakeBody((req.body ?? {}) as Record<string, unknown>),
+    parseWorkerIntakeBody((req.body ?? {}) as Record<string, unknown>, files),
   )
 
   if (!result.ok) {

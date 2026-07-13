@@ -1,242 +1,233 @@
 /**
  * Resolve a citizen's free-text location or GPS coordinates to a territory node for ticket routing.
- * Uses the org territory tree (Telangana sample) with fuzzy name matching, then nearest-centroid fallback.
+ *
+ * Pipeline: rule candidates → optional AI pick (constrained list) → coord fallback.
+ * Wrong map is worse than null — low confidence or district conflict → no territory_id.
  */
 
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
+import { isLikelyCoordinateOnlyText, isValidLatitude, isValidLongitude } from '@/lib/geo.js'
+import { loadOrgTerritoryRowsCached } from '@/services/territoryService.js'
 import {
-  DEFAULT_TERRITORY_STATE_NAME,
-  loadOrgTerritoryRowsCached,
-} from '@/services/territoryService.js'
+  buildTerritoryCandidates,
+  getDistrictAncestor,
+  hasTerritoryCandidateConflict,
+  pickBestRuleCandidate,
+  type TerritoryCandidate,
+} from '@/services/territoryCandidateService.js'
 import {
-  haversineKm,
-  isLikelyCoordinateOnlyText,
-  isValidLatitude,
-  isValidLongitude,
-} from '@/lib/geo.js'
-import { TELANGANA_DISTRICT_CENTROIDS_BY_CODE } from '@/data/telanganaDistrictCentroids.js'
+  pickTerritoryWithAi,
+  TERRITORY_AI_MIN_CONFIDENCE,
+  TERRITORY_AUTO_APPLY_CONFIDENCE,
+} from '@/services/territoryResolveAiService.js'
+import { resolveTerritoryFromCoordinates } from '@/services/territoryResolveLegacyService.js'
 
-export type TerritoryMatchQuality = 'exact' | 'partial' | 'centroid' | 'none'
+export type TerritoryMatchQuality = 'exact' | 'partial' | 'centroid' | 'ai' | 'none'
 
 export interface TerritoryMatchResult {
   territoryId: string | null
   territoryName: string | null
   levelOrder: number | null
+  districtId: string | null
+  districtName: string | null
   matchQuality: TerritoryMatchQuality
-  /** Distance in km when matched via coordinates (centroid fallback). */
+  confidence: number
   distanceKm?: number | null
+  candidates: TerritoryCandidate[]
+  resolutionNotes: string | null
+  /** True when confidence meets auto-apply threshold (else leave null on ticket). */
+  shouldAutoApply: boolean
 }
 
-const LOCATION_TYPO_FIXES: Array<[RegExp, string]> = [
-  [/\bhydrabad\b/gi, 'hyderabad'],
-  [/\bhyerabad\b/gi, 'hyderabad'],
-  [/\bsecunderbad\b/gi, 'secunderabad'],
-  [/\bbanjara\b/gi, 'banjara'],
-]
-
-function normalizeForMatch(text: string): string {
-  let t = text.toLowerCase()
-  for (const [pattern, replacement] of LOCATION_TYPO_FIXES) {
-    t = t.replace(pattern, replacement)
-  }
-  return t
-    .replace(/\b(dr|mr|mrs)\b\.?/gi, '')
-    .replace(/[^a-z0-9\s]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim()
-}
-
-function nameAppearsInText(name: string, normalizedText: string): boolean {
-  const n = normalizeForMatch(name)
-  if (n.length < 3) return false
-  if (normalizedText.includes(n)) return true
-  const tokens = n.split(' ').filter((w) => w.length >= 4)
-  if (tokens.length === 0) return false
-  const matched = tokens.filter((tok) => normalizedText.includes(tok))
-  return matched.length >= Math.min(2, tokens.length)
-}
-
-function buildTelanganaDescendantIds(
-  rows: Awaited<ReturnType<typeof loadOrgTerritoryRowsCached>>,
-): Set<string> | null {
-  const telangana = rows.find(
-    (r) =>
-      r.level_order === 1 &&
-      r.name.trim().toLowerCase() === DEFAULT_TERRITORY_STATE_NAME.toLowerCase(),
-  )
-  if (!telangana) return null
-
-  const childrenOf = new Map<string, string[]>()
-  for (const r of rows) {
-    if (!r.parent_territory_id) continue
-    const list = childrenOf.get(r.parent_territory_id) ?? []
-    list.push(r.id)
-    childrenOf.set(r.parent_territory_id, list)
-  }
-
-  const out = new Set<string>()
-  const stack = [telangana.id]
-  while (stack.length > 0) {
-    const id = stack.pop()!
-    if (out.has(id)) continue
-    out.add(id)
-    for (const childId of childrenOf.get(id) ?? []) stack.push(childId)
-  }
-  return out
-}
-
-function resolveCentroid(
-  row: Awaited<ReturnType<typeof loadOrgTerritoryRowsCached>>[number],
-): { lat: number; lng: number } | null {
-  if (row.centroid_lat != null && row.centroid_lng != null) {
-    return { lat: row.centroid_lat, lng: row.centroid_lng }
-  }
-  if (row.level_order === 2 && row.code) {
-    return TELANGANA_DISTRICT_CENTROIDS_BY_CODE[row.code] ?? null
-  }
-  return null
-}
-
-/**
- * Match location / issue text to the most specific territory under Telangana.
- * Prefers deeper nodes (ward > mandal > district) when multiple names match.
- */
-export async function resolveTerritoryFromLocationText(
-  organizationId: string,
-  locationText: string,
-  issueText?: string | null,
-): Promise<TerritoryMatchResult> {
-  const combined = [locationText, issueText].filter(Boolean).join(' ').trim()
-  if (!combined || isLikelyCoordinateOnlyText(combined)) {
-    return { territoryId: null, territoryName: null, levelOrder: null, matchQuality: 'none' }
-  }
-
-  const rows = await loadOrgTerritoryRowsCached(organizationId)
-  const telanganaIds = buildTelanganaDescendantIds(rows)
-  const normalizedText = normalizeForMatch(combined)
-
-  type Scored = { id: string; name: string; level_order: number; score: number; exact: boolean }
-  const scored: Scored[] = []
-
-  for (const row of rows) {
-    if (row.level_order < 2) continue
-    if (telanganaIds && !telanganaIds.has(row.id)) continue
-
-    const exact = normalizeForMatch(row.name) === normalizedText
-    const partial = !exact && nameAppearsInText(row.name, normalizedText)
-    if (!exact && !partial) continue
-
-    const nameLen = normalizeForMatch(row.name).length
-    const depthBoost = row.level_order ** 2
-    const score = nameLen * depthBoost + (exact ? 10_000 : 0)
-    scored.push({
-      id: row.id,
-      name: row.name,
-      level_order: row.level_order,
-      score,
-      exact,
-    })
-  }
-
-  if (scored.length === 0) {
-    return { territoryId: null, territoryName: null, levelOrder: null, matchQuality: 'none' }
-  }
-
-  scored.sort((a, b) => b.score - a.score || b.level_order - a.level_order)
-  const best = scored[0]!
+function emptyResult(notes?: string | null): TerritoryMatchResult {
   return {
-    territoryId: best.id,
-    territoryName: best.name,
-    levelOrder: best.level_order,
-    matchQuality: best.exact ? 'exact' : 'partial',
+    territoryId: null,
+    territoryName: null,
+    levelOrder: null,
+    districtId: null,
+    districtName: null,
+    matchQuality: 'none',
+    confidence: 0,
+    candidates: [],
+    resolutionNotes: notes ?? null,
+    shouldAutoApply: false,
   }
 }
 
-/**
- * Nearest territory node with a known centroid (DB or district fallback table).
- * Prefers deeper nodes when distances tie within ~500 m.
- */
-export async function resolveTerritoryFromCoordinates(
-  organizationId: string,
-  latitude: number,
-  longitude: number,
-): Promise<TerritoryMatchResult> {
-  if (!isValidLatitude(latitude) || !isValidLongitude(longitude)) {
-    return { territoryId: null, territoryName: null, levelOrder: null, matchQuality: 'none' }
-  }
-
-  const rows = await loadOrgTerritoryRowsCached(organizationId)
-  const telanganaIds = buildTelanganaDescendantIds(rows)
-  const point = { lat: latitude, lng: longitude }
-
-  type Candidate = {
-    id: string
-    name: string
-    level_order: number
-    distanceKm: number
-  }
-  const candidates: Candidate[] = []
-
-  for (const row of rows) {
-    if (row.level_order < 2) continue
-    if (telanganaIds && !telanganaIds.has(row.id)) continue
-
-    const centroid = resolveCentroid(row)
-    if (!centroid) continue
-
-    candidates.push({
-      id: row.id,
-      name: row.name,
-      level_order: row.level_order,
-      distanceKm: haversineKm(point, centroid),
-    })
-  }
-
-  if (candidates.length === 0) {
-    return { territoryId: null, territoryName: null, levelOrder: null, matchQuality: 'none' }
-  }
-
-  candidates.sort(
-    (a, b) =>
-      a.distanceKm - b.distanceKm ||
-      b.level_order - a.level_order ||
-      a.name.localeCompare(b.name),
-  )
-
-  const best = candidates[0]!
-
+function resultFromCandidate(
+  candidate: TerritoryCandidate,
+  quality: TerritoryMatchQuality,
+  confidence: number,
+  candidates: TerritoryCandidate[],
+  notes: string | null,
+): TerritoryMatchResult {
+  const shouldAutoApply = confidence >= TERRITORY_AUTO_APPLY_CONFIDENCE
   return {
-    territoryId: best.id,
-    territoryName: best.name,
-    levelOrder: best.level_order,
+    territoryId: shouldAutoApply ? candidate.territory_id : null,
+    territoryName: candidate.name,
+    levelOrder: candidate.level_order,
+    districtId: candidate.district_id,
+    districtName: candidate.district_name,
+    matchQuality: quality,
+    confidence,
+    candidates,
+    resolutionNotes: shouldAutoApply ? notes : notes ?? `Below confidence threshold (${confidence.toFixed(2)})`,
+    shouldAutoApply,
+  }
+}
+
+function resultFromCoordMatch(
+  coordMatch: Awaited<ReturnType<typeof resolveTerritoryFromCoordinates>>,
+  candidates: TerritoryCandidate[],
+): TerritoryMatchResult {
+  if (!coordMatch.territoryId) return emptyResult('No coordinate match')
+  const confidence = 0.72
+  const shouldAutoApply = confidence >= TERRITORY_AUTO_APPLY_CONFIDENCE
+  return {
+    territoryId: shouldAutoApply ? coordMatch.territoryId : null,
+    territoryName: coordMatch.territoryName,
+    levelOrder: coordMatch.levelOrder,
+    districtId: null,
+    districtName: null,
     matchQuality: 'centroid',
-    distanceKm: Math.round(best.distanceKm * 100) / 100,
+    confidence,
+    distanceKm: coordMatch.distanceKm,
+    candidates,
+    resolutionNotes: shouldAutoApply ? 'Nearest territory centroid from GPS' : 'GPS match below apply policy',
+    shouldAutoApply,
   }
 }
 
-/** Text match first, then GPS centroid fallback when coordinates are present. */
+/** Resolve territory for intake — rules + AI + GPS, with confidence gating. */
 export async function resolveTicketTerritory(args: {
   organizationId: string
   locationText?: string | null
   issueText?: string | null
   latitude?: number | null
   longitude?: number | null
+  /** When false, always return best guess in territoryId (for suggestions). Default true. */
+  applyConfidenceGate?: boolean
 }): Promise<TerritoryMatchResult> {
-  const textMatch = await resolveTerritoryFromLocationText(
-    args.organizationId,
-    args.locationText ?? '',
-    args.issueText,
-  )
-  if (textMatch.territoryId) return textMatch
-
-  if (isValidLatitude(args.latitude) && isValidLongitude(args.longitude)) {
-    return resolveTerritoryFromCoordinates(args.organizationId, args.latitude, args.longitude)
+  const combined = [args.locationText, args.issueText].filter(Boolean).join(' ').trim()
+  if (!combined && !isValidLatitude(args.latitude)) {
+    return emptyResult()
+  }
+  if (combined && isLikelyCoordinateOnlyText(combined) && isValidLatitude(args.latitude)) {
+    // skip text when only coords string; fall through to GPS
   }
 
-  return { territoryId: null, territoryName: null, levelOrder: null, matchQuality: 'none' }
+  const { candidates, metroContext } = await buildTerritoryCandidates({
+    organizationId: args.organizationId,
+    locationText: args.locationText,
+    issueText: args.issueText,
+    latitude: args.latitude,
+    longitude: args.longitude,
+  })
+
+  const applyGate = args.applyConfidenceGate !== false
+  const rows = await loadOrgTerritoryRowsCached(args.organizationId)
+  const byId = new Map(rows.map((r) => [r.id, r]))
+
+  // 1) AI pick when configured and we have candidates
+  const aiPick = await pickTerritoryWithAi({
+    locationText: args.locationText ?? '',
+    issueText: args.issueText ?? '',
+    latitude: args.latitude,
+    longitude: args.longitude,
+    candidates,
+    metroContext,
+  })
+
+  if (aiPick?.territory_id && aiPick.confidence >= TERRITORY_AI_MIN_CONFIDENCE) {
+    const picked = candidates.find((c) => c.territory_id === aiPick.territory_id)
+    if (picked) {
+      const result = resultFromCandidate(
+        picked,
+        'ai',
+        aiPick.confidence,
+        candidates,
+        aiPick.reason,
+      )
+      if (!applyGate && result.territoryId == null) {
+        return { ...result, territoryId: picked.territory_id, shouldAutoApply: true }
+      }
+      return result
+    }
+  }
+
+  // 2) Rule-based best candidate
+  if (hasTerritoryCandidateConflict(candidates)) {
+    const note =
+      aiPick?.reason ??
+      `Ambiguous location — top matches span different districts (${candidates[0]?.district_name} vs ${candidates[1]?.district_name})`
+    const suggestion = candidates[0]
+    if (!applyGate && suggestion) {
+      const district = getDistrictAncestor(suggestion.territory_id, byId)
+      return {
+        territoryId: suggestion.territory_id,
+        territoryName: suggestion.name,
+        levelOrder: suggestion.level_order,
+        districtId: district?.id ?? suggestion.district_id,
+        districtName: district?.name ?? suggestion.district_name,
+        matchQuality: 'partial',
+        confidence: suggestion.confidence,
+        candidates,
+        resolutionNotes: note,
+        shouldAutoApply: false,
+      }
+    }
+    return { ...emptyResult(note), candidates }
+  }
+
+  const ruleBest = pickBestRuleCandidate(candidates)
+  if (ruleBest) {
+    const result = resultFromCandidate(
+      ruleBest,
+      ruleBest.score >= 100 ? 'exact' : 'partial',
+      ruleBest.confidence,
+      candidates,
+      ruleBest.match_reason,
+    )
+    if (!applyGate && result.territoryId == null) {
+      return { ...result, territoryId: ruleBest.territory_id, shouldAutoApply: false }
+    }
+    return result
+  }
+
+  // 3) GPS centroid fallback
+  if (isValidLatitude(args.latitude) && isValidLongitude(args.longitude)) {
+    const coordMatch = await resolveTerritoryFromCoordinates(
+      args.organizationId,
+      args.latitude,
+      args.longitude,
+    )
+    if (coordMatch.territoryId) {
+      const district = getDistrictAncestor(coordMatch.territoryId, byId)
+      const coordResult = resultFromCoordMatch(coordMatch, candidates)
+      if (district) {
+        coordResult.districtId = district.id
+        coordResult.districtName = district.name
+      }
+      if (!applyGate && coordResult.territoryId == null && coordMatch.territoryId) {
+        return {
+          ...coordResult,
+          territoryId: coordMatch.territoryId,
+          territoryName: coordMatch.territoryName,
+          levelOrder: coordMatch.levelOrder,
+        }
+      }
+      return coordResult
+    }
+  }
+
+  if (aiPick?.reason) {
+    return { ...emptyResult(aiPick.reason), candidates }
+  }
+
+  return { ...emptyResult(), candidates }
 }
 
-/** Set tickets.territory_id when empty, using location text, issue text, and/or coordinates. */
+/** Set tickets.territory_id when confidence allows, using location text, issue text, and/or coordinates. */
 export async function resolveAndApplyTicketTerritory(args: {
   ticketId: string
   organizationId: string
@@ -244,7 +235,6 @@ export async function resolveAndApplyTicketTerritory(args: {
   issueText?: string | null
   latitude?: number | null
   longitude?: number | null
-  /** Re-resolve from location even when territory_id is already set. */
   force?: boolean
 }): Promise<TerritoryMatchResult & { applied: boolean }> {
   const supabase = createSupabaseServiceClient()
@@ -259,7 +249,13 @@ export async function resolveAndApplyTicketTerritory(args: {
       territoryId: ticket.territory_id as string,
       territoryName: null,
       levelOrder: null,
+      districtId: null,
+      districtName: null,
       matchQuality: 'exact',
+      confidence: 1,
+      candidates: [],
+      resolutionNotes: null,
+      shouldAutoApply: true,
       applied: false,
     }
   }
@@ -275,9 +271,10 @@ export async function resolveAndApplyTicketTerritory(args: {
     issueText,
     latitude,
     longitude,
+    applyConfidenceGate: true,
   })
 
-  if (!match.territoryId) {
+  if (!match.territoryId || !match.shouldAutoApply) {
     return { ...match, applied: false }
   }
 
@@ -293,3 +290,6 @@ export async function resolveAndApplyTicketTerritory(args: {
 
   return { ...match, applied: true }
 }
+
+// Re-export for callers that used legacy text-only resolve
+export { resolveTerritoryFromLocationText } from '@/services/territoryResolveLegacyService.js'

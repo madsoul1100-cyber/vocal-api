@@ -8,6 +8,15 @@
 import { createSupabaseServiceClient } from '@/lib/supabase.js'
 import { buildTriageCompletePatch } from '@/services/ticketTriageService.js'
 
+export function coerceTruthyFlag(value: unknown): boolean {
+  if (value === true || value === 1) return true
+  if (typeof value === 'string') {
+    const s = value.trim().toLowerCase()
+    return s === 'true' || s === '1' || s === 'yes' || s === 'on'
+  }
+  return false
+}
+
 export interface CreateTicketInput {
   organizationId: string
   sourceChannel: 'telegram' | 'whatsapp' | 'web' | 'manual'
@@ -87,6 +96,8 @@ export async function createTicket(input: CreateTicketInput): Promise<TicketCrea
     }
   }
 
+  const anonymousFlag = coerceTruthyFlag(input.anonymousFlag)
+
   const { data: ticket, error } = await supabase
     .from('tickets')
     .insert({
@@ -95,7 +106,7 @@ export async function createTicket(input: CreateTicketInput): Promise<TicketCrea
       source_channel: input.sourceChannel,
       source_conversation_id: input.sourceConversationId ?? null,
       citizen_id: input.citizenId ?? null,
-      anonymous_flag: input.anonymousFlag ?? false,
+      anonymous_flag: anonymousFlag,
       title: input.title ?? null,
       original_issue_text: input.originalIssueText ?? null,
       location_text: input.locationText ?? null,
@@ -147,7 +158,7 @@ export async function createTicket(input: CreateTicketInput): Promise<TicketCrea
       ticket_number: ticket.ticket_number,
       source_channel: input.sourceChannel,
       has_location: hasUsableLocation,
-      anonymous: input.anonymousFlag ?? false,
+      anonymous: anonymousFlag,
       filed_by_worker: !createdBySystem,
     },
   })

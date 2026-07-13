@@ -7,6 +7,8 @@
 import { tenantGeography } from '@/config/tenant.config.js'
 import { canCreateWorkerIntakeTicket } from '@/lib/roleHierarchy.js'
 import { normalizePhone } from '@/services/otpService.js'
+import { resolveTicketTerritory } from '@/services/territoryResolveService.js'
+import type { TerritoryCandidate } from '@/services/territoryCandidateService.js'
 
 const OPENROUTER_BASE_URL = process.env.OPENROUTER_BASE_URL ?? 'https://openrouter.ai/api/v1'
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY ?? ''
@@ -28,6 +30,8 @@ export interface WorkerIntakeExtractFields {
   description: string | null
   latitude: number | null
   longitude: number | null
+  /** Always false for chat/worker intake — citizen is identified by name/phone. */
+  anonymous: boolean
 }
 
 export interface WorkerIntakeExtractConfidence {
@@ -37,6 +41,24 @@ export interface WorkerIntakeExtractConfidence {
   description: number
   latitude: number
   longitude: number
+}
+
+export interface WorkerIntakeTerritorySuggestion {
+  suggested_territory_id: string | null
+  suggested_territory_name: string | null
+  district_name: string | null
+  confidence: number
+  match_quality: string
+  should_auto_apply: boolean
+  resolution_notes: string | null
+  candidates: Array<{
+    territory_id: string
+    name: string
+    level_order: number
+    district_name: string | null
+    confidence: number
+    match_reason: string
+  }>
 }
 
 export interface WorkerIntakeExtractResult {
@@ -49,6 +71,7 @@ export interface WorkerIntakeExtractResult {
   source: ChatExtractSource
   /** Number of screenshots processed (1+ when source is image). */
   screenshot_count?: number
+  territory: WorkerIntakeTerritorySuggestion
 }
 
 export interface ChatScreenshotInput {
@@ -58,8 +81,11 @@ export interface ChatScreenshotInput {
 }
 
 type VocalUser = {
+  organization_id?: string
   roles?: { name: string } | null
 }
+
+type WorkerIntakeExtractAiPayload = Omit<WorkerIntakeExtractResult, 'territory'>
 
 type OpenRouterMessage =
   | { role: 'system' | 'user'; content: string }
@@ -90,6 +116,7 @@ function emptyFields(): WorkerIntakeExtractFields {
     description: null,
     latitude: null,
     longitude: null,
+    anonymous: false,
   }
 }
 
@@ -109,6 +136,61 @@ function parseCoord(value: unknown): number | null {
 function normalizeExtractedPhone(raw: string | null | undefined): string | null {
   if (!raw?.trim()) return null
   return normalizePhone(raw.trim())
+}
+
+function mapTerritoryCandidates(candidates: TerritoryCandidate[]) {
+  return candidates.map((c) => ({
+    territory_id: c.territory_id,
+    name: c.name,
+    level_order: c.level_order,
+    district_name: c.district_name,
+    confidence: c.confidence,
+    match_reason: c.match_reason,
+  }))
+}
+
+function emptyTerritorySuggestion(): WorkerIntakeTerritorySuggestion {
+  return {
+    suggested_territory_id: null,
+    suggested_territory_name: null,
+    district_name: null,
+    confidence: 0,
+    match_quality: 'none',
+    should_auto_apply: false,
+    resolution_notes: null,
+    candidates: [],
+  }
+}
+
+async function suggestTerritoryFromExtract(
+  organizationId: string | undefined,
+  fields: WorkerIntakeExtractFields,
+): Promise<WorkerIntakeTerritorySuggestion> {
+  if (!organizationId) return emptyTerritorySuggestion()
+
+  const match = await resolveTicketTerritory({
+    organizationId,
+    locationText: fields.address,
+    issueText: fields.description,
+    latitude: fields.latitude,
+    longitude: fields.longitude,
+    applyConfidenceGate: false,
+  })
+
+  const topCandidate = match.candidates[0]
+  const suggestedId = match.territoryId ?? topCandidate?.territory_id ?? null
+  const suggestedName = match.territoryName ?? topCandidate?.name ?? null
+
+  return {
+    suggested_territory_id: suggestedId,
+    suggested_territory_name: suggestedName,
+    district_name: match.districtName ?? topCandidate?.district_name ?? null,
+    confidence: match.confidence,
+    match_quality: match.matchQuality,
+    should_auto_apply: match.shouldAutoApply,
+    resolution_notes: match.resolutionNotes,
+    candidates: mapTerritoryCandidates(match.candidates),
+  }
 }
 
 function computeMissingFields(
@@ -178,7 +260,7 @@ function parseExtractionResponse(
   parsed: Record<string, unknown>,
   source: ChatExtractSource,
   screenshotCount?: number,
-): WorkerIntakeExtractResult {
+): WorkerIntakeExtractAiPayload {
   const confidenceRaw = (parsed.confidence ?? {}) as Record<string, unknown>
 
   const fields: WorkerIntakeExtractFields = {
@@ -199,6 +281,7 @@ function parseExtractionResponse(
         : null,
     latitude: parseCoord(parsed.latitude),
     longitude: parseCoord(parsed.longitude),
+    anonymous: false,
   }
 
   const confidence: WorkerIntakeExtractConfidence = {
@@ -246,7 +329,7 @@ async function callOpenRouterExtraction(
   messages: OpenRouterMessage[],
   source: ChatExtractSource,
   screenshotCount?: number,
-): Promise<{ ok: true; result: WorkerIntakeExtractResult } | { ok: false; error: string }> {
+): Promise<{ ok: true; result: WorkerIntakeExtractAiPayload } | { ok: false; error: string }> {
   if (!OPENROUTER_API_KEY) {
     return { ok: false, error: 'AI extraction is not configured (OPENROUTER_API_KEY missing)' }
   }
@@ -296,7 +379,7 @@ async function callOpenRouterExtraction(
 
 async function extractWithAiFromText(
   chatText: string,
-): Promise<{ ok: true; result: WorkerIntakeExtractResult } | { ok: false; error: string }> {
+): Promise<{ ok: true; result: WorkerIntakeExtractAiPayload } | { ok: false; error: string }> {
   return callOpenRouterExtraction(
     [
       { role: 'system', content: buildSystemPrompt('text') },
@@ -319,7 +402,7 @@ function toDataUrl(buffer: Buffer, mimetype: string): string {
 
 async function extractWithAiFromScreenshots(
   screenshots: ChatScreenshotInput[],
-): Promise<{ ok: true; result: WorkerIntakeExtractResult } | { ok: false; error: string }> {
+): Promise<{ ok: true; result: WorkerIntakeExtractAiPayload } | { ok: false; error: string }> {
   const content: Array<
     | { type: 'text'; text: string }
     | { type: 'image_url'; image_url: { url: string } }
@@ -395,6 +478,14 @@ export function validateChatScreenshots(
   return { ok: true }
 }
 
+async function attachTerritorySuggestion(
+  user: VocalUser,
+  aiResult: WorkerIntakeExtractAiPayload,
+): Promise<WorkerIntakeExtractResult> {
+  const territory = await suggestTerritoryFromExtract(user.organization_id, aiResult.fields)
+  return { ...aiResult, territory }
+}
+
 export async function extractWorkerIntakeFromChat(
   user: VocalUser,
   chatText: string,
@@ -422,7 +513,7 @@ export async function extractWorkerIntakeFromChat(
     return { ok: false, status: 503, error: aiResult.error }
   }
 
-  return { ok: true, result: aiResult.result }
+  return { ok: true, result: await attachTerritorySuggestion(user, aiResult.result) }
 }
 
 export async function extractWorkerIntakeFromChatScreenshots(
@@ -443,7 +534,7 @@ export async function extractWorkerIntakeFromChatScreenshots(
     return { ok: false, status: 503, error: aiResult.error }
   }
 
-  return { ok: true, result: aiResult.result }
+  return { ok: true, result: await attachTerritorySuggestion(user, aiResult.result) }
 }
 
 /** For tests / fallbacks when AI is unavailable. */
@@ -457,5 +548,6 @@ export function emptyWorkerIntakeExtractResult(
     extraction_notes: null,
     ai_used: false,
     source,
+    territory: emptyTerritorySuggestion(),
   }
 }
