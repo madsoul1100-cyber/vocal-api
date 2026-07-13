@@ -20,6 +20,7 @@ import {
   updateAmplifySourceSelections,
   type AmplifySourceItem,
 } from '@/services/amplifySourceSync.js'
+import { resolveWorkerFiledByUserId } from '@/lib/workerTicketAccess.js'
 
 export { updateAmplifySourceSelections }
 
@@ -44,29 +45,33 @@ function isAmplifyStaff(actor: AmplifyActor): boolean {
 
 async function assertWorkerAmplifyTicketAccess(
   actor: AmplifyActor,
-  ticket: { owner_user_id: string | null },
+  ticket: { id: string; owner_user_id: string | null },
 ): Promise<{ ok: true } | { ok: false; status: number; error: string }> {
   if (isAmplifyStaff(actor)) return { ok: true }
   if (actor.roles?.name !== 'ground_worker') {
     return { ok: false, status: 403, error: 'Insufficient role' }
   }
-  if (ticket.owner_user_id !== actor.id) {
-    return {
-      ok: false,
-      status: 403,
-      error: 'You can only amplify tickets assigned to you',
-    }
+  if (ticket.owner_user_id === actor.id) {
+    return { ok: true }
   }
-  return { ok: true }
+  const filedByUserId = await resolveWorkerFiledByUserId(ticket.id)
+  if (filedByUserId === actor.id) {
+    return { ok: true }
+  }
+  return {
+    ok: false,
+    status: 403,
+    error: 'You can only amplify tickets assigned to you or that you filed',
+  }
 }
 
-async function loadAmplifySessionTicketOwner(
+async function loadAmplifySessionTicketAccess(
   sessionId: string,
   orgId: string,
-): Promise<{ owner_user_id: string | null } | null> {
+): Promise<{ id: string; owner_user_id: string | null } | null> {
   if (isPostgresMode()) {
-    const res = await dbQuery<{ owner_user_id: string | null }>(
-      `SELECT t.owner_user_id
+    const res = await dbQuery<{ id: string; owner_user_id: string | null }>(
+      `SELECT t.id, t.owner_user_id
        FROM amplify_sessions s
        INNER JOIN tickets t ON t.id = s.ticket_id
        WHERE s.id = $1 AND s.organization_id = $2`,
@@ -78,14 +83,16 @@ async function loadAmplifySessionTicketOwner(
   const supabase = createSupabaseServiceClient()
   const { data } = await supabase
     .from('amplify_sessions')
-    .select('tickets(owner_user_id)')
+    .select('tickets(id, owner_user_id)')
     .eq('id', sessionId)
     .eq('organization_id', orgId)
     .maybeSingle()
 
   if (!data) return null
   const ticket = Array.isArray(data.tickets) ? data.tickets[0] : data.tickets
-  return ticket ? { owner_user_id: (ticket as { owner_user_id: string | null }).owner_user_id } : null
+  if (!ticket || typeof ticket !== 'object') return null
+  const row = ticket as { id: string; owner_user_id: string | null }
+  return { id: row.id, owner_user_id: row.owner_user_id ?? null }
 }
 
 export async function assertAmplifySessionAccess(
@@ -94,7 +101,7 @@ export async function assertAmplifySessionAccess(
 ): Promise<{ ok: true } | { ok: false; status: number; error: string }> {
   if (isAmplifyStaff(actor)) return { ok: true }
 
-  const row = await loadAmplifySessionTicketOwner(sessionId, actor.organization_id)
+  const row = await loadAmplifySessionTicketAccess(sessionId, actor.organization_id)
   if (!row) return { ok: false, status: 404, error: 'Session not found' }
   return assertWorkerAmplifyTicketAccess(actor, row)
 }
@@ -154,7 +161,18 @@ async function listAmplifySessionsPg(
   orgId: string,
   workerUserId: string | null,
 ): Promise<{ sessions: AmplifySessionListItem[]; count: number }> {
-  const workerClause = workerUserId ? ' AND t.owner_user_id = $2' : ''
+  const workerClause = workerUserId
+    ? ` AND (
+         t.owner_user_id = $2
+         OR EXISTS (
+           SELECT 1 FROM audit_logs al
+           WHERE al.entity_type = 'ticket'
+             AND al.entity_id = t.id
+             AND al.event_type = 'worker_filed_ticket'
+             AND al.actor_user_id = $2
+         )
+       )`
+    : ''
   const countParams = workerUserId ? [orgId, workerUserId] : [orgId]
   const countRes = await dbQuery<{ c: string }>(
     `SELECT COUNT(*)::text AS c
@@ -191,17 +209,76 @@ async function listAmplifySessionsPg(
   return { sessions: res.rows, count }
 }
 
+async function loadWorkerAmplifyTicketIds(
+  orgId: string,
+  workerUserId: string,
+): Promise<string[]> {
+  const supabase = createSupabaseServiceClient()
+  const ids = new Set<string>()
+
+  const { data: owned } = await supabase
+    .from('tickets')
+    .select('id')
+    .eq('organization_id', orgId)
+    .eq('owner_user_id', workerUserId)
+
+  for (const row of owned ?? []) {
+    ids.add(row.id as string)
+  }
+
+  const { data: filed } = await supabase
+    .from('audit_logs')
+    .select('entity_id')
+    .eq('entity_type', 'ticket')
+    .eq('event_type', 'worker_filed_ticket')
+    .eq('actor_user_id', workerUserId)
+
+  for (const row of filed ?? []) {
+    if (row.entity_id) ids.add(row.entity_id as string)
+  }
+
+  return [...ids]
+}
+
 async function listAmplifySessionsSupabase(
   orgId: string,
   workerUserId: string | null,
 ): Promise<{ sessions: AmplifySessionListItem[]; count: number }> {
   const supabase = createSupabaseServiceClient()
-  let query = supabase
+
+  if (workerUserId) {
+    const ticketIds = await loadWorkerAmplifyTicketIds(orgId, workerUserId)
+    if (ticketIds.length === 0) {
+      return { sessions: [], count: 0 }
+    }
+
+    const { data, count } = await supabase
+      .from('amplify_sessions')
+      .select(
+        `
+        id, status, created_at, updated_at,
+        tickets(id, ticket_number, title),
+        users!amplify_sessions_created_by_fkey(full_name)
+      `,
+        { count: 'exact' },
+      )
+      .eq('organization_id', orgId)
+      .in('ticket_id', ticketIds)
+      .order('created_at', { ascending: false })
+      .limit(50)
+
+    return {
+      sessions: (data ?? []) as unknown as AmplifySessionListItem[],
+      count: count ?? 0,
+    }
+  }
+
+  const { data, count } = await supabase
     .from('amplify_sessions')
     .select(
       `
       id, status, created_at, updated_at,
-      tickets!inner(id, ticket_number, title, owner_user_id),
+      tickets(id, ticket_number, title),
       users!amplify_sessions_created_by_fkey(full_name)
     `,
       { count: 'exact' },
@@ -209,12 +286,6 @@ async function listAmplifySessionsSupabase(
     .eq('organization_id', orgId)
     .order('created_at', { ascending: false })
     .limit(50)
-
-  if (workerUserId) {
-    query = query.eq('tickets.owner_user_id', workerUserId)
-  }
-
-  const { data, count } = await query
 
   return {
     sessions: (data ?? []) as unknown as AmplifySessionListItem[],
@@ -409,6 +480,7 @@ export async function createAmplifySession(
   }
 
   const ticketAccess = await assertWorkerAmplifyTicketAccess(user, {
+    id: ticketId,
     owner_user_id: ticket.owner_user_id as string | null,
   })
   if (!ticketAccess.ok) {
