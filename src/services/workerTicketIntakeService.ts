@@ -16,7 +16,7 @@ import { uploadWorkerAttachment, validateTicketUploadSize } from '@/services/att
 import { resolveCitizenForWorkerIntake, normalizeCitizenPhoneE164 } from '@/services/citizenService.js'
 import { enrichTicketFromIssueText } from '@/services/ticketIntakeAi.js'
 import { intakeTerritoryAutoAssign } from '@/services/assignmentService.js'
-import { addTicketNote, createTicket } from '@/services/ticketService.js'
+import { addTicketNote, createTicket, coerceTruthyFlag } from '@/services/ticketService.js'
 import { buildTriageCompletePatch } from '@/services/ticketTriageService.js'
 
 const PRIVILEGED_INTAKE_ROLES = new Set(['super_admin', 'central_support'])
@@ -36,6 +36,8 @@ export interface WorkerTicketIntakeInput {
   latitude?: number
   longitude?: number
   territory_id?: string
+  /** Default false. Worker intake with name+phone is always non-anonymous. */
+  anonymous_flag?: boolean
   files?: Array<{ buffer: Buffer; originalname: string; mimetype: string }>
 }
 
@@ -161,6 +163,7 @@ function parseIntakeFieldsFromBody(body: Record<string, unknown>): WorkerTicketI
   const longitude = parseCoord(body.longitude)
   const territory_id =
     typeof body.territory_id === 'string' ? body.territory_id.trim() || undefined : undefined
+  const anonymous_flag = coerceTruthyFlag(body.anonymous_flag ?? body.anonymous)
 
   return {
     citizen_name,
@@ -170,6 +173,7 @@ function parseIntakeFieldsFromBody(body: Record<string, unknown>): WorkerTicketI
     latitude,
     longitude,
     territory_id,
+    anonymous_flag,
   }
 }
 
@@ -433,11 +437,14 @@ async function runWorkerIntakeCore(
   if (!citizenRes.ok) return citizenRes
   const { citizen } = citizenRes
 
+  // Field intake always identifies the citizen — never anonymous when name+phone are provided.
+  const anonymousFlag = false
+
   const created = await createTicket({
     organizationId,
     sourceChannel: 'manual',
     citizenId: citizen.citizenId,
-    anonymousFlag: false,
+    anonymousFlag,
     originalIssueText: description,
     locationText: address,
     latitude: input.latitude,
@@ -455,6 +462,16 @@ async function runWorkerIntakeCore(
   if (!created.success || !created.ticketId) {
     return { ok: false, status: 500, error: created.error ?? 'Ticket creation failed' }
   }
+
+  const supabase = createSupabaseServiceClient()
+  const nowIso = new Date().toISOString()
+  await supabase
+    .from('tickets')
+    .update({
+      citizen_identity_revealed_at: nowIso,
+      citizen_identity_revealed_by: workerUserId,
+    })
+    .eq('id', created.ticketId)
 
   await addTicketNote(created.ticketId, workerUserId, buildCitizenIntakeNote(input), 'general', true)
 
@@ -476,7 +493,6 @@ async function runWorkerIntakeCore(
     console.error('[fileTicketAsWorker] enrichTicketFromIssueText', err)
   })
 
-  const supabase = createSupabaseServiceClient()
   await supabase.from('audit_logs').insert({
     organization_id: organizationId,
     event_type: 'worker_filed_ticket',

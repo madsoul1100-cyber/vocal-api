@@ -25,6 +25,8 @@ export interface WorkerIntakeExtractFields {
   description: string | null
   latitude: number | null
   longitude: number | null
+  /** Always false for chat/worker intake — citizen is identified by name/phone. */
+  anonymous: boolean
 }
 
 export interface WorkerIntakeExtractConfidence {
@@ -89,6 +91,7 @@ function emptyFields(): WorkerIntakeExtractFields {
     description: null,
     latitude: null,
     longitude: null,
+    anonymous: false,
   }
 }
 
@@ -288,6 +291,7 @@ async function extractWithAi(chatText: string): Promise<
           : null,
       latitude: parseCoord(parsed.latitude),
       longitude: parseCoord(parsed.longitude),
+      anonymous: false,
     }
 
     const confidence: WorkerIntakeExtractConfidence = {
