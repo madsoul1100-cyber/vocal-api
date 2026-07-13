@@ -72,7 +72,7 @@ Response includes `pagination` and echoed `filters` (same shape as v2 directory)
 | `GET /v2/dashboard/web/charts/ticket-categories` | Donut chart — tickets by top-level category (`from`, `to`, optional `territory_id`, `include_descendants`). See [`docs/DASHBOARD_WEB_CHARTS.md`](docs/DASHBOARD_WEB_CHARTS.md). |
 | `GET /v2/dashboard/web/charts/tickets-by-region-stage` | Stacked bar — top territories by ticket count, stacked by current stage (`limit` default 5). Same filters as category chart. |
 | `GET /v2/dashboard/web/charts/worker-leaderboard` | Ground worker leaderboard (`metric`: overall/assigned/resolved/pending; `limit` default 10). Same filters. |
-| `GET /v2/dashboard/web/kpis` | KPI row — tickets created/closed, open pipeline, needs action. Same filters; period trend on created/closed. See [`docs/DASHBOARD_WEB_CHARTS.md`](docs/DASHBOARD_WEB_CHARTS.md). |
+| `GET /v2/dashboard/web/kpis` | KPI row — tickets created/closed, open pipeline, needs action. All metrics respect `from`/`to` (pipeline/action cohort on `created_at`). Period trend on all four. See [`docs/DASHBOARD_WEB_CHARTS.md`](docs/DASHBOARD_WEB_CHARTS.md). |
 | `GET /v2/dashboard/web/charts/tickets-by-category-monthly` | Stacked bar time series — tickets by **issue category** per calendar month (`months` default 6). Territory only; no date filter. |
 | `GET /v2/dashboard/web/charts/tickets-by-stage-monthly` | Grouped bar time series — tickets by **pipeline stage** at month-end snapshot. Territory only; no date filter. |
 | `GET /v2/dashboard/web/charts/territory-heatmap` | District heat map — counts per Telangana district (`metric` + `period`; no dashboard filters). |
