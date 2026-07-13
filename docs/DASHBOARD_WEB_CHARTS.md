@@ -374,10 +374,10 @@ No `limit` parameter.
 |-----|------------|
 | `tickets_created` | Count tickets with `created_at` in `[from, to]` (UTC), territory scoped. **Must equal** Chart 1 `total` for the same filters. |
 | `tickets_closed` | Count tickets with `stage = 'closed'`, `closed_at` in `[from, to]` (UTC), territory scoped. Pending closure review (`needs_closure_review`) is **not** counted unless the ticket is actually `closed`. |
-| `open_pipeline` | **Snapshot:** open tickets in territory subtree — stages `to_do`, `in_progress`, `on_hold` (no date filter). |
-| `needs_action` | **Snapshot:** sum of `awaiting_triage` + `critical_open` + `sla_breaches` (headline `count`). Breakdown includes `pending_closure_review` for drill-down but it is **excluded** from the headline total. |
+| `open_pipeline` | Tickets with `created_at` in `[from, to]` (UTC) that are **currently open** — stages `to_do`, `in_progress`, `on_hold`. Territory scoped. |
+| `needs_action` | Tickets with `created_at` in `[from, to]` (UTC) that **currently** match an action bucket. Headline `count` = `awaiting_triage` + `critical_open` + `sla_breaches`. Breakdown includes `pending_closure_review` for drill-down but it is **excluded** from the headline total. |
 
-Bucket semantics match mobile `GET /dashboard` → `action_required`:
+Bucket semantics match mobile `GET /dashboard` → `action_required`, scoped to tickets created in the selected date window:
 
 - `awaiting_triage` — `needs_triage = true`
 - `critical_open` — `critical_flag = true` AND `stage <> 'closed'`
@@ -386,7 +386,7 @@ Bucket semantics match mobile `GET /dashboard` → `action_required`:
 
 **Null territory:** included on whole-state views (same as Chart 1); excluded from district/mandal-only filters when `includeNullTerritory` is false.
 
-### Period comparison (created / closed only)
+### Period comparison
 
 Previous window = same number of calendar days immediately before `from`:
 
@@ -394,7 +394,7 @@ Previous window = same number of calendar days immediately before `from`:
 - `previous_to = from - 1 day`
 - `previous_from = previous_to - (duration_days - 1) days`
 
-Returns `previous_count` and `trend` (`up` \| `down` \| `neutral`) on `tickets_created` and `tickets_closed` only. Snapshot metrics omit trend fields.
+Returns `previous_count` and `trend` (`up` \| `down` \| `neutral`) on all four metrics. For `open_pipeline` and `needs_action`, the previous window applies to `created_at`; current stage/flags are evaluated as of query time.
 
 ### Example request
 
@@ -423,10 +423,14 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
       "trend": "neutral"
     },
     "open_pipeline": {
-      "count": 32
+      "count": 28,
+      "previous_count": 4,
+      "trend": "up"
     },
     "needs_action": {
       "count": 6,
+      "previous_count": 1,
+      "trend": "up",
       "breakdown": {
         "awaiting_triage": 3,
         "critical_open": 2,
@@ -717,4 +721,4 @@ curl -sS -H "Authorization: Bearer $TOKEN" \
 }
 ```
 
-**Sanity:** Sum of `entries[].count` for `open` ≈ KPI `open_pipeline` on whole state (null-territory tickets excluded from both). Sum for `created` + `period=30d` ≈ KPI `tickets_created` when dashboard date filter matches the same 30-day window.
+**Sanity:** Sum of `entries[].count` for `open` ≈ KPI `open_pipeline` on whole state when the heatmap `period` window matches the dashboard `from`/`to` filter (null-territory tickets excluded from both). Sum for `created` + `period=30d` ≈ KPI `tickets_created` when dashboard date filter matches the same 30-day window.
