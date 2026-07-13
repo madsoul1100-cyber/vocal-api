@@ -57,13 +57,21 @@ import {
   createWorkerIntakeTicket,
   parseWorkerIntakeBody,
 } from '@/services/workerTicketIntakeService.js'
-import { extractWorkerIntakeFromChat } from '@/services/workerTicketIntakeExtractService.js'
+import {
+  extractWorkerIntakeFromChat,
+  extractWorkerIntakeFromChatScreenshots,
+} from '@/services/workerTicketIntakeExtractService.js'
 import { TRIAGE_REQUIRED_MESSAGE } from '@/services/ticketTriageService.js'
 
 const router = Router()
 const upload = multer({
   storage: multer.memoryStorage(),
   limits: { fileSize: TICKET_UPLOAD_MULTER_MAX_BYTES },
+})
+
+const chatScreenshotUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 10 * 1024 * 1024, files: 3 },
 })
 
 /** v2: paginated list with sort, filters (incl. SLA), and keyword search */
@@ -228,6 +236,35 @@ router.post('/status', requireAuth, async (req, res) => {
   }
   res.json(body)
 })
+
+/** Extract ticket fields from chat screenshot(s) via vision AI (pre-fill form; does not create a ticket). */
+router.post(
+  '/worker-intake/extract-from-chat-image',
+  requireAuth,
+  chatScreenshotUpload.fields([
+    { name: 'screenshots', maxCount: 3 },
+    { name: 'screenshot', maxCount: 3 },
+  ]),
+  async (req, res) => {
+    const user = (req as typeof req & { vocalUser: Awaited<ReturnType<typeof getCurrentVocalUser>> }).vocalUser
+    const files = req.files as
+      | { screenshots?: Express.Multer.File[]; screenshot?: Express.Multer.File[] }
+      | undefined
+    const screenshots = [...(files?.screenshots ?? []), ...(files?.screenshot ?? [])].map((f) => ({
+      buffer: f.buffer,
+      mimetype: f.mimetype,
+      originalname: f.originalname,
+    }))
+
+    const result = await extractWorkerIntakeFromChatScreenshots(user as any, screenshots)
+    if (!result.ok) {
+      res.status(result.status).json({ error: result.error })
+      return
+    }
+
+    res.json({ ok: true, ...result.result })
+  },
+)
 
 /** Extract ticket fields from pasted chat text (pre-fill form; does not create a ticket). */
 router.post('/worker-intake/extract-from-chat', requireAuth, async (req, res) => {

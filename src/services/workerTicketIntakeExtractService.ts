@@ -1,8 +1,6 @@
 /**
- * Chat-paste intake — extract ticket fields from a copied conversation.
+ * Chat intake extract — pre-fill ticket fields from pasted text or chat screenshots.
  *
- * A field worker pastes a WhatsApp/SMS/call transcript; the LLM pulls out
- * citizen name, phone, address, and problem description for form pre-fill.
  * Does NOT create a ticket — caller reviews and submits via worker-intake.
  */
 
@@ -13,8 +11,15 @@ import { normalizePhone } from '@/services/otpService.js'
 const OPENROUTER_BASE_URL = process.env.OPENROUTER_BASE_URL ?? 'https://openrouter.ai/api/v1'
 const OPENROUTER_API_KEY = process.env.OPENROUTER_API_KEY ?? ''
 const OPENROUTER_MODEL = process.env.OPENROUTER_MODEL ?? 'google/gemini-2.5-flash'
+const OPENROUTER_VISION_MODEL = process.env.OPENROUTER_VISION_MODEL ?? OPENROUTER_MODEL
 
 const MAX_CHAT_TEXT_LENGTH = 16_000
+const MAX_SCREENSHOT_COUNT = 3
+const MAX_SCREENSHOT_BYTES = 10 * 1024 * 1024
+
+const ALLOWED_IMAGE_MIMES = new Set(['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif'])
+
+export type ChatExtractSource = 'text' | 'image'
 
 export interface WorkerIntakeExtractFields {
   citizen_name: string | null
@@ -37,16 +42,34 @@ export interface WorkerIntakeExtractConfidence {
 export interface WorkerIntakeExtractResult {
   fields: WorkerIntakeExtractFields
   confidence: WorkerIntakeExtractConfidence
-  /** Required worker-intake fields that could not be extracted with reasonable confidence. */
   missing_fields: Array<'citizen_name' | 'citizen_phone' | 'address' | 'description'>
-  /** Short note for the reviewer (e.g. ambiguous phone, multiple names). */
   extraction_notes: string | null
   ai_used: boolean
+  /** How the chat was provided to the extractor. */
+  source: ChatExtractSource
+  /** Number of screenshots processed (1+ when source is image). */
+  screenshot_count?: number
+}
+
+export interface ChatScreenshotInput {
+  buffer: Buffer
+  mimetype: string
+  originalname?: string
 }
 
 type VocalUser = {
   roles?: { name: string } | null
 }
+
+type OpenRouterMessage =
+  | { role: 'system' | 'user'; content: string }
+  | {
+      role: 'user'
+      content: Array<
+        | { type: 'text'; text: string }
+        | { type: 'image_url'; image_url: { url: string } }
+      >
+    }
 
 function emptyConfidence(): WorkerIntakeExtractConfidence {
   return {
@@ -111,10 +134,16 @@ function computeMissingFields(
   return missing
 }
 
-function buildSystemPrompt(): string {
-  return `You extract structured ticket intake fields from a pasted chat conversation between a field worker and a citizen in ${tenantGeography.rootName}, India.
+function buildSystemPrompt(source: ChatExtractSource): string {
+  const inputHint =
+    source === 'image'
+      ? `The input is one or more screenshots of a mobile chat app (WhatsApp, Telegram, SMS, etc.) between a field worker and a citizen in ${tenantGeography.rootName}, India. Read all visible text carefully — bubble sides, sender names, timestamps, and shared location pins.`
+      : `The input may be WhatsApp-style (timestamps, sender names), plain SMS, or unstructured notes between a field worker and a citizen in ${tenantGeography.rootName}, India.`
 
-The input may be WhatsApp-style (timestamps, sender names), plain SMS, or unstructured notes. Messages may be in English, Hindi, Telugu, or mixed (Hinglish/Tinglish).
+  return `You extract structured ticket intake fields from a chat conversation.
+
+${inputHint}
+Messages may be in English, Hindi, Telugu, or mixed (Hinglish/Tinglish).
 
 Return strict JSON only. Schema:
 {
@@ -132,7 +161,7 @@ Return strict JSON only. Schema:
     "latitude": 0.0-1.0,
     "longitude": 0.0-1.0
   },
-  "extraction_notes": "brief note for the reviewer about ambiguity, multiple people, or assumptions — or null"
+  "extraction_notes": "brief note for the reviewer about ambiguity, blurry text, multiple people, or assumptions — or null"
 }
 
 Rules:
@@ -140,18 +169,90 @@ Rules:
 - citizen_phone: prefer the citizen's number; ignore the worker's number if both appear.
 - address: combine village, mandal, ward, landmark, pin code if mentioned.
 - description: focus on the civic issue (water, road, electricity, harassment, etc.), not greetings or small talk.
-- latitude/longitude: only if explicitly shared (e.g. Google Maps link coordinates); otherwise null with confidence 0.
-- Use lower confidence when guessing or when multiple candidates exist.
+- latitude/longitude: only if explicitly shared (e.g. Google Maps link or location pin); otherwise null with confidence 0.
+- Use lower confidence when text is unreadable, cropped, or when guessing.
 - Do not invent facts not supported by the chat.`
 }
 
-async function extractWithAi(chatText: string): Promise<
-  | { ok: true; result: WorkerIntakeExtractResult }
-  | { ok: false; error: string }
-> {
+function parseExtractionResponse(
+  parsed: Record<string, unknown>,
+  source: ChatExtractSource,
+  screenshotCount?: number,
+): WorkerIntakeExtractResult {
+  const confidenceRaw = (parsed.confidence ?? {}) as Record<string, unknown>
+
+  const fields: WorkerIntakeExtractFields = {
+    citizen_name:
+      typeof parsed.citizen_name === 'string' && parsed.citizen_name.trim()
+        ? parsed.citizen_name.trim().slice(0, 200)
+        : null,
+    citizen_phone: normalizeExtractedPhone(
+      typeof parsed.citizen_phone === 'string' ? parsed.citizen_phone : null,
+    ),
+    address:
+      typeof parsed.address === 'string' && parsed.address.trim()
+        ? parsed.address.trim().slice(0, 500)
+        : null,
+    description:
+      typeof parsed.description === 'string' && parsed.description.trim()
+        ? parsed.description.trim().slice(0, 4000)
+        : null,
+    latitude: parseCoord(parsed.latitude),
+    longitude: parseCoord(parsed.longitude),
+  }
+
+  const confidence: WorkerIntakeExtractConfidence = {
+    citizen_name: clampConfidence(confidenceRaw.citizen_name),
+    citizen_phone: clampConfidence(confidenceRaw.citizen_phone),
+    address: clampConfidence(confidenceRaw.address),
+    description: clampConfidence(confidenceRaw.description),
+    latitude: clampConfidence(confidenceRaw.latitude),
+    longitude: clampConfidence(confidenceRaw.longitude),
+  }
+
+  if (fields.latitude != null && (fields.latitude < -90 || fields.latitude > 90)) {
+    fields.latitude = null
+    confidence.latitude = 0
+  }
+  if (fields.longitude != null && (fields.longitude < -180 || fields.longitude > 180)) {
+    fields.longitude = null
+    confidence.longitude = 0
+  }
+
+  const hasLat = fields.latitude != null
+  const hasLng = fields.longitude != null
+  if (hasLat !== hasLng) {
+    fields.latitude = null
+    fields.longitude = null
+    confidence.latitude = 0
+    confidence.longitude = 0
+  }
+
+  return {
+    fields,
+    confidence,
+    missing_fields: computeMissingFields(fields, confidence),
+    extraction_notes:
+      typeof parsed.extraction_notes === 'string' && parsed.extraction_notes.trim()
+        ? parsed.extraction_notes.trim().slice(0, 500)
+        : null,
+    ai_used: true,
+    source,
+    ...(screenshotCount != null ? { screenshot_count: screenshotCount } : {}),
+  }
+}
+
+async function callOpenRouterExtraction(
+  messages: OpenRouterMessage[],
+  source: ChatExtractSource,
+  screenshotCount?: number,
+): Promise<{ ok: true; result: WorkerIntakeExtractResult } | { ok: false; error: string }> {
   if (!OPENROUTER_API_KEY) {
     return { ok: false, error: 'AI extraction is not configured (OPENROUTER_API_KEY missing)' }
   }
+
+  const model = source === 'image' ? OPENROUTER_VISION_MODEL : OPENROUTER_MODEL
+  const timeoutMs = source === 'image' ? 45_000 : 30_000
 
   try {
     const response = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
@@ -163,16 +264,13 @@ async function extractWithAi(chatText: string): Promise<
         'X-Title': 'Vocal Chat Intake Extract',
       },
       body: JSON.stringify({
-        model: OPENROUTER_MODEL,
-        messages: [
-          { role: 'system', content: buildSystemPrompt() },
-          { role: 'user', content: `Pasted chat:\n\n${chatText}` },
-        ],
+        model,
+        messages,
         temperature: 0.1,
         max_tokens: 1024,
         response_format: { type: 'json_object' },
       }),
-      signal: AbortSignal.timeout(30_000),
+      signal: AbortSignal.timeout(timeoutMs),
     })
 
     if (!response.ok) {
@@ -189,72 +287,112 @@ async function extractWithAi(chatText: string): Promise<
     }
 
     const parsed = JSON.parse(content) as Record<string, unknown>
-    const confidenceRaw = (parsed.confidence ?? {}) as Record<string, unknown>
-
-    const fields: WorkerIntakeExtractFields = {
-      citizen_name:
-        typeof parsed.citizen_name === 'string' && parsed.citizen_name.trim()
-          ? parsed.citizen_name.trim().slice(0, 200)
-          : null,
-      citizen_phone: normalizeExtractedPhone(
-        typeof parsed.citizen_phone === 'string' ? parsed.citizen_phone : null,
-      ),
-      address:
-        typeof parsed.address === 'string' && parsed.address.trim()
-          ? parsed.address.trim().slice(0, 500)
-          : null,
-      description:
-        typeof parsed.description === 'string' && parsed.description.trim()
-          ? parsed.description.trim().slice(0, 4000)
-          : null,
-      latitude: parseCoord(parsed.latitude),
-      longitude: parseCoord(parsed.longitude),
-    }
-
-    const confidence: WorkerIntakeExtractConfidence = {
-      citizen_name: clampConfidence(confidenceRaw.citizen_name),
-      citizen_phone: clampConfidence(confidenceRaw.citizen_phone),
-      address: clampConfidence(confidenceRaw.address),
-      description: clampConfidence(confidenceRaw.description),
-      latitude: clampConfidence(confidenceRaw.latitude),
-      longitude: clampConfidence(confidenceRaw.longitude),
-    }
-
-    if (fields.latitude != null && (fields.latitude < -90 || fields.latitude > 90)) {
-      fields.latitude = null
-      confidence.latitude = 0
-    }
-    if (fields.longitude != null && (fields.longitude < -180 || fields.longitude > 180)) {
-      fields.longitude = null
-      confidence.longitude = 0
-    }
-
-    const hasLat = fields.latitude != null
-    const hasLng = fields.longitude != null
-    if (hasLat !== hasLng) {
-      fields.latitude = null
-      fields.longitude = null
-      confidence.latitude = 0
-      confidence.longitude = 0
-    }
-
-    return {
-      ok: true,
-      result: {
-        fields,
-        confidence,
-        missing_fields: computeMissingFields(fields, confidence),
-        extraction_notes:
-          typeof parsed.extraction_notes === 'string' && parsed.extraction_notes.trim()
-            ? parsed.extraction_notes.trim().slice(0, 500)
-            : null,
-        ai_used: true,
-      },
-    }
+    return { ok: true, result: parseExtractionResponse(parsed, source, screenshotCount) }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     return { ok: false, error: `AI extraction failed: ${msg}` }
   }
+}
+
+async function extractWithAiFromText(
+  chatText: string,
+): Promise<{ ok: true; result: WorkerIntakeExtractResult } | { ok: false; error: string }> {
+  return callOpenRouterExtraction(
+    [
+      { role: 'system', content: buildSystemPrompt('text') },
+      { role: 'user', content: `Pasted chat:\n\n${chatText}` },
+    ],
+    'text',
+  )
+}
+
+function normalizeImageMime(mimetype: string): string {
+  const mime = mimetype.toLowerCase().split(';')[0]?.trim() || 'image/jpeg'
+  if (mime === 'image/jpg') return 'image/jpeg'
+  return ALLOWED_IMAGE_MIMES.has(mime) ? mime : 'image/jpeg'
+}
+
+function toDataUrl(buffer: Buffer, mimetype: string): string {
+  const mime = normalizeImageMime(mimetype)
+  return `data:${mime};base64,${buffer.toString('base64')}`
+}
+
+async function extractWithAiFromScreenshots(
+  screenshots: ChatScreenshotInput[],
+): Promise<{ ok: true; result: WorkerIntakeExtractResult } | { ok: false; error: string }> {
+  const content: Array<
+    | { type: 'text'; text: string }
+    | { type: 'image_url'; image_url: { url: string } }
+  > = [
+    {
+      type: 'text',
+      text:
+        screenshots.length === 1
+          ? 'Extract ticket intake fields from this chat screenshot.'
+          : `Extract ticket intake fields from these ${screenshots.length} chat screenshots (same conversation, scroll capture). Merge information across all images.`,
+    },
+  ]
+
+  for (const shot of screenshots) {
+    content.push({
+      type: 'image_url',
+      image_url: { url: toDataUrl(shot.buffer, shot.mimetype) },
+    })
+  }
+
+  return callOpenRouterExtraction(
+    [{ role: 'system', content: buildSystemPrompt('image') }, { role: 'user', content }],
+    'image',
+    screenshots.length,
+  )
+}
+
+function assertChatExtractAccess(
+  user: VocalUser,
+): { ok: true } | { ok: false; status: number; error: string } {
+  const roleName = user.roles?.name
+  if (!canCreateWorkerIntakeTicket(roleName)) {
+    return { ok: false, status: 403, error: 'Your role cannot use chat intake extraction' }
+  }
+  return { ok: true }
+}
+
+export function validateChatScreenshots(
+  screenshots: ChatScreenshotInput[],
+): { ok: true } | { ok: false; status: number; error: string } {
+  if (!screenshots.length) {
+    return { ok: false, status: 400, error: 'At least one screenshot image is required' }
+  }
+  if (screenshots.length > MAX_SCREENSHOT_COUNT) {
+    return {
+      ok: false,
+      status: 400,
+      error: `At most ${MAX_SCREENSHOT_COUNT} screenshots allowed per request`,
+    }
+  }
+
+  for (const shot of screenshots) {
+    if (!shot.buffer?.length) {
+      return { ok: false, status: 400, error: 'Screenshot file is empty' }
+    }
+    if (shot.buffer.length > MAX_SCREENSHOT_BYTES) {
+      return {
+        ok: false,
+        status: 400,
+        error: `Each screenshot must be at most ${MAX_SCREENSHOT_BYTES / (1024 * 1024)}MB`,
+      }
+    }
+    const mime = normalizeImageMime(shot.mimetype)
+    if (!ALLOWED_IMAGE_MIMES.has(mime)) {
+      return {
+        ok: false,
+        status: 400,
+        error: 'Screenshots must be JPEG, PNG, or WebP images',
+      }
+    }
+  }
+
+  return { ok: true }
 }
 
 export async function extractWorkerIntakeFromChat(
@@ -264,10 +402,8 @@ export async function extractWorkerIntakeFromChat(
   | { ok: true; result: WorkerIntakeExtractResult }
   | { ok: false; status: number; error: string }
 > {
-  const roleName = user.roles?.name
-  if (!canCreateWorkerIntakeTicket(roleName)) {
-    return { ok: false, status: 403, error: 'Your role cannot use chat intake extraction' }
-  }
+  const access = assertChatExtractAccess(user)
+  if (!access.ok) return access
 
   const trimmed = (chatText ?? '').trim()
   if (!trimmed) {
@@ -281,7 +417,28 @@ export async function extractWorkerIntakeFromChat(
     }
   }
 
-  const aiResult = await extractWithAi(trimmed)
+  const aiResult = await extractWithAiFromText(trimmed)
+  if (!aiResult.ok) {
+    return { ok: false, status: 503, error: aiResult.error }
+  }
+
+  return { ok: true, result: aiResult.result }
+}
+
+export async function extractWorkerIntakeFromChatScreenshots(
+  user: VocalUser,
+  screenshots: ChatScreenshotInput[],
+): Promise<
+  | { ok: true; result: WorkerIntakeExtractResult }
+  | { ok: false; status: number; error: string }
+> {
+  const access = assertChatExtractAccess(user)
+  if (!access.ok) return access
+
+  const validation = validateChatScreenshots(screenshots)
+  if (!validation.ok) return validation
+
+  const aiResult = await extractWithAiFromScreenshots(screenshots)
   if (!aiResult.ok) {
     return { ok: false, status: 503, error: aiResult.error }
   }
@@ -290,12 +447,15 @@ export async function extractWorkerIntakeFromChat(
 }
 
 /** For tests / fallbacks when AI is unavailable. */
-export function emptyWorkerIntakeExtractResult(): WorkerIntakeExtractResult {
+export function emptyWorkerIntakeExtractResult(
+  source: ChatExtractSource = 'text',
+): WorkerIntakeExtractResult {
   return {
     fields: emptyFields(),
     confidence: emptyConfidence(),
     missing_fields: ['citizen_name', 'citizen_phone', 'address', 'description'],
     extraction_notes: null,
     ai_used: false,
+    source,
   }
 }

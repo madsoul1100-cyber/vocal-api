@@ -1,26 +1,29 @@
-# React Native — Chat Paste Ticket Intake
+# React Native — Chat Paste & Screenshot Ticket Intake
 
-This document describes how to integrate the **paste chat → auto-fill form → review → submit** flow in the React Native app.
+This document describes how to integrate the **paste chat or upload screenshot → auto-fill form → review → submit** flow in the React Native app.
 
 ## Overview
 
-A field worker copies a WhatsApp/SMS conversation with a citizen, pastes it into the app, taps **Generate**, reviews the pre-filled form, and submits the ticket.
+Staff can file a ticket from a citizen chat in two ways:
+
+1. **Paste text** — copy the conversation and paste it.
+2. **Screenshot** — take a photo of the WhatsApp/Telegram chat screen and upload it. Vision AI reads the image and fills the same form.
 
 ```
-┌─────────────────┐     POST extract-from-chat      ┌──────────────────┐
-│  Paste chat     │ ──────────────────────────────► │  Pre-filled form │
-│  + Generate btn │                                 │  (editable)      │
-└─────────────────┘                                 └────────┬─────────┘
-                                                           │ Submit
-                                                           ▼
-                                                  POST worker-intake
-                                                  (creates ticket)
+┌──────────────────────┐     extract-from-chat        ┌──────────────────┐
+│  Paste chat text     │ ───────────────────────────► │  Pre-filled form │
+│  + Generate          │                              │  (editable)      │
+└──────────────────────┘                              └────────┬─────────┘
+┌──────────────────────┐     extract-from-chat-image          │ Submit
+│  Chat screenshot(s)  │ ───────────────────────────►         ▼
+│  + Generate          │                         POST worker-intake
+└──────────────────────┘
 ```
 
-**Two API calls:**
+**Two API calls per flow:**
 
-1. **Extract** — parses chat text, returns suggested field values (no ticket created).
-2. **Submit** — same as manual intake today; creates the ticket after review.
+1. **Extract** — parses chat (text or image), returns suggested field values (no ticket created).
+2. **Submit** — creates the ticket after review.
 
 ---
 
@@ -81,7 +84,8 @@ Authorization: Bearer <token>
   },
   "missing_fields": [],
   "extraction_notes": null,
-  "ai_used": true
+  "ai_used": true,
+  "source": "text"
 }
 ```
 
@@ -92,8 +96,10 @@ Authorization: Bearer <token>
 | `fields` | Suggested values for the intake form. `null` when not found. |
 | `confidence` | Per-field score `0.0`–`1.0`. Use to highlight low-confidence fields. |
 | `missing_fields` | Required fields that could not be extracted reliably. Show these as empty + highlighted. |
-| `extraction_notes` | Optional reviewer hint (e.g. "Two phone numbers found; used the citizen's"). |
+| `extraction_notes` | Optional reviewer hint (e.g. blurry screenshot, two phone numbers). |
 | `ai_used` | Always `true` on success. |
+| `source` | `"text"` or `"image"` |
+| `screenshot_count` | Present when `source` is `"image"` |
 
 ### Error responses
 
@@ -103,6 +109,66 @@ Authorization: Bearer <token>
 | `400` | `{ "error": "chat_text must be at most 16000 characters" }` | Too long |
 | `403` | `{ "error": "Your role cannot use chat intake extraction" }` | Wrong role |
 | `503` | `{ "error": "AI extraction is not configured..." }` | Server AI not set up |
+
+---
+
+## Step 1b — Extract from chat screenshot(s)
+
+Use when the user screenshots WhatsApp/Telegram instead of copying text. Vision AI reads the image and returns the same form fields.
+
+### Request
+
+```
+POST /v2/tickets/worker-intake/extract-from-chat-image
+Content-Type: multipart/form-data
+Authorization: Bearer <token>
+```
+
+| Field | Type | Required | Notes |
+|-------|------|----------|-------|
+| `screenshots` | file(s) | Yes* | Up to 3 images. Singular alias: `screenshot` |
+
+\* At least one image. Use multiple for long chats (scroll captures).
+
+**Limits:** JPEG, PNG, WebP, HEIC — max 10MB each.
+
+### Success response `200`
+
+Same as text extract, with `"source": "image"` and `"screenshot_count": 1`.
+
+### Error responses (additional)
+
+| Status | Body | When |
+|--------|------|------|
+| `400` | `{ "error": "At least one screenshot image is required" }` | No file |
+| `400` | `{ "error": "Screenshots must be JPEG, PNG, or WebP images" }` | Wrong type |
+| `400` | `{ "error": "Each screenshot must be at most 10MB" }` | Too large |
+
+### React Native example
+
+```typescript
+async function extractFromScreenshot(token: string, imageUris: string[]) {
+  const form = new FormData()
+  for (const uri of imageUris) {
+    form.append('screenshots', {
+      uri,
+      name: 'chat-screenshot.jpg',
+      type: 'image/jpeg',
+    } as any)
+  }
+
+  const res = await fetch(`${API_BASE}/tickets/worker-intake/extract-from-chat-image`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}` },
+    body: form,
+  })
+  const data = await res.json()
+  if (!res.ok) throw new Error(data.error ?? 'Extraction failed')
+  return data
+}
+```
+
+**UI tips:** camera + gallery picker; up to 3 images; loading ~5–15s; if fields missing, ask for clearer screenshot or manual fill.
 
 ---
 
@@ -202,11 +268,17 @@ Same text fields as form fields + `files[]` (up to 5 files, 20MB each). Chat ext
 
 ## Suggested screen flow
 
-### Screen A — Chat paste
+### Screen A — Chat input (choose one)
 
+**Option 1 — Paste text**
 - Large multiline `TextInput` for pasted chat.
-- **Generate** button (shows loading spinner while extracting).
-- Optional: character count (max 16,000).
+
+**Option 2 — Screenshot**
+- Image picker (camera or gallery).
+- Thumbnail preview; allow up to 3 images for long chats.
+
+- **Generate** button (loading spinner while extracting).
+- Optional: character count for text mode (max 16,000).
 
 ### Screen B — Review form
 
@@ -321,8 +393,9 @@ Prefer **v2** for new app work.
 
 ## Checklist for RN developer
 
-- [ ] Chat paste screen with Generate button
-- [ ] Call `POST /v2/tickets/worker-intake/extract-from-chat`
+- [ ] Chat intake screen with **Paste text** OR **Upload screenshot** tabs
+- [ ] Text: `POST /v2/tickets/worker-intake/extract-from-chat`
+- [ ] Screenshot: `POST /v2/tickets/worker-intake/extract-from-chat-image` (multipart)
 - [ ] Review form with editable fields + missing/low-confidence highlights
 - [ ] Submit via `POST /v2/tickets/worker-intake`
 - [ ] Handle 400/403/503 errors with user-friendly messages
