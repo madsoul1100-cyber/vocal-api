@@ -1,8 +1,7 @@
 /**
  * Triage gates CS manual assign / direct assign / re-offer after reject.
- * Intake auto-assign uses `directAssignTicketToWorker({ parallelWithTriage: true })`
- * so territory workers receive tickets while CS triage continues in parallel.
- * The filing worker is excluded from automatic routing until CS assigns them explicitly.
+ * Every intake path auto-assigns via `directAssignTicketToWorker({ parallelWithTriage: true })`
+ * so territory workers receive tickets immediately while CS triage can continue in parallel.
  */
 
 import { createSupabaseServiceClient } from '@/lib/supabase.js'

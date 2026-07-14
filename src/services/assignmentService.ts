@@ -37,8 +37,6 @@ import {
 
 const GROUND_WORKER_ROLE_ID = '00000000-0000-0000-0000-000000000005'
 
-import { resolveWorkerFiledByUserId } from '@/lib/workerTicketAccess.js'
-
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -138,8 +136,6 @@ export async function listCandidateWorkers(ticketId: string): Promise<CandidateW
   if (!ticket) return []
 
   const excluded = new Set<string>((ticket.offered_worker_ids as string[] | null) ?? [])
-  const filedByWorkerId = await resolveWorkerFiledByUserId(ticketId)
-  if (filedByWorkerId) excluded.add(filedByWorkerId)
 
   // Fetch all active ground workers in the org with their territory memberships.
   const { data: workers } = await supabase
@@ -284,8 +280,6 @@ export async function findTerritoryOwner(ticketId: string): Promise<TerritoryOwn
   const chain = buildTerritoryAncestorChain(ticket.territory_id as string, parentOf)
 
   const excluded = new Set<string>((ticket.offered_worker_ids as string[] | null) ?? [])
-  const filedByWorkerId = await resolveWorkerFiledByUserId(ticketId)
-  if (filedByWorkerId) excluded.add(filedByWorkerId)
 
   const { data: workers } = await supabase
     .from('users')

@@ -58,9 +58,9 @@ async function hasActiveWorkerAssignment(
 }
 
 /**
- * Ground workers who filed a ticket may only update it after CS assigns them
- * and they have accepted (or were force-assigned). Other owners keep the
- * existing owner-only rule.
+ * Ground workers who filed a ticket may update it once they own an accepted
+ * or force-assigned assignment (including territory auto-assign at intake).
+ * Other owners keep the existing owner-only rule.
  */
 export async function groundWorkerMayUpdateTicket(
   workerId: string,
@@ -75,7 +75,7 @@ export async function groundWorkerMayUpdateTicket(
       return {
         allowed: false,
         status: 403,
-        error: 'You can update this ticket only after central support assigns it to you',
+        error: 'You can update this ticket only after you are assigned to it',
       }
     }
     return { allowed: false, status: 403, error: 'You are not the owner of this ticket' }
