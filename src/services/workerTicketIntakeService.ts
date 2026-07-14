@@ -596,7 +596,6 @@ export async function fileTicketAsWorker(
     workerUserId: input.workerUserId,
     input: intakeInput,
     territoryId: null,
-    skipTerritoryAutoAssign: true,
   })
 
   if (!core.ok) {
