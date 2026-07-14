@@ -82,10 +82,10 @@ export interface WorkerTicketListItem {
   primary_action?: WorkerPrimaryAction
   /** Active bucket: true when POST /v2/tickets/request-closure is allowed. */
   can_request_closure?: boolean
-  /** Raised bucket: awaiting CS triage before assignment. */
+  /** Raised bucket: CS triage still open (assignment may already exist in parallel). */
   needs_triage?: boolean
   created_at?: string | null
-  /** Raised bucket: false until CS assigns this worker and they accept. */
+  /** Raised bucket: true when this worker owns an accepted / force-assigned assignment. */
   can_update_status?: boolean
 }
 
