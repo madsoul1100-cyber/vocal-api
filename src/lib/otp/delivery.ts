@@ -9,6 +9,7 @@ import {
 import { consoleEmailProvider, consoleSmsProvider } from '@/lib/otp/providers/consoleProvider.js'
 import { sesEmailProvider, sesEmailConfigured } from '@/lib/otp/providers/sesEmailProvider.js'
 import { twilioSmsProvider, twilioSmsConfigured } from '@/lib/otp/providers/twilioSmsProvider.js'
+import { exotelSmsProvider, exotelSmsConfigured } from '@/lib/otp/providers/exotelSmsProvider.js'
 import type {
   OtpChannel,
   OtpDeliveryStatus,
@@ -29,8 +30,14 @@ function emailProvider() {
   return resolveOtpDeliveryMode() === 'console' ? consoleEmailProvider : sesEmailProvider
 }
 
-function smsProvider() {
-  return resolveOtpDeliveryMode() === 'console' ? consoleSmsProvider : twilioSmsProvider
+/** OTP_SMS_PROVIDER=exotel | twilio (default twilio). */
+function liveSmsProviderName(): 'exotel' | 'twilio' {
+  return process.env.OTP_SMS_PROVIDER?.trim().toLowerCase() === 'exotel' ? 'exotel' : 'twilio'
+}
+
+export function smsProvider() {
+  if (resolveOtpDeliveryMode() === 'console') return consoleSmsProvider
+  return liveSmsProviderName() === 'exotel' ? exotelSmsProvider : twilioSmsProvider
 }
 
 export function getOtpDeliveryStatus(): OtpDeliveryStatus {
@@ -50,7 +57,10 @@ export function getOtpDeliveryStatus(): OtpDeliveryStatus {
     mode,
     channels,
     email: { provider: 'aws-ses', configured: sesEmailConfigured(), enabled: emailEnabled },
-    sms: { provider: 'twilio-sms', configured: twilioSmsConfigured(), enabled: smsEnabled },
+    sms:
+      liveSmsProviderName() === 'exotel'
+        ? { provider: 'exotel-sms', configured: exotelSmsConfigured(), enabled: smsEnabled }
+        : { provider: 'twilio-sms', configured: twilioSmsConfigured(), enabled: smsEnabled },
   }
 }
 

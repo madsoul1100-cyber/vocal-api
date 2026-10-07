@@ -19,7 +19,7 @@ export function coerceTruthyFlag(value: unknown): boolean {
 
 export interface CreateTicketInput {
   organizationId: string
-  sourceChannel: 'telegram' | 'whatsapp' | 'web' | 'manual'
+  sourceChannel: 'telegram' | 'whatsapp' | 'web' | 'manual' | 'email' | 'call'
   sourceConversationId?: string
   citizenId?: string
   anonymousFlag?: boolean

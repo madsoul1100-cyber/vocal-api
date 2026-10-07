@@ -3,6 +3,7 @@ import app from './app.js'
 import { describeDatabaseBackend, isPostgresMode } from '@/lib/db.js'
 import { isDevAuthBypassEnabled } from './lib/devAuth.js'
 import { getOtpDeliveryStatus } from '@/lib/otp/delivery.js'
+import { startBharosaWorker } from '@/modules/bharosa/jobs/worker.js'
 
 const port = Number(process.env.PORT) || 3001
 
@@ -30,5 +31,16 @@ app.listen(port, () => {
   )
   if (!process.env.JWT_SECRET && !isDevAuthBypassEnabled()) {
     console.warn('  warn: JWT_SECRET missing — login and protected routes will fail')
+  }
+  console.log(`  bharosa:  /v2/public/* (citizen)  /v2/bharosa/* (ops)  /webhooks/bharosa/*`)
+  if (isPostgresMode() && process.env.JOBS_WORKER_ENABLED !== 'false') {
+    const worker = startBharosaWorker()
+    const shutdown = () => {
+      void worker.stop().finally(() => process.exit(0))
+    }
+    process.once('SIGTERM', shutdown)
+    process.once('SIGINT', shutdown)
+  } else {
+    console.log('  jobs:     worker disabled (needs DATABASE_URL; set JOBS_WORKER_ENABLED=true)')
   }
 })

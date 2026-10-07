@@ -11,6 +11,8 @@ import amplifyRouter from '@/routes/v2/amplify.js'
 import auditRouter from '@/routes/v2/audit.js'
 import jobsRouter from '@/routes/v2/jobs.js'
 import adminRouter from '@/routes/v2/admin/index.js'
+import publicRouter from '@/routes/v2/public.js'
+import bharosaRouter from '@/routes/v2/bharosa.js'
 
 const router = Router()
 
@@ -26,5 +28,7 @@ router.use('/amplify', amplifyRouter)
 router.use('/audit', auditRouter)
 router.use('/jobs', jobsRouter)
 router.use('/admin', adminRouter)
+router.use('/public', publicRouter)
+router.use('/bharosa', bharosaRouter)
 
 export default router
