@@ -1,4 +1,5 @@
 import { dbQuery } from '@/lib/db.js'
+import { findTerritoryOwner } from '@/services/assignmentService.js'
 import { HttpError, isGro, type StaffUser } from '../common.js'
 import { recordCaseEvent } from './events.js'
 
@@ -82,6 +83,23 @@ export async function getTask(orgId: string, id: string): Promise<TaskRow> {
   return res.rows[0]
 }
 
+/** Ground worker who covers this case's area, used when a task has no owner yet. */
+export async function nearestGroundWorkerId(ticketId: string): Promise<string | null> {
+  const match = await findTerritoryOwner(ticketId)
+  return match?.worker.id ?? null
+}
+
+export async function ownerForRole(orgId: string, ticketId: string, role: string | null | undefined): Promise<string | null> {
+  if (!role || role === 'ground_worker') return nearestGroundWorkerId(ticketId)
+  const res = await dbQuery<{ id: string }>(
+    `SELECT u.id FROM users u JOIN roles r ON r.id = u.role_id
+     WHERE u.organization_id = $1 AND u.active = true AND r.name = $2
+     ORDER BY u.full_name LIMIT 1`,
+    [orgId, role],
+  )
+  return res.rows[0]?.id ?? nearestGroundWorkerId(ticketId)
+}
+
 export async function assertTicketInOrg(orgId: string, ticketId: string): Promise<void> {
   const res = await dbQuery(`SELECT 1 FROM tickets WHERE id = $1 AND organization_id = $2`, [ticketId, orgId])
   if (!res.rowCount) throw new HttpError(404, 'Case not found')
@@ -132,13 +150,17 @@ export async function createTask(args: {
   await dbQuery(`INSERT INTO task_status_history (task_id, from_status, to_status, changed_by, actor_type, reason) VALUES ($1, NULL, $2, $3, $4, 'created')`, [
     id, args.ownerUserId ? 'assigned' : 'unassigned', args.createdBy ?? null, args.createdByAgent ? 'ai_agent' : 'user',
   ])
+  const created = await getTask(args.orgId, id)
   await eventForAllCases(args.orgId, id, {
     type: 'task_created',
     actorType: args.createdByAgent ? 'ai_agent' : 'user',
     actorUserId: args.createdBy,
+    summary: created.owner_name
+      ? `Task “${args.title}” assigned to ${created.owner_name}.`
+      : `Task “${args.title}” was created with no worker available to assign.`,
     data: { title: args.title, owner_user_id: args.ownerUserId ?? null, task_type: args.taskType ?? 'general' },
   })
-  return getTask(args.orgId, id)
+  return created
 }
 
 export async function listTasks(args: {

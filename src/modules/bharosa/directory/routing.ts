@@ -241,16 +241,36 @@ Return {"ranked":[{"contact_id":"","confidence":0.0,"reason":""}],"uncertain":fa
       `UPDATE tickets SET routing_status = $2 WHERE id = $1 AND routing_status IN ('unrouted','suggested','uncertain')`,
       [ticketId, routingStatus],
     )
-    await recordCaseEvent({
-      orgId,
-      ticketId,
-      type: 'routing_suggested',
-      actorType: 'ai_agent',
-      actorLabel: 'routing_agent',
-      visibility: 'internal',
-      reason: uncertaintyReason,
-      data: { ai_run_id: aiRunId, routing_status: routingStatus, candidates: candidates.map((c) => ({ id: c.contact_id, confidence: c.confidence })) },
+    const signature = JSON.stringify({
+      routing_status: routingStatus,
+      candidates: candidates.map((c) => c.contact_id),
     })
+    const prev = await dbQuery<{ data_json: { routing_status?: string; candidates?: { id: string }[] } | null }>(
+      `SELECT data_json FROM case_events WHERE ticket_id = $1 AND event_type = 'routing_suggested' ORDER BY created_at DESC LIMIT 1`,
+      [ticketId],
+    )
+    const prevData = prev.rows[0]?.data_json
+    const prevSignature = prevData
+      ? JSON.stringify({
+          routing_status: prevData.routing_status,
+          candidates: (prevData.candidates ?? []).map((c) => c.id),
+        })
+      : null
+    if (prevSignature !== signature) {
+      await recordCaseEvent({
+        orgId,
+        ticketId,
+        type: 'routing_suggested',
+        actorType: 'ai_agent',
+        actorLabel: 'routing_agent',
+        visibility: 'internal',
+        summary: uncertain
+          ? 'No public office in the directory clearly owns this complaint.'
+          : `Suggested office: ${top?.organization_name ?? top?.role_designation ?? 'matched contact'}.`,
+        reason: uncertaintyReason,
+        data: { ai_run_id: aiRunId, routing_status: routingStatus, candidates: candidates.map((c) => ({ id: c.contact_id, confidence: c.confidence })) },
+      })
+    }
   }
 
   return {

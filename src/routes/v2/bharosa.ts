@@ -142,10 +142,12 @@ router.get('/cases/:id', route(async (req, res) => {
               t.location_text, t.latitude, t.longitude, t.issue_location_source, t.issue_location_precision_m,
               t.reporter_location_text, t.reporter_latitude, t.reporter_longitude, t.reporter_location_source,
               t.created_at, t.updated_at, c.name AS category_name, tr.name AS territory_name,
+              ow.full_name AS owner_name,
               ci.id AS citizen_id, ci.display_name AS citizen_name, ci.phone_e164 AS citizen_phone, ci.preferred_language AS citizen_language
        FROM tickets t
        LEFT JOIN issue_categories c ON c.id = t.category_id
        LEFT JOIN territories tr ON tr.id = t.territory_id
+       LEFT JOIN users ow ON ow.id = t.owner_user_id
        LEFT JOIN citizens ci ON ci.id = t.citizen_id
        WHERE t.id = $1 AND t.organization_id = $2`,
       [id, orgId],

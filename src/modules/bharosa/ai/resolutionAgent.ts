@@ -7,15 +7,28 @@ import { TASK_TYPES } from '../cases/tasks.js'
 
 const PROMPT_VERSION = 'resolution.v1'
 
+function asTaskType(value: unknown): (typeof TASK_TYPES)[number] {
+  const raw = typeof value === 'string' ? value.toLowerCase().replace(/[\s-]+/g, '_') : ''
+  return (TASK_TYPES as readonly string[]).includes(raw) ? (raw as (typeof TASK_TYPES)[number]) : 'general'
+}
+
 export const PlanStepSchema = z.object({
   title: z.string().min(3),
   description: z.string().default(''),
-  task_type: z.enum(TASK_TYPES).default('general'),
-  suggested_role: z.string().nullable().optional(),
-  due_in_hours: z.number().int().min(1).max(24 * 60).default(72),
-  depends_on_index: z.number().int().min(0).nullable().optional(),
-  authority_contact_id: z.string().nullable().optional(),
-  evidence_required: z.array(z.string()).default([]),
+  task_type: z.preprocess(asTaskType, z.enum(TASK_TYPES)),
+  suggested_role: z.preprocess((v) => (typeof v === 'string' && v.trim() ? v.trim() : null), z.string().nullable()).optional(),
+  due_in_hours: z.preprocess((v) => {
+    const n = typeof v === 'number' ? v : Number(v)
+    if (!Number.isFinite(n)) return 72
+    return Math.min(24 * 60, Math.max(1, Math.round(n)))
+  }, z.number().int()),
+  depends_on_index: z.preprocess((v) => {
+    if (v == null || v === '') return null
+    const n = typeof v === 'number' ? v : Number(v)
+    return Number.isInteger(n) && n >= 0 ? n : null
+  }, z.number().int().nullable()),
+  authority_contact_id: z.preprocess((v) => (typeof v === 'string' && v.trim() ? v.trim() : null), z.string().nullable()).optional(),
+  evidence_required: z.preprocess((v) => (Array.isArray(v) ? v.filter((x) => typeof x === 'string') : []), z.array(z.string())),
 })
 export type PlanStep = z.infer<typeof PlanStepSchema>
 
@@ -72,7 +85,7 @@ export async function runResolutionAgent(args: { orgId: string; ticketId: string
 Produce:
 - issue_type (snake_case) and category,
 - responsible_parties: which offices should act. Prefer the provided directory candidates (use their contact_id). If none fit, describe the office type with contact_id null,
-- 2-8 concrete, ordered steps. Each step is one accountable unit of work: title, description, task_type, suggested_role, due_in_hours, depends_on_index (index of an earlier step or null), authority_contact_id (only from candidates), evidence_required,
+- 2-8 concrete, ordered steps. Each step is one accountable unit of work: title, description, task_type (exactly one of: general, verification, field_visit, contact_authority, follow_up, document, citizen_contact, escalation), suggested_role, due_in_hours, depends_on_index (index of an earlier step or null), authority_contact_id (only from candidates), evidence_required,
 - questions_for_gro: anything ambiguous (jurisdiction unclear, facts missing, safety, legal sensitivity). Ask rather than assume,
 - risks and an overall confidence (0-1).
 

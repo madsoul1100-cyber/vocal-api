@@ -3,7 +3,7 @@ import { updateTicketStage } from '@/services/ticketService.js'
 import { HttpError, type StaffUser } from '../common.js'
 import { recordCaseEvent } from './events.js'
 import { createEscalation } from './escalations.js'
-import { createTask, type TaskRow } from './tasks.js'
+import { createTask, ownerForRole, type TaskRow } from './tasks.js'
 import { PlanSchema, runResolutionAgent, type ResolutionPlan } from '../ai/resolutionAgent.js'
 
 export interface PlanRow {
@@ -41,10 +41,13 @@ export async function generateResolutionPlan(args: { orgId: string; ticketId: st
   await recordCaseEvent({
     orgId: args.orgId, ticketId: args.ticketId, type: 'resolution_plan_suggested', actorType: 'ai_agent',
     actorLabel: 'resolution_agent', visibility: 'internal',
+    summary: fallback
+      ? 'A template plan is ready because the AI reply could not be used. Review it before approving.'
+      : `AI plan ready: ${plan.summary}`,
     data: { plan_id: row.id, steps: plan.steps.length, confidence: plan.confidence, questions: plan.questions_for_gro.length },
   })
 
-  if (plan.questions_for_gro.length || plan.confidence < 0.5 || routing.uncertain) {
+  if (fallback || plan.questions_for_gro.length || plan.confidence < 0.5) {
     await createEscalation({
       orgId: args.orgId, ticketId: args.ticketId, target: 'gro', trigger: 'ai_uncertain',
       reason: [
@@ -100,7 +103,7 @@ export async function approvePlan(args: {
   const now = Date.now()
   for (let i = 0; i < finalPlan.steps.length; i++) {
     const s = finalPlan.steps[i]
-    const owner = args.owners?.[String(i)] ?? null
+    const owner = args.owners?.[String(i)] ?? (await ownerForRole(args.orgId, plan.ticket_id, s.suggested_role))
     const task = await createTask({
       orgId: args.orgId,
       ticketIds: [plan.ticket_id],

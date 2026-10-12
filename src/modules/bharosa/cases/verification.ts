@@ -5,7 +5,7 @@ import { HttpError, type StaffUser } from '../common.js'
 import { getBharosaSettings } from '../settings.js'
 import { recordCaseEvent } from './events.js'
 import { createEscalation } from './escalations.js'
-import { createTask } from './tasks.js'
+import { createTask, nearestGroundWorkerId } from './tasks.js'
 import { enqueueJob } from '../jobs/queue.js'
 import { buildCallScript, extractCallOutcome, type CallScript } from '../ai/verificationCallAgent.js'
 
@@ -137,6 +137,7 @@ async function ensureManualCallTask(check: VerificationCheckRow, ticketNumber: s
     [check.ticket_id],
   )
   if (existing.rowCount) return
+  const ownerUserId = await nearestGroundWorkerId(check.ticket_id)
   await createTask({
     orgId: check.organization_id,
     ticketIds: [check.ticket_id],
@@ -144,6 +145,7 @@ async function ensureManualCallTask(check: VerificationCheckRow, ticketNumber: s
     description: 'Call the citizen using the AI script in the verification queue and record the outcome.',
     taskType: 'verification',
     suggestedRole: 'ground_worker',
+    ownerUserId,
     dueAt: new Date(Date.now() + 24 * 3600_000).toISOString(),
     createdByAgent: 'verification_call_agent',
   })
@@ -311,7 +313,9 @@ export async function completeVerification(args: {
     await setTicketVerification(check.ticket_id, 'verified')
     await recordCaseEvent({
       orgId: args.orgId, ticketId: check.ticket_id, type: 'verified', actorType: args.performedBy ? 'user' : 'ai_agent',
-      actorUserId: args.performedBy ?? null, visibility: 'citizen', data: { check_id: check.id, method: check.method },
+      actorUserId: args.performedBy ?? null, visibility: 'citizen',
+      summary: 'Complaint verified. The AI is now writing the work plan.',
+      data: { check_id: check.id, method: check.method },
     })
     if (ticket?.stage === 'to_do') {
       await updateTicketStage(check.ticket_id, 'in_progress', 'citizen_contacted', args.performedBy ?? null, 'Complaint verified', !args.performedBy)
