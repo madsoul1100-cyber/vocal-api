@@ -26,7 +26,7 @@ function buildPayload(code: string, purpose: OtpPurpose): OtpSendPayload {
   }
 }
 
-function emailProvider() {
+export function emailOtpProvider() {
   return resolveOtpDeliveryMode() === 'console' ? consoleEmailProvider : sesEmailProvider
 }
 
@@ -114,7 +114,7 @@ export async function deliverStaffOtp(args: {
   for (const { channel, destination } of attempts) {
     const outcome =
       channel === 'email'
-        ? await emailProvider().send(destination, payload)
+        ? await emailOtpProvider().send(destination, payload)
         : await smsProvider().send(destination, payload)
 
     if (outcome.ok) {

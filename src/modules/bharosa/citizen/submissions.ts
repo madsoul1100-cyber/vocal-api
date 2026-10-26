@@ -287,7 +287,7 @@ export async function confirmSubmission(
   return convertSubmission(citizen, sub, body, ip, {
     channel: sub.channel === 'email' ? 'email' : 'web',
     actor: { type: 'citizen' },
-    phoneVerified: true,
+    phoneVerified: !!(citizen.phone_verified_at || citizen.email_verified_at),
   })
 }
 

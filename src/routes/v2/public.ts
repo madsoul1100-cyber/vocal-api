@@ -12,6 +12,7 @@ import {
   resolvePublicOrgId,
   route,
   str,
+  uuid,
   uuidParam,
   type Language,
 } from '@/modules/bharosa/common.js'
@@ -56,6 +57,10 @@ import {
 } from '@/modules/bharosa/comms/communications.js'
 import { listPublicFeed } from '@/modules/bharosa/feed/feed.js'
 import { translateTexts } from '@/modules/bharosa/ai/translation.js'
+import { handleGuideTurn } from '@/modules/bharosa/guide/agent.js'
+import { sarvamConfigured, synthesizeSpeech, transcribeSpeech } from '@/modules/bharosa/guide/sarvam.js'
+import { listGuideMessages, loadGuideSession } from '@/modules/bharosa/guide/store.js'
+import type { GuideLang } from '@/modules/bharosa/guide/playbooks.js'
 
 /**
  * Bharosa citizen + public API (`/v2/public`).
@@ -125,8 +130,9 @@ router.post(
   route(async (req, res) => {
     const orgId = await resolvePublicOrgId(req)
     const phone = str(req.body?.phone, 20)
-    if (!phone) throw new HttpError(400, 'phone is required', 'INVALID_PHONE')
-    res.json(await requestCitizenOtp({ orgId, phoneRaw: phone, ip: clientIp(req) }))
+    const email = str(req.body?.email, 200)
+    if (!phone && !email) throw new HttpError(400, 'Enter a mobile number or email', 'DESTINATION_REQUIRED')
+    res.json(await requestCitizenOtp({ orgId, phoneRaw: phone, emailRaw: email, ip: clientIp(req) }))
   }),
 )
 
@@ -136,10 +142,11 @@ router.post(
   route(async (req, res) => {
     const orgId = await resolvePublicOrgId(req)
     const phone = str(req.body?.phone, 20)
+    const email = str(req.body?.email, 200)
     const code = str(req.body?.code, 10)
-    if (!phone || !code) throw new HttpError(400, 'phone and code are required')
+    if ((!phone && !email) || !code) throw new HttpError(400, 'A mobile number or email, and the code, are required')
     const out = await verifyCitizenOtp({
-      orgId, phoneRaw: phone, code, displayName: str(req.body?.display_name, 120), language: str(req.body?.language, 5),
+      orgId, phoneRaw: phone, emailRaw: email, code, displayName: str(req.body?.display_name, 120), language: str(req.body?.language, 5),
     })
     res.json({ token: out.token, is_new: out.is_new, citizen: publicCitizen(out.citizen) })
   }),
@@ -204,6 +211,7 @@ function publicCitizen(c: ReturnType<typeof citizenFromReq>) {
     preferred_language: c.preferred_language,
     whatsapp_opt_in: c.whatsapp_opt_in,
     phone_verified_at: c.phone_verified_at,
+    email_verified_at: c.email_verified_at,
   }
 }
 
@@ -324,6 +332,96 @@ citizen.post('/translate', rateLimit({ windowMs: 60_000, max: 30, key: (r) => `t
   if (!texts.length) throw new HttpError(400, 'texts[] is required')
   const target = req.body?.target === 'en' ? 'en' : 'te'
   res.json(await translateTexts({ texts, target, orgId: c.organization_id }))
+}))
+
+function guideLang(v: unknown): GuideLang | null {
+  return v === 'en' || v === 'hi' || v === 'te' ? v : null
+}
+
+router.post(
+  '/guide/messages',
+  rateLimit({ windowMs: 60_000, max: 20, key: (r) => `guide:${clientIp(r)}` }),
+  route(async (req, res) => {
+    const orgId = await resolvePublicOrgId(req)
+    const message = str(req.body?.message, 4000)
+    const confirmSend = req.body?.confirm_send === true
+    if (!message && !confirmSend) throw new HttpError(400, 'Message is required', 'MESSAGE_REQUIRED')
+    const sessionId = uuid(req.body?.session_id)
+    if (req.body?.session_id && !sessionId) throw new HttpError(400, 'Invalid session', 'INVALID_SESSION')
+    res.json(await handleGuideTurn({
+      orgId,
+      sessionId,
+      language: guideLang(req.body?.language),
+      message,
+      confirmSend,
+    }))
+  }),
+)
+
+router.post(
+  '/guide/transcribe',
+  rateLimit({ windowMs: 60_000, max: 20, key: (r) => `guide-stt:${clientIp(r)}` }),
+  route(async (req, res) => {
+    if (!sarvamConfigured()) throw new HttpError(503, 'Voice transcription is not configured', 'VOICE_UNAVAILABLE')
+    const audio = str(req.body?.audio_base64, 8_000_000)
+    if (!audio) throw new HttpError(400, 'Audio is required', 'AUDIO_REQUIRED')
+    const language = guideLang(req.body?.language) ?? 'te'
+    const mime = str(req.body?.mime, 80) ?? 'audio/webm'
+    let buffer: Buffer
+    try {
+      buffer = Buffer.from(audio, 'base64')
+    } catch {
+      throw new HttpError(400, 'Audio could not be read', 'AUDIO_INVALID')
+    }
+    if (buffer.length < 800) throw new HttpError(400, 'Recording was too short', 'AUDIO_SHORT')
+    let transcript = ''
+    try {
+      transcript = await transcribeSpeech(buffer, mime, language)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Transcription failed'
+      console.error('[guide] transcribe fallback', message)
+      throw new HttpError(503, 'Voice typing is unavailable right now. You can still type.', 'VOICE_UNAVAILABLE')
+    }
+    if (!transcript) throw new HttpError(422, 'Could not hear that. Try again.', 'TRANSCRIPT_EMPTY')
+    res.json({ transcript, language })
+  }),
+)
+
+router.post(
+  '/guide/speak',
+  rateLimit({ windowMs: 60_000, max: 30, key: (r) => `guide-tts:${clientIp(r)}` }),
+  route(async (req, res) => {
+    if (!sarvamConfigured()) throw new HttpError(503, 'Spoken answers are not configured', 'VOICE_UNAVAILABLE')
+    const text = str(req.body?.text, 700)
+    if (!text) throw new HttpError(400, 'Nothing to say', 'TEXT_REQUIRED')
+    const language = guideLang(req.body?.language) ?? 'te'
+    let audio: Buffer
+    try {
+      audio = await synthesizeSpeech(text, language)
+    } catch (err) {
+      const message = err instanceof Error ? err.message : 'Speech failed'
+      console.error('[guide] speech fallback', message)
+      throw new HttpError(503, 'Spoken voice is unavailable right now', 'VOICE_UNAVAILABLE')
+    }
+    res.setHeader('Content-Type', 'audio/mpeg')
+    res.setHeader('Cache-Control', 'no-store')
+    res.send(audio)
+  }),
+)
+
+router.get('/guide/sessions/:id', route(async (req, res) => {
+  const orgId = await resolvePublicOrgId(req)
+  const id = uuidParam(req, 'id')
+  const session = await loadGuideSession(orgId, id)
+  if (!session) throw new HttpError(404, 'Chat not found', 'NOT_FOUND')
+  const messages = await listGuideMessages(id)
+  res.json({
+    session_id: session.id,
+    language: session.language,
+    status: session.status,
+    draft: session.draft,
+    messages,
+  })
 }))
 
 router.use(citizen)

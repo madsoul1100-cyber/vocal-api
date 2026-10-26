@@ -13,6 +13,7 @@ export type AgentName =
   | 'translation'
   | 'response_summary'
   | 'routing'
+  | 'guide'
 
 export function llmConfigured(): boolean {
   return !!process.env.OPENROUTER_API_KEY?.trim()
@@ -178,6 +179,75 @@ export async function llmJson<S extends z.ZodTypeAny>(args: LlmJsonArgs<S>): Pro
     status: 'succeeded', output: parsed.data, confidence, latencyMs: Date.now() - started,
   })
   return { ok: true, data: parsed.data, runId, model }
+}
+
+/** Spoken reply, same shape as the voice agent: plain sentences, no JSON. */
+export async function llmText(args: {
+  agent: AgentName
+  promptVersion: string
+  orgId: string | null
+  language?: string | null
+  system: string
+  messages: Array<{ role: 'user' | 'assistant'; content: string }>
+  temperature?: number
+  maxTokens?: number
+}): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
+  const model = modelFor(args.agent)
+  const started = Date.now()
+  const apiKey = process.env.OPENROUTER_API_KEY?.trim()
+  if (!apiKey) return { ok: false, error: 'OPENROUTER_API_KEY not configured' }
+
+  const messages = args.messages.filter((m) => m.content.trim()).slice(-8)
+  if (!messages.length || messages[messages.length - 1]?.role !== 'user') {
+    messages.push({ role: 'user', content: 'Help me with this.' })
+  }
+
+  try {
+    const res = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${apiKey}`,
+        'X-Title': `Bharosa ${args.agent}`,
+      },
+      body: JSON.stringify({
+        model,
+        messages: [{ role: 'system', content: args.system }, ...messages],
+        temperature: args.temperature ?? 0.35,
+        max_tokens: args.maxTokens ?? 180,
+      }),
+      signal: AbortSignal.timeout(25_000),
+    })
+    if (!res.ok) {
+      const body = await res.text().catch(() => '')
+      throw new Error(`OpenRouter ${res.status}: ${body.slice(0, 300)}`)
+    }
+    const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> }
+    const text = (data.choices?.[0]?.message?.content ?? '').trim()
+    if (!text) throw new Error('Empty AI response')
+    await recordRun({
+      ctx: args,
+      agent: args.agent,
+      model,
+      promptVersion: args.promptVersion,
+      status: 'succeeded',
+      output: { reply: text },
+      latencyMs: Date.now() - started,
+    })
+    return { ok: true, text }
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err)
+    await recordRun({
+      ctx: args,
+      agent: args.agent,
+      model,
+      promptVersion: args.promptVersion,
+      status: 'failed',
+      latencyMs: Date.now() - started,
+      error,
+    })
+    return { ok: false, error }
+  }
 }
 
 export async function reviewAiRun(args: {

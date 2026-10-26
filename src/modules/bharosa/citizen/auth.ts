@@ -2,7 +2,7 @@ import crypto from 'node:crypto'
 import type { NextFunction, Request, Response } from 'express'
 import jwt from 'jsonwebtoken'
 import { dbQuery } from '@/lib/db.js'
-import { smsProvider } from '@/lib/otp/delivery.js'
+import { emailOtpProvider, smsProvider } from '@/lib/otp/delivery.js'
 import { exposeDevOtpInApi, otpAppName, resolveOtpDeliveryMode } from '@/lib/otp/config.js'
 import { normalizePhone } from '@/services/otpService.js'
 import { HttpError } from '../common.js'
@@ -29,6 +29,39 @@ function maskPhone(p: string): string {
   return `${p.slice(0, 3)}******${p.slice(-4)}`
 }
 
+export function normalizeCitizenEmail(raw: string): string | null {
+  const email = raw.trim().toLowerCase()
+  if (!email || email.length > 200 || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return null
+  return email
+}
+
+function maskEmail(email: string): string {
+  const [user, domain] = email.split('@')
+  const head = user.slice(0, 1)
+  return `${head}***@${domain}`
+}
+
+type OtpDestination =
+  | { channel: 'sms'; phone: string; email: null }
+  | { channel: 'email'; phone: null; email: string }
+
+function otpDestination(phoneRaw?: string | null, emailRaw?: string | null): OtpDestination {
+  const wantsEmail = !!emailRaw?.trim()
+  const wantsPhone = !!phoneRaw?.trim()
+  if (wantsEmail && wantsPhone) throw new HttpError(400, 'Enter a mobile number or an email, not both', 'DESTINATION_AMBIGUOUS')
+  if (wantsEmail) {
+    const email = normalizeCitizenEmail(emailRaw!)
+    if (!email) throw new HttpError(400, 'Enter a valid email address', 'INVALID_EMAIL')
+    return { channel: 'email', phone: null, email }
+  }
+  if (wantsPhone) {
+    const phone = normalizePhone(phoneRaw!)
+    if (!phone) throw new HttpError(400, 'Enter a valid mobile number', 'INVALID_PHONE')
+    return { channel: 'sms', phone, email: null }
+  }
+  throw new HttpError(400, 'Enter a mobile number or email', 'DESTINATION_REQUIRED')
+}
+
 export interface CitizenRow {
   id: string
   organization_id: string
@@ -37,35 +70,51 @@ export interface CitizenRow {
   email: string | null
   preferred_language: string
   phone_verified_at: string | null
+  email_verified_at: string | null
   whatsapp_opt_in: boolean
   blocked_at: string | null
 }
 
 export async function requestCitizenOtp(args: {
   orgId: string
-  phoneRaw: string
+  phoneRaw?: string | null
+  emailRaw?: string | null
   ip: string
-}): Promise<{ sent: true; masked_phone: string; expires_in_seconds: number; resend_after_seconds: number; dev_code?: string }> {
-  const phone = normalizePhone(args.phoneRaw)
-  if (!phone) throw new HttpError(400, 'Enter a valid mobile number', 'INVALID_PHONE')
+}): Promise<{
+  sent: true
+  channel: 'sms' | 'email'
+  masked_destination: string
+  masked_phone: string
+  expires_in_seconds: number
+  resend_after_seconds: number
+  dev_code?: string
+}> {
+  const dest = otpDestination(args.phoneRaw, args.emailRaw)
+  const key = dest.channel === 'sms' ? dest.phone : dest.email
   const settings = await getBharosaSettings(args.orgId)
   const { otp } = settings
 
   const blocked = await dbQuery(
-    `SELECT 1 FROM citizens WHERE organization_id = $1 AND phone_e164 = $2 AND blocked_at IS NOT NULL`,
-    [args.orgId, phone],
+    `SELECT 1 FROM citizens
+     WHERE organization_id = $1 AND blocked_at IS NOT NULL
+       AND (($2::text IS NOT NULL AND phone_e164 = $2) OR ($3::text IS NOT NULL AND lower(email) = $3))`,
+    [args.orgId, dest.phone, dest.email],
   )
-  if (blocked.rowCount) throw new HttpError(403, 'This number cannot submit right now. Contact support.', 'BLOCKED')
+  if (blocked.rowCount) throw new HttpError(403, 'This account cannot submit right now. Contact support.', 'BLOCKED')
 
-  const stats = await dbQuery<{ phone_hour: string; ip_hour: string; last_at: string | null }>(
+  const stats = await dbQuery<{ dest_hour: string; ip_hour: string; last_at: string | null }>(
     `SELECT
-       (SELECT COUNT(*) FROM citizen_otps WHERE organization_id = $1 AND phone_e164 = $2 AND created_at > now() - interval '1 hour')::text AS phone_hour,
-       (SELECT COUNT(*) FROM citizen_otps WHERE request_ip = $3 AND created_at > now() - interval '1 hour')::text AS ip_hour,
-       (SELECT MAX(created_at) FROM citizen_otps WHERE organization_id = $1 AND phone_e164 = $2)::text AS last_at`,
-    [args.orgId, phone, args.ip],
+       (SELECT COUNT(*) FROM citizen_otps
+         WHERE organization_id = $1 AND created_at > now() - interval '1 hour'
+           AND (($2::text IS NOT NULL AND phone_e164 = $2) OR ($3::text IS NOT NULL AND lower(email) = $3)))::text AS dest_hour,
+       (SELECT COUNT(*) FROM citizen_otps WHERE request_ip = $4 AND created_at > now() - interval '1 hour')::text AS ip_hour,
+       (SELECT MAX(created_at) FROM citizen_otps
+         WHERE organization_id = $1
+           AND (($2::text IS NOT NULL AND phone_e164 = $2) OR ($3::text IS NOT NULL AND lower(email) = $3)))::text AS last_at`,
+    [args.orgId, dest.phone, dest.email, args.ip],
   )
   const s = stats.rows[0]
-  if (Number(s.phone_hour) >= otp.maxSendsPerPhonePerHour || (args.ip && Number(s.ip_hour) >= otp.maxSendsPerIpPerHour)) {
+  if (Number(s.dest_hour) >= otp.maxSendsPerPhonePerHour || (args.ip && Number(s.ip_hour) >= otp.maxSendsPerIpPerHour)) {
     throw new HttpError(429, 'Too many codes requested. Try again later or ask for an assisted call.', 'OTP_RATE_LIMIT')
   }
   if (s.last_at) {
@@ -76,8 +125,8 @@ export async function requestCitizenOtp(args: {
   }
 
   const code = String(crypto.randomInt(0, 1_000_000)).padStart(6, '0')
-  const provider = smsProvider()
-  const outcome = await provider.send(phone, {
+  const provider = dest.channel === 'email' ? emailOtpProvider() : smsProvider()
+  const outcome = await provider.send(key, {
     code,
     purpose: 'login',
     appName: process.env.CITIZEN_OTP_APP_NAME?.trim() || otpAppName(),
@@ -85,22 +134,27 @@ export async function requestCitizenOtp(args: {
   })
   if (!outcome.ok) {
     console.error('[bharosa:otp]', outcome.error)
-    throw new HttpError(503, 'Could not send the code. Try again, or request an assisted verification call.', 'OTP_SEND_FAILED')
+    throw new HttpError(503, 'Could not send the code. Try again in a moment.', 'OTP_SEND_FAILED')
   }
 
-  await dbQuery(`UPDATE citizen_otps SET consumed_at = now() WHERE organization_id = $1 AND phone_e164 = $2 AND consumed_at IS NULL`, [
-    args.orgId,
-    phone,
-  ])
   await dbQuery(
-    `INSERT INTO citizen_otps (organization_id, phone_e164, code_hash, provider, expires_at, request_ip)
-     VALUES ($1, $2, $3, $4, now() + make_interval(mins => $5::int), $6)`,
-    [args.orgId, phone, hashCode(phone, code), outcome.provider, otp.ttlMinutes, args.ip || null],
+    `UPDATE citizen_otps SET consumed_at = now()
+     WHERE organization_id = $1 AND consumed_at IS NULL
+       AND (($2::text IS NOT NULL AND phone_e164 = $2) OR ($3::text IS NOT NULL AND lower(email) = $3))`,
+    [args.orgId, dest.phone, dest.email],
+  )
+  await dbQuery(
+    `INSERT INTO citizen_otps (organization_id, phone_e164, email, code_hash, provider, expires_at, request_ip)
+     VALUES ($1, $2, $3, $4, $5, now() + make_interval(mins => $6::int), $7)`,
+    [args.orgId, dest.phone, dest.email, hashCode(key, code), outcome.provider, otp.ttlMinutes, args.ip || null],
   )
 
+  const masked = dest.channel === 'sms' ? maskPhone(dest.phone) : maskEmail(dest.email)
   return {
     sent: true,
-    masked_phone: maskPhone(phone),
+    channel: dest.channel,
+    masked_destination: masked,
+    masked_phone: masked,
     expires_in_seconds: otp.ttlMinutes * 60,
     resend_after_seconds: otp.resendCooldownSeconds,
     ...(resolveOtpDeliveryMode() === 'console' && exposeDevOtpInApi() ? { dev_code: code } : {}),
@@ -109,13 +163,14 @@ export async function requestCitizenOtp(args: {
 
 export async function verifyCitizenOtp(args: {
   orgId: string
-  phoneRaw: string
+  phoneRaw?: string | null
+  emailRaw?: string | null
   code: string
   displayName?: string | null
   language?: string | null
 }): Promise<{ token: string; citizen: CitizenRow; is_new: boolean }> {
-  const phone = normalizePhone(args.phoneRaw)
-  if (!phone) throw new HttpError(400, 'Enter a valid mobile number', 'INVALID_PHONE')
+  const dest = otpDestination(args.phoneRaw, args.emailRaw)
+  const key = dest.channel === 'sms' ? dest.phone : dest.email
   const code = args.code.replace(/\D/g, '')
   if (code.length !== 6) throw new HttpError(400, 'Enter the 6-digit code', 'INVALID_CODE')
   const settings = await getBharosaSettings(args.orgId)
@@ -123,9 +178,10 @@ export async function verifyCitizenOtp(args: {
   const row = (
     await dbQuery<{ id: string; code_hash: string; expires_at: string; attempt_count: number }>(
       `SELECT id, code_hash, expires_at, attempt_count FROM citizen_otps
-       WHERE organization_id = $1 AND phone_e164 = $2 AND consumed_at IS NULL
+       WHERE organization_id = $1 AND consumed_at IS NULL
+         AND (($2::text IS NOT NULL AND phone_e164 = $2) OR ($3::text IS NOT NULL AND lower(email) = $3))
        ORDER BY created_at DESC LIMIT 1`,
-      [args.orgId, phone],
+      [args.orgId, dest.phone, dest.email],
     )
   ).rows[0]
   if (!row) throw new HttpError(400, 'No active code. Request a new one.', 'OTP_NOT_FOUND')
@@ -135,7 +191,7 @@ export async function verifyCitizenOtp(args: {
   }
 
   const expected = Buffer.from(row.code_hash, 'hex')
-  const actual = Buffer.from(hashCode(phone, code), 'hex')
+  const actual = Buffer.from(hashCode(key, code), 'hex')
   if (expected.length !== actual.length || !crypto.timingSafeEqual(expected, actual)) {
     await dbQuery(`UPDATE citizen_otps SET attempt_count = attempt_count + 1 WHERE id = $1`, [row.id])
     throw new HttpError(401, 'Incorrect code', 'OTP_INVALID')
@@ -147,13 +203,20 @@ export async function verifyCitizenOtp(args: {
 
   const existing = (
     await dbQuery<{ id: string }>(
-      `SELECT c.id FROM citizens c
-       WHERE c.organization_id = $1
-         AND (c.phone_e164 = $2 OR EXISTS (
-           SELECT 1 FROM citizen_channel_identities i
-           WHERE i.citizen_id = c.id AND (i.phone = $2 OR i.channel_user_id = $2)))
-       ORDER BY c.created_at ASC LIMIT 1`,
-      [args.orgId, phone],
+      dest.channel === 'sms'
+        ? `SELECT c.id FROM citizens c
+           WHERE c.organization_id = $1
+             AND (c.phone_e164 = $2 OR EXISTS (
+               SELECT 1 FROM citizen_channel_identities i
+               WHERE i.citizen_id = c.id AND (i.phone = $2 OR i.channel_user_id = $2)))
+           ORDER BY c.created_at ASC LIMIT 1`
+        : `SELECT c.id FROM citizens c
+           WHERE c.organization_id = $1
+             AND (lower(c.email) = $2 OR EXISTS (
+               SELECT 1 FROM citizen_channel_identities i
+               WHERE i.citizen_id = c.id AND i.channel = 'email' AND lower(i.channel_user_id) = $2))
+           ORDER BY c.created_at ASC LIMIT 1`,
+      [args.orgId, key],
     )
   ).rows[0]
 
@@ -161,29 +224,56 @@ export async function verifyCitizenOtp(args: {
   const isNew = !existing
   if (existing) {
     citizenId = existing.id
-    await dbQuery(
-      `UPDATE citizens SET phone_e164 = $2, phone_verified_at = now(), verified = true,
-              display_name = COALESCE($3, display_name),
-              preferred_language = COALESCE($4, preferred_language), updated_at = now()
-       WHERE id = $1`,
-      [citizenId, phone, name, language],
-    )
-  } else {
+    if (dest.channel === 'sms') {
+      await dbQuery(
+        `UPDATE citizens SET phone_e164 = $2, phone_verified_at = now(), verified = true,
+                display_name = COALESCE($3, display_name),
+                preferred_language = COALESCE($4, preferred_language), updated_at = now()
+         WHERE id = $1`,
+        [citizenId, dest.phone, name, language],
+      )
+    } else {
+      await dbQuery(
+        `UPDATE citizens SET email = $2, email_verified_at = now(), verified = true,
+                display_name = COALESCE($3, display_name),
+                preferred_language = COALESCE($4, preferred_language), updated_at = now()
+         WHERE id = $1`,
+        [citizenId, dest.email, name, language],
+      )
+    }
+  } else if (dest.channel === 'sms') {
     citizenId = (
       await dbQuery<{ id: string }>(
         `INSERT INTO citizens (organization_id, display_name, phone_e164, phone_verified_at, verified, preferred_language)
          VALUES ($1, $2, $3, now(), true, $4) RETURNING id`,
-        [args.orgId, name, phone, language ?? settings.defaultLanguage],
+        [args.orgId, name, dest.phone, language ?? settings.defaultLanguage],
+      )
+    ).rows[0].id
+  } else {
+    citizenId = (
+      await dbQuery<{ id: string }>(
+        `INSERT INTO citizens (organization_id, display_name, email, email_verified_at, verified, preferred_language)
+         VALUES ($1, $2, $3, now(), true, $4) RETURNING id`,
+        [args.orgId, name, dest.email, language ?? settings.defaultLanguage],
       )
     ).rows[0].id
   }
 
-  await dbQuery(
-    `INSERT INTO citizen_channel_identities (citizen_id, channel, channel_user_id, phone)
-     VALUES ($1, 'web', $2, $2)
-     ON CONFLICT (channel, channel_user_id) DO UPDATE SET last_seen_at = now()`,
-    [citizenId, phone],
-  )
+  if (dest.channel === 'sms') {
+    await dbQuery(
+      `INSERT INTO citizen_channel_identities (citizen_id, channel, channel_user_id, phone)
+       VALUES ($1, 'web', $2, $2)
+       ON CONFLICT (channel, channel_user_id) DO UPDATE SET last_seen_at = now()`,
+      [citizenId, dest.phone],
+    )
+  } else {
+    await dbQuery(
+      `INSERT INTO citizen_channel_identities (citizen_id, channel, channel_user_id)
+       VALUES ($1, 'email', $2)
+       ON CONFLICT (channel, channel_user_id) DO UPDATE SET last_seen_at = now()`,
+      [citizenId, dest.email],
+    )
+  }
 
   const citizen = await loadCitizen(citizenId)
   if (!citizen) throw new HttpError(500, 'Citizen not found after verification')
@@ -257,7 +347,7 @@ export function signCitizenToken(c: { id: string; organization_id: string }): st
 export async function loadCitizen(id: string): Promise<CitizenRow | null> {
   const res = await dbQuery<CitizenRow>(
     `SELECT id, organization_id, display_name, phone_e164, email, preferred_language, phone_verified_at,
-            whatsapp_opt_in, blocked_at
+            email_verified_at, whatsapp_opt_in, blocked_at
      FROM citizens WHERE id = $1`,
     [id],
   )

@@ -37,6 +37,7 @@ data/territories/sheets/
 data/territories/overlays/
 data/territories/telangana-full.json
 scripts/.pydeps/
+tmp/
 
 # Local copy of source workbook (keep telangana.json as the committed sample)
 vocal territory database.xlsx

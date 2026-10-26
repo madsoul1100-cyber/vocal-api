@@ -7,8 +7,36 @@ import {
   listDirectoryContacts,
   updateDirectoryContact,
 } from '@/services/directoryService.js'
+import { listCatalogs, queryCatalog } from '@/modules/bharosa/directory/catalog.js'
 
 const router = Router()
+
+router.get('/catalogs', requireAuth, (_req, res) => {
+  res.json({ catalogs: listCatalogs() })
+})
+
+router.get('/catalogs/:id', requireAuth, (req, res) => {
+  const limit = Math.min(100, Math.max(1, parseInt(String(req.query.limit ?? '40'), 10) || 40))
+  const offset = Math.max(0, parseInt(String(req.query.offset ?? '0'), 10) || 0)
+  const result = queryCatalog(String(req.params.id), {
+    department: typeof req.query.department === 'string' ? req.query.department : undefined,
+    channel: typeof req.query.channel === 'string' ? req.query.channel : undefined,
+    search: typeof req.query.search === 'string' ? req.query.search : undefined,
+    limit,
+    offset,
+  })
+  if (!result) {
+    res.status(404).json({ error: 'Directory catalog not found' })
+    return
+  }
+  res.json({
+    catalog: result.summary,
+    contacts: result.contacts,
+    total: result.total,
+    limit,
+    offset,
+  })
+})
 
 type VocalUser = {
   id: string
