@@ -358,6 +358,22 @@ export function citizenFromReq(req: Request): CitizenRow {
   return (req as Request & { citizen: CitizenRow }).citizen
 }
 
+async function citizenFromBearer(req: Request): Promise<CitizenRow | null> {
+  const header = req.headers.authorization
+  const token = header?.startsWith('Bearer ') ? header.slice(7).trim() : ''
+  if (!token) return null
+  let payload: { sub?: string; typ?: string }
+  try {
+    payload = jwt.verify(token, secret(), { audience: CITIZEN_AUDIENCE }) as { sub?: string; typ?: string }
+  } catch {
+    return null
+  }
+  if (payload.typ !== 'citizen' || !payload.sub) return null
+  const citizen = await loadCitizen(payload.sub).catch(() => null)
+  if (!citizen || citizen.blocked_at) return null
+  return citizen
+}
+
 export async function requireCitizen(req: Request, res: Response, next: NextFunction) {
   const header = req.headers.authorization
   const token = header?.startsWith('Bearer ') ? header.slice(7).trim() : ''
@@ -387,6 +403,17 @@ export async function requireCitizen(req: Request, res: Response, next: NextFunc
   }
   ;(req as Request & { citizen: CitizenRow }).citizen = citizen
   next()
+}
+
+/** Attach citizen when Bearer token is present; otherwise continue anonymously (Guide chat). */
+export async function optionalCitizen(req: Request, _res: Response, next: NextFunction) {
+  const citizen = await citizenFromBearer(req)
+  if (citizen) (req as Request & { citizen?: CitizenRow }).citizen = citizen
+  next()
+}
+
+export function tryCitizenFromReq(req: Request): CitizenRow | null {
+  return (req as Request & { citizen?: CitizenRow }).citizen ?? null
 }
 
 export async function updateCitizenProfile(

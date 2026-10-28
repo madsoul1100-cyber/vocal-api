@@ -120,7 +120,17 @@ const STATUS_COPY = {
 const INTAKE_COPY = {
   en: {
     greeting:
-      "Hey! I'm here to help you report civic problems — roads, drainage, water, garbage — straight to your local team. What's been bothering you in your area? Feel free to type in English or mix languages however you like.",
+      "Hey — I'm your personal agent for civic problems (roads, drainage, water, garbage). I'll take your details and get this to the local team. What's your name?",
+    askName:
+      "What's your name? Just your first name is fine — then we'll get into the problem.",
+    askNameAgain:
+      "I still need your name so I can help you properly. What should I call you?",
+    askProblem: (name: string) =>
+      `Thanks, ${name}. What's been bothering you in your area? A few words is fine — you can mix languages however you like.`,
+    resumeDraft: (name: string, preview: string) =>
+      `Welcome back${name ? `, ${name}` : ''}. You left an unfinished report: "${preview}". Reply *1* to continue, or *2* to start a new one.`,
+    pastTicketsMenu: (name: string, lines: string) =>
+      `Hi${name ? ` ${name}` : ''}! You have earlier complaints:\n${lines}\n\nReply with a number to check that one, or *new* to report something else.`,
     askIssue:
       "Tell me what's going on — even a few words is fine. If you can, send a photo of the problem too; it helps our team a lot.",
     ackIssueAskLocation: (preview: string) =>
@@ -150,7 +160,15 @@ const INTAKE_COPY = {
   },
   hi: {
     greeting:
-      'नमस्ते! मैं आपकी सिविक समस्याएँ (सड़क, नाली, पानी) आपकी टीम तक पहुँचाने में मदद करता/करती हूँ। बताइए, क्या परेशानी है?',
+      'नमस्ते — मैं आपकी निजी एजेंट हूँ। सड़क, नाली, पानी जैसी सिविक समस्याएँ आपकी टीम तक पहुँचाती/पहुँचाता हूँ। आपका नाम क्या है?',
+    askName: 'आपका नाम बताइए — पहला नाम काफी है, फिर समस्या पर आते हैं।',
+    askNameAgain: 'सही मदद के लिए आपका नाम चाहिए। आपको क्या कहूँ?',
+    askProblem: (name: string) =>
+      `धन्यवाद, ${name}. इलाके में क्या परेशानी है? थोड़ा भी लिखें चलेगा।`,
+    resumeDraft: (name: string, preview: string) =>
+      `वापस स्वागत है${name ? `, ${name}` : ''}। अधूरी शिकायत: "${preview}". जारी रखने के लिए *1*, नई के लिए *2*।`,
+    pastTicketsMenu: (name: string, lines: string) =>
+      `नमस्ते${name ? ` ${name}` : ''}! आपकी पुरानी शिकायतें:\n${lines}\n\nदेखने के लिए नंबर भेजें, या नई शिकायत के लिए *new* लिखें।`,
     askIssue:
       'अपनी समस्या बताइए — थोड़ा भी लिखें चलेगा। हो सके तो फोटो भी भेज दीजिए।',
     ackIssueAskLocation: (preview: string) =>
@@ -179,7 +197,15 @@ const INTAKE_COPY = {
   },
   te: {
     greeting:
-      'నమస్కారం! రోడ్లు, డ్రైనేజీ, నీరు, చెత్త — మీ సమస్యను స్థానిక బృందానికి చేర్చడంలో సహాయం చేస్తాను. మీ ఏరియాలో ఏమి జరుగుతోంది?',
+      'నమస్కారం — నేను మీ వ్యక్తిగత ఏజెంట్. రోడ్లు, డ్రైనేజీ, నీరు, చెత్త — మీ సమస్యను స్థానిక బృందానికి చేర్చుతాను. మీ పేరు ఏమిటి?',
+    askName: 'మీ పేరు చెప్పండి — మొదటి పేరు చాలు, తర్వాత సమస్యకు వెళ్దాం.',
+    askNameAgain: 'సరిగ్గా సహాయం చేయడానికి మీ పేరు కావాలి. మిమ్మల్ని ఏమని పిలవాలి?',
+    askProblem: (name: string) =>
+      `ధన్యవాదాలు, ${name}. మీ ఏరియాలో ఏమి బాధిస్తోంది? కొద్దిగా రాసినా సరిపోతుంది.`,
+    resumeDraft: (name: string, preview: string) =>
+      `మళ్లీ స్వాగతం${name ? `, ${name}` : ''}. అసంపూర్ణ ఫిర్యాదు: "${preview}". కొనసాగించాలంటే *1*, కొత్తది అయితే *2*.`,
+    pastTicketsMenu: (name: string, lines: string) =>
+      `నమస్కారం${name ? ` ${name}` : ''}! మీ మునుపటి ఫిర్యాదులు:\n${lines}\n\nచూడాలంటే నంబర్ రాయండి, కొత్తది అయితే *new* అనండి.`,
     askIssue:
       'మీ సమస్య చెప్పండి — కొద్దిగా రాసినా సరిపోతుంది. ఫోటో ఉంటే పంపండి.',
     ackIssueAskLocation: (preview: string) =>
@@ -208,7 +234,15 @@ const INTAKE_COPY = {
   },
   'hi-en': {
     greeting:
-      'Namaste! Main aapki civic problems — road, drainage, paani — local team tak pahunchane mein help karta hoon. Kya problem hai aapke area mein? Hindi, English, mix — jaisa aapko easy ho likho.',
+      'Namaste — main aapka personal agent hoon. Road, drainage, paani jaise problems local team tak pahunchata hoon. Aapka naam kya hai?',
+    askName: 'Naam batao — pehla naam kaafi hai, phir problem pe aate hain.',
+    askNameAgain: 'Sahi help ke liye naam chahiye. Aapko kya bolun?',
+    askProblem: (name: string) =>
+      `Thanks, ${name}. Area mein kya pareshani hai? Thoda bhi likho chalega — Hindi, English, mix sab theek.`,
+    resumeDraft: (name: string, preview: string) =>
+      `Welcome back${name ? `, ${name}` : ''}. Adhoori complaint: "${preview}". Continue ke liye *1*, nayi ke liye *2*.`,
+    pastTicketsMenu: (name: string, lines: string) =>
+      `Hi${name ? ` ${name}` : ''}! Pehli complaints:\n${lines}\n\nDekhne ke liye number bhejo, ya nayi ke liye *new* likho.`,
     askIssue:
       'Problem batao — thoda bhi likho chalega. Photo ho to WhatsApp par bhej dena, team ko bahut help milti hai.',
     ackIssueAskLocation: (preview: string) =>
@@ -237,7 +271,15 @@ const INTAKE_COPY = {
   },
   'te-en': {
     greeting:
-      'Namaskaram! Roads, drainage, water, garbage — mee problem ni local team ki help chestanu. Mee area lo em avtundi? Telugu, English, mix — ela comfortable unte ala rayandi.',
+      'Namaskaram — nenu mee personal agent. Roads, drainage, water, garbage — mee problem ni local team ki cherustanu. Mee peru enti?',
+    askName: 'Meeru peru cheppandi — first name saripothundi, tarvata problem ki veldam.',
+    askNameAgain: 'Sari ga help cheyadaniki peru kavali. Mimmalni emani pilavali?',
+    askProblem: (name: string) =>
+      `Thanks, ${name}. Mee area lo em baadistundi? Konchem kuda rayandi — Telugu, English, mix ante kuda OK.`,
+    resumeDraft: (name: string, preview: string) =>
+      `Malli swagatam${name ? `, ${name}` : ''}. Incomplete complaint: "${preview}". Continue aithe *1*, kothadi aithe *2*.`,
+    pastTicketsMenu: (name: string, lines: string) =>
+      `Hi${name ? ` ${name}` : ''}! Mee previous complaints:\n${lines}\n\nChoodalante number rayandi, kothadi aithe *new* anandi.`,
     askIssue:
       'Problem cheppandi — konchem kuda saripothundi. Photo unte WhatsApp lo pampandi, team ki chala help avtundi.',
     ackIssueAskLocation: (preview: string) =>

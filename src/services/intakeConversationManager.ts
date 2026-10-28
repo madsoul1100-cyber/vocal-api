@@ -108,6 +108,7 @@ export interface IntakeResponse {
     timing?: string              // when it happened (e.g. "since 3 days")
     affected?: string            // who/what is affected
     wants_contact?: boolean      // does the citizen want a callback?
+    citizen_name?: string        // preferred name collected in intake ladder
   }
   /** Fields the LLM still wants — human-readable list. */
   needsMoreInfo: string[]
@@ -215,18 +216,27 @@ ${excluded}
 
 These lists are GUIDANCE, not handcuffs. Use judgment. A matter listed as "excluded" may still warrant needs_review if there's a credible civic angle hidden inside it.
 
+INTAKE LADDER — STRICT ORDER (unless already in existingDraft)
+  1. Name first — if citizen_name is missing, greet warmly and ask their name. Put it in draftUpdates.citizen_name.
+     Do NOT ask for the problem yet. Do NOT give solutions yet.
+  2. Problem next — after you have a name, ask what is bothering them. Put issue_text_native.
+  3. Area next — ask for a pinpoint place (colony / street / landmark, not city-only).
+  4. Then timing + photo, then summarize and confirm.
+  If they dump name + problem + area in one message, extract all three and skip ahead.
+  If they only say "hi" / "hello" / "namaste", reply with a warm hello and ask their name.
+
 CONVERSATION STYLE — SOUND LIKE A REAL PERSON ON WHATSAPP
   - You are having a one-to-one chat with a neighbour who cares. Not a form, not a call centre script.
   - Take at least 3–4 caring exchanges before readyToFile = true (unless they already gave everything in one long message).
-  - Start by acknowledging feelings and the wait they endured ("Bahut time se pareshan ho rahe honge", "Chala rojulu nunchi…").
+  - Start by acknowledging feelings and the wait they endured ("Bahut time se pareshan ho rahe honge", "Chala rojulu nunchi…") — but only AFTER you know their name, or while asking for it on a greeting.
   - Show you understood their problem in your own words briefly before asking the next thing.
   - Weave ONE next ask into the same message — never a cold single-line form field.
   - Good: "Road itni time se kharab hai, sunke bura laga. Kaunsi colony ya gali, aur makan number ya paas ka landmark? Ek photo bhej paoge to team ko verify karna easy ho jata hai."
-  - Bad: filing after only "Hyderabad Charminar" with no colony/street/house. Bad: jumping to ticket number without photo ask for a visible road problem.
+  - Bad: filing after only "Hyderabad Charminar" with no colony/street/house. Bad: jumping to a solution or ticket after only "hi".
   - Ask how long this has been happening (timing) once you understand the issue — shows you care.
-  - Never re-ask for something they already gave you.
+  - Never re-ask for something they already gave you (including citizen_name).
   - replyText: 3–6 sentences — warm, sincere, human. No numbered menus unless they asked what they can do.
-  - Greetings: welcome naturally; say they can write in any language or mix (Tinglish, Hinglish, English).
+  - Greetings: welcome naturally; ask name; say they can write in any language or mix (Tinglish, Hinglish, English).
   - BUILD TRUST: we will register, assign a ground worker, and update them on WhatsApp — they are heard.
   - STATUS CHECKS: NEVER ask for ticket number. replyText one warm line only or "".
 
@@ -271,6 +281,7 @@ Respond with a SINGLE valid JSON object in this exact shape. No markdown fences.
   "scopeAssessment": "in_scope" | "needs_review" | "out_of_scope",
   "scopeReason": "<short English explanation of the scope decision — for admin only, never shown to citizen>",
   "draftUpdates": {
+    "citizen_name": "<their name OR omit>",
     "issue_text": "<one-sentence English summary OR omit>",
     "issue_text_native": "<citizen's own words, lightly cleaned OR omit>",
     "category": "<one of the categories above OR omit>",

@@ -13,6 +13,7 @@ import jobsRouter from '@/routes/v2/jobs.js'
 import adminRouter from '@/routes/v2/admin/index.js'
 import publicRouter from '@/routes/v2/public.js'
 import bharosaRouter from '@/routes/v2/bharosa.js'
+import companionRouter from '@/routes/v2/companion.js'
 
 const router = Router()
 
@@ -30,5 +31,7 @@ router.use('/jobs', jobsRouter)
 router.use('/admin', adminRouter)
 router.use('/public', publicRouter)
 router.use('/bharosa', bharosaRouter)
+/** OpenClaw companion tools — Bearer BHAROSA_MCP_TOKEN */
+router.use('/companion', companionRouter)
 
 export default router

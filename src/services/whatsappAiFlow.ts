@@ -5,6 +5,16 @@
 
 import type { SupabaseClient } from '@supabase/supabase-js'
 import {
+  absorbIntakeSlots,
+  extractBareName,
+  extractNamedIntro,
+  isShortGreeting,
+  looksLikeProblem,
+  wantsContinue,
+  wantsNewIssue,
+  type IntakePhase,
+} from '@/lib/citizenIntakeLadder.js'
+import {
   processInbound,
   type ConversationTurn,
   type IntakeResponse,
@@ -16,6 +26,7 @@ import {
   isCommand,
 } from './whatsappService.js'
 import {
+  fetchCitizenTickets,
   looksLikeStatusFollowUp,
   offerTicketStatusFlow,
   resolveTicketPickerChoice,
@@ -58,6 +69,12 @@ export interface AiDraftState {
   photo_requested?: boolean
   photo_skipped?: boolean
   location_confirmed?: boolean
+  /** Citizen's preferred name collected during intake. */
+  citizen_name?: string | null
+  /** Phase-0 ladder position. */
+  intake_phase?: IntakePhase | null
+  /** When true, next 1/2 replies mean continue vs new. */
+  awaiting_resume_choice?: boolean | null
 }
 
 export interface WhatsAppConversationMeta {
@@ -127,6 +144,7 @@ function mergeAiDraft(
     longitude: ctx.msg.location?.longitude ?? current.longitude,
     category: updates.category ?? current.category,
     severity_hint: updates.severity_hint ?? current.severity_hint,
+    citizen_name: updates.citizen_name ?? current.citizen_name,
     media,
   }
 }
@@ -135,9 +153,19 @@ function trimHistory(history: ConversationTurn[]): ConversationTurn[] {
   return history.slice(-MAX_HISTORY_TURNS)
 }
 
-function isShortGreeting(text: string): boolean {
-  const t = text.trim().toLowerCase()
-  return /^(hi+|hii+|hello+|hey+|namaste|namaskar)\s*!?\.?$/.test(t)
+function draftHasProgress(draft: AiDraftState): boolean {
+  return !!(
+    (draft.issue_text_native ?? draft.issue_text ?? '').trim() ||
+    (draft.location_text ?? '').trim() ||
+    (draft.media?.length ?? 0) > 0
+  )
+}
+
+function syncWaPhase(draft: AiDraftState): IntakePhase {
+  if (!(draft.citizen_name ?? '').trim()) return 'ask_name'
+  if (!(draft.issue_text_native ?? draft.issue_text ?? '').trim()) return 'ask_problem'
+  if (!(draft.location_text ?? '').trim()) return 'ask_area'
+  return 'help'
 }
 
 /** Location-only message (pin, city, "I live in…") — not an issue description that mentions a road. */
@@ -185,8 +213,43 @@ function localIntakeFallback(
   const location = (draft.location_text ?? '').trim()
   const hasPhoto = hasMedia || (draft.media?.length ?? 0) > 0
 
-  if (isShortGreeting(text) && !hasPhoto) {
-    return { replyText: c.greeting, draftUpdates: {}, readyToFile: false }
+  const name = (draft.citizen_name ?? '').trim()
+  const slots = absorbIntakeSlots(text)
+  const bareName = extractBareName(text) || extractNamedIntro(text) || slots.name
+
+  if (!name) {
+    if (isShortGreeting(text) && !hasPhoto) {
+      return { replyText: c.greeting, draftUpdates: {}, readyToFile: false }
+    }
+    if (bareName) {
+      const nextIssue = slots.problem || (looksLikeProblem(text) ? text : undefined)
+      if (nextIssue) {
+        return {
+          replyText: c.ackIssueAskLocation(nextIssue.slice(0, 100)),
+          draftUpdates: {
+            citizen_name: bareName,
+            issue_text: nextIssue,
+            issue_text_native: nextIssue,
+            ...(slots.place ? { location_text: slots.place } : {}),
+          },
+          readyToFile: false,
+        }
+      }
+      return {
+        replyText: c.askProblem(bareName),
+        draftUpdates: { citizen_name: bareName },
+        readyToFile: false,
+      }
+    }
+    return {
+      replyText: isShortGreeting(text) ? c.greeting : c.askNameAgain,
+      draftUpdates: {},
+      readyToFile: false,
+    }
+  }
+
+  if (isShortGreeting(text) && !hasPhoto && !issue) {
+    return { replyText: c.askProblem(name), draftUpdates: {}, readyToFile: false }
   }
 
   if (hasPhoto && !issue && text.length < 15) {
@@ -213,7 +276,7 @@ function localIntakeFallback(
         readyToFile: false,
       }
     }
-    return { replyText: c.askIssue, draftUpdates: {}, readyToFile: false }
+    return { replyText: c.askProblem(name), draftUpdates: {}, readyToFile: false }
   }
 
   let draftUpdates: IntakeResponse['draftUpdates'] = {}
@@ -381,6 +444,178 @@ async function handleTicketStatusRequest(
     ...ctx.meta,
     ticketPickerOptions: result.pickerOptions,
     last_ticket_number: result.shownTicket ?? ctx.meta.last_ticket_number,
+    preferredLanguage: lang,
+  })
+}
+
+/**
+ * Phase-0 ladder: greet → name → (resume / past tickets) → problem → area.
+ * Returns true when this turn was fully handled (message sent + meta saved).
+ */
+async function handleWhatsAppIntakeLadder(
+  ctx: AiFlowContext,
+  text: string,
+  lang: WhatsAppLang,
+): Promise<boolean> {
+  let draft = { ...(ctx.meta.aiDraft ?? {}) }
+  const c = intakeCopy(lang)
+  const name = (draft.citizen_name ?? '').trim()
+  const hasMedia = Boolean(ctx.msg.media)
+  const hasLocationPin = Boolean(ctx.msg.location)
+
+  // Resume choice: 1 = continue unfinished draft, 2 / new = clear and start fresh
+  if (draft.awaiting_resume_choice) {
+    if (wantsNewIssue(text) || text.trim() === '2') {
+      draft = {
+        citizen_name: draft.citizen_name,
+        intake_phase: name ? 'ask_problem' : 'ask_name',
+        awaiting_resume_choice: false,
+      }
+      const reply = name ? c.askProblem(name) : c.askName
+      await replyAndPersistLadder(ctx, text, reply, draft, lang)
+      return true
+    }
+    if (wantsContinue(text) || text.trim() === '1') {
+      draft = { ...draft, awaiting_resume_choice: false, intake_phase: syncWaPhase(draft) }
+      const issue = (draft.issue_text_native ?? draft.issue_text ?? '').trim()
+      const location = (draft.location_text ?? '').trim()
+      let reply: string
+      if (!name) reply = c.askName
+      else if (!issue) reply = c.askProblem(name)
+      else if (!location) reply = c.ackIssueAskLocation(issue.slice(0, 100))
+      else reply = c.confirmSubmit(issue, location)
+      await replyAndPersistLadder(ctx, text, reply, draft, lang)
+      return true
+    }
+    // Unrecognised — re-prompt resume
+    const preview = (draft.issue_text_native ?? draft.issue_text ?? draft.location_text ?? 'your report')
+      .toString()
+      .slice(0, 80)
+    await replyAndPersistLadder(ctx, text, c.resumeDraft(name, preview), draft, lang)
+    return true
+  }
+
+  // On greeting: offer unfinished draft or past tickets before asking again
+  if (isShortGreeting(text) && !hasMedia && !hasLocationPin) {
+    if (draftHasProgress(draft)) {
+      const preview = (draft.issue_text_native ?? draft.issue_text ?? draft.location_text ?? 'your report')
+        .toString()
+        .slice(0, 80)
+      draft = { ...draft, awaiting_resume_choice: true }
+      await replyAndPersistLadder(ctx, text, c.resumeDraft(name, preview), draft, lang)
+      return true
+    }
+
+    const tickets = await fetchCitizenTickets(ctx.supabase, ctx.organizationId, ctx.citizenId, 5)
+    if (tickets.length > 0) {
+      const lines = tickets
+        .map((t, i) => {
+          const preview = (t.original_issue_text ?? t.ticket_number).replace(/\s+/g, ' ').slice(0, 45)
+          return `${i + 1} — *${t.ticket_number}*\n   ${preview}${preview.length >= 45 ? '…' : ''}`
+        })
+        .join('\n\n')
+      const pickerOptions: TicketPickerOption[] = tickets.map((t, i) => ({
+        n: i + 1,
+        ticket_number: t.ticket_number,
+      }))
+      const reply = name
+        ? c.pastTicketsMenu(name, lines)
+        : `${c.pastTicketsMenu('', lines)}\n\n${c.askName}`
+      const history = trimHistory([
+        ...(ctx.meta.history ?? []),
+        { role: 'user', content: text || '[greeting]' },
+        { role: 'assistant', content: reply },
+      ])
+      await sendWhatsAppMessage(ctx.msg.chat_id, reply)
+      await persistMeta(ctx, 'ai_intake', {
+        ...ctx.meta,
+        history,
+        aiDraft: {
+          ...draft,
+          intake_phase: name ? 'ask_problem' : 'ask_name',
+        },
+        ticketPickerOptions: pickerOptions,
+        preferredLanguage: lang,
+      })
+      return true
+    }
+
+    if (!name) {
+      draft = { ...draft, intake_phase: 'ask_name' }
+      await replyAndPersistLadder(ctx, text, c.greeting, draft, lang)
+      return true
+    }
+
+    draft = { ...draft, intake_phase: 'ask_problem' }
+    await replyAndPersistLadder(ctx, text, c.askProblem(name), draft, lang)
+    return true
+  }
+
+  // Collect name before letting the LLM roam
+  if (!name && !hasMedia && !hasLocationPin) {
+    const slots = absorbIntakeSlots(text)
+    const bare = extractBareName(text) || extractNamedIntro(text) || slots.name
+    if (bare) {
+      draft.citizen_name = bare
+      if (slots.problem || looksLikeProblem(text)) {
+        const problem = slots.problem || text
+        draft.issue_text = problem
+        draft.issue_text_native = problem
+      }
+      if (slots.place) draft.location_text = slots.place
+      draft.intake_phase = syncWaPhase(draft)
+      draft.awaiting_resume_choice = false
+
+      let reply: string
+      if (draft.intake_phase === 'ask_problem') reply = c.askProblem(bare)
+      else if (draft.intake_phase === 'ask_area') {
+        const preview = (draft.issue_text_native ?? draft.issue_text ?? '').slice(0, 100)
+        reply = c.ackIssueAskLocation(preview)
+      } else reply = c.askProblem(bare)
+
+      await replyAndPersistLadder(ctx, text, reply, draft, lang)
+      return true
+    }
+
+    if (!looksLikeProblem(text)) {
+      draft.intake_phase = 'ask_name'
+      await replyAndPersistLadder(ctx, text, isShortGreeting(text) ? c.greeting : c.askNameAgain, draft, lang)
+      return true
+    }
+    // Problem dumped without name — keep going but ask name first next; stash problem
+    draft.issue_text = text
+    draft.issue_text_native = text
+    draft.intake_phase = 'ask_name'
+    await replyAndPersistLadder(
+      ctx,
+      text,
+      `${c.askName} ${lang === 'te' || lang === 'te-en' ? 'సమస్య గుర్తుంచుకున్నాను.' : lang === 'hi' || lang === 'hi-en' ? 'समस्या नोट कर ली।' : "I've noted the problem."}`,
+      draft,
+      lang,
+    )
+    return true
+  }
+
+  return false
+}
+
+async function replyAndPersistLadder(
+  ctx: AiFlowContext,
+  userText: string,
+  reply: string,
+  draft: AiDraftState,
+  lang: WhatsAppLang,
+): Promise<void> {
+  const history = trimHistory([
+    ...(ctx.meta.history ?? []),
+    { role: 'user', content: userText || '[message]' },
+    { role: 'assistant', content: reply },
+  ])
+  await sendWhatsAppMessage(ctx.msg.chat_id, reply)
+  await persistMeta(ctx, 'ai_intake', {
+    ...ctx.meta,
+    history,
+    aiDraft: { ...draft, intake_phase: draft.intake_phase ?? syncWaPhase(draft) },
     preferredLanguage: lang,
   })
 }
@@ -555,6 +790,34 @@ export async function handleInboundMessageAi(ctx: AiFlowContext): Promise<void> 
   const lang = replyLang(ctx, text)
 
   if (ctx.meta.ticketPickerOptions?.length) {
+    if (wantsNewIssue(text)) {
+      const draft = ctx.meta.aiDraft ?? {}
+      const name = (draft.citizen_name ?? '').trim()
+      const c = intakeCopy(lang)
+      const reply = name ? c.askProblem(name) : c.askName
+      const history = trimHistory([
+        ...(ctx.meta.history ?? []),
+        { role: 'user', content: text },
+        { role: 'assistant', content: reply },
+      ])
+      await sendWhatsAppMessage(ctx.msg.chat_id, reply)
+      await persistMeta(ctx, 'ai_intake', {
+        ...ctx.meta,
+        history,
+        ticketPickerOptions: null,
+        aiDraft: {
+          ...draft,
+          issue_text: null,
+          issue_text_native: null,
+          location_text: null,
+          media: [],
+          intake_phase: name ? 'ask_problem' : 'ask_name',
+          awaiting_resume_choice: false,
+        },
+        preferredLanguage: lang,
+      })
+      return
+    }
     const picked = resolveTicketPickerChoice(text, ctx.meta.ticketPickerOptions)
     if (picked) {
       await sendTicketStatus(ctx.msg.chat_id, ctx.supabase, ctx.organizationId, picked, lang)
@@ -647,8 +910,15 @@ export async function handleInboundMessageAi(ctx: AiFlowContext): Promise<void> 
     return
   }
 
+  const ladderHandled = await handleWhatsAppIntakeLadder(ctx, text, lang)
+  if (ladderHandled) return
+
   const userContent = buildUserContent(ctx)
   const history = ctx.meta.history ?? []
+  const existingForModel = {
+    ...(ctx.meta.aiDraft ?? {}),
+    citizen_name: ctx.meta.aiDraft?.citizen_name ?? null,
+  }
 
   let response = await processInbound({
     history,
@@ -660,7 +930,7 @@ export async function handleInboundMessageAi(ctx: AiFlowContext): Promise<void> 
           }
         : undefined,
     },
-    existingDraft: (ctx.meta.aiDraft ?? {}) as Record<string, unknown>,
+    existingDraft: existingForModel as Record<string, unknown>,
   })
 
   waLog('ai.turn', 'intake model response', {
@@ -705,6 +975,8 @@ export async function handleInboundMessageAi(ctx: AiFlowContext): Promise<void> 
 
   let aiDraft = mergeAiDraft(ctx.meta.aiDraft ?? {}, response.draftUpdates, ctx)
   aiDraft.scope_assessment = response.scopeAssessment
+  aiDraft.intake_phase = syncWaPhase(aiDraft)
+  aiDraft.awaiting_resume_choice = false
 
   const preferredLanguage =
     response.language && response.language !== 'unknown'

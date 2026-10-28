@@ -19,8 +19,10 @@ import {
 import { getBharosaSettings } from '@/modules/bharosa/settings.js'
 import {
   citizenFromReq,
+  optionalCitizen,
   requestCitizenOtp,
   requireCitizen,
+  tryCitizenFromReq,
   updateCitizenProfile,
   verifyCitizenOtp,
 } from '@/modules/bharosa/citizen/auth.js'
@@ -340,7 +342,12 @@ function guideLang(v: unknown): GuideLang | null {
 
 router.post(
   '/guide/messages',
-  rateLimit({ windowMs: 60_000, max: 20, key: (r) => `guide:${clientIp(r)}` }),
+  optionalCitizen,
+  rateLimit({
+    windowMs: 60_000,
+    max: 20,
+    key: (r) => `guide:${tryCitizenFromReq(r)?.id ?? clientIp(r)}`,
+  }),
   route(async (req, res) => {
     const orgId = await resolvePublicOrgId(req)
     const message = str(req.body?.message, 4000)
@@ -348,12 +355,17 @@ router.post(
     if (!message && !confirmSend) throw new HttpError(400, 'Message is required', 'MESSAGE_REQUIRED')
     const sessionId = uuid(req.body?.session_id)
     if (req.body?.session_id && !sessionId) throw new HttpError(400, 'Invalid session', 'INVALID_SESSION')
+    const citizen = tryCitizenFromReq(req)
     res.json(await handleGuideTurn({
       orgId,
       sessionId,
       language: guideLang(req.body?.language),
       message,
       confirmSend,
+      citizenId: citizen?.id ?? null,
+      citizenName: citizen?.display_name ?? null,
+      citizenPhone: citizen?.phone_e164 ?? null,
+      citizenEmail: citizen?.email ?? null,
     }))
   }),
 )

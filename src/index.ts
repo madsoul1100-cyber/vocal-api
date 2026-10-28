@@ -33,6 +33,7 @@ app.listen(port, () => {
     console.warn('  warn: JWT_SECRET missing — login and protected routes will fail')
   }
   console.log(`  bharosa:  /v2/public/* (citizen)  /v2/bharosa/* (ops)  /webhooks/bharosa/*`)
+  console.log(`  companion:/v2/companion/* (OpenClaw tools, token auth)`)
   if (isPostgresMode() && process.env.JOBS_WORKER_ENABLED !== 'false') {
     const worker = startBharosaWorker()
     const shutdown = () => {
