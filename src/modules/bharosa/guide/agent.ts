@@ -6,10 +6,12 @@ import {
   extractNamedIntro,
   extractPhone,
   extractPlace,
+  isPlaceReplyForCurrentIssue,
   isShortGreeting,
   isVaguePlace,
   looksLikeAddress,
   looksLikeProblem,
+  looksOutsideTelangana,
   nextPhase,
   problemNeedsArea,
   wantsContinue,
@@ -44,7 +46,7 @@ import {
   type GuideLang,
   type Playbook,
 } from './playbooks.js'
-import { searchPublicWeb, type WebHit } from './search.js'
+import { isLifestyleOutOfScopeQuery, searchPublicWeb, type WebHit } from './search.js'
 import {
   appendGuideMessage,
   createGuideSession,
@@ -68,6 +70,48 @@ const ANOTHER_PROBLEM =
   /\b(one more|another|new problem|other problem|different problem|next problem|also have|i have (a |one )?more|stuck to old|why you still|change (the )?topic|something else)\b|మరో సమస్య|ఇంకో సమస్య|दूसरी समस्या|और (एक )?समस्या/i
 const WANTS_RECORD =
   /e-?mail the|send (a |the )?mail|raise (it|this|complaint|a complaint)|record (it|this)|note (it|this) (here|down)|on your side|you (will |can )?raise|please raise|better authority|ఇమెయిల్ పంప|మీ వైపు నమోదు|ईमेल भेज|आपकी तरफ दर्ज|शिकायत दर्ज/i
+
+/** Truly unrelated to citizen / local Telangana help — hard divert (LLM alone is too soft). */
+const OFF_TOPIC =
+  /\b(python|javascript|java|c\+\+|golang|rust|sql query|leetcode|hackerrank|write (me )?(code|a function|an essay)|debug (this|my) code|solve (this )?(math|equation|integral)|calculus|homework|stock tip|crypto trade|medical diagnos|prescribe)\b/i
+
+/** What Bharosa is for — used in redirects so the citizen knows the circle. */
+const CIVIC_SCOPE_HINT_EN =
+  'Aadhaar, ration, voter ID, PAN, power cuts, water, drains, roads / potholes, garbage, traffic as a public issue, certificates, MeeSeva — and similar public problems in Telangana. I can share official steps, department numbers, and raise it from our help desk when needed.'
+
+function offTopicReply(lang: GuideLang, name: string): string {
+  const who = name ? `, ${name}` : ''
+  if (lang === 'te') {
+    return `క్షమించండి${who}. నేను కోడింగ్ / మ్యాత్ / హోంవర్క్ సాఫ్ట్‌వేర్ కాదు — తెలంగాణ పౌర / ప్రభుత్వ సమస్యలకు సహాయం చేస్తాను (ఆధార్, రేషన్, కరెంట్, నీళ్లు, రోడ్లు, ధృవపత్రాలు). మీ పబ్లిక్ సమస్య ఏమిటో చెప్పండి.`
+  }
+  if (lang === 'hi') {
+    return `माफ़ कीजिए${who}. मैं कोडिंग / मैथ / होमवर्क सॉफ़्टवेयर नहीं हूँ — तेलंगाना की नागरिक / सरकारी समस्याओं में मदद करती हूँ (आधार, राशन, बिजली, पानी, सड़क, प्रमाण पत्र)। अपनी सार्वजनिक समस्या बताइए।`
+  }
+  return `Sorry${who} — I’m not a general ChatGPT. I’m trained to help with Telangana public / civic problems. ${CIVIC_SCOPE_HINT_EN} What public issue are you facing?`
+}
+
+/** Movies, salons, personal fights, lifestyle — pull them back into the civic circle. */
+function civicScopeRedirect(lang: GuideLang, name: string): string {
+  const who = name ? `, ${name}` : ''
+  if (lang === 'te') {
+    return `అర్థమైంది${who}. సినిమా / సెలూన్ / వ్యక్తిగత విషయాలకు నేను సాధారణ ఓపెన్ చాట్ కాదు. నేను భరోసా ఏజెంట్ — తెలంగాణలో పబ్లిక్ సమస్యలకు సహాయం చేస్తాను: ఆధార్, రేషన్, ఓటరు, కరెంట్, నీళ్లు, మురుగు, రోడ్డు గుంతలు, చెత్త, ధృవపత్రాలు. అధికారిక స్టెప్‌లు, డిపార్ట్‌మెంట్ నంబర్, అవసరమైతే మా హెల్ప్ డెస్క్ నుంచి కూడా తీసుకెళ్తాం. మీకు ఏ పబ్లిక్ సమస్యలో సహాయం కావాలి?`
+  }
+  if (lang === 'hi') {
+    return `समझ गई${who}. फिल्म / सैलून / निजी बातों के लिए मैं खुली ChatGPT जैसी चैट नहीं हूँ। मैं भरोसा एजेंट हूँ — तेलंगाना की सार्वजनिक समस्याओं में मदद करती हूँ: आधार, राशन, वोटर, बिजली, पानी, नाली, सड़क के गड्ढे, कचरा, प्रमाण पत्र। आधिकारिक कदम, विभाग नंबर, और ज़रूरत हो तो हमारे हेल्प डेस्क से आगे भी बढ़ा सकते हैं। आपको किस सार्वजनिक समस्या में मदद चाहिए?`
+  }
+  return `I hear you${who}. I’m not an open ChatGPT for movies, salons, or personal matters. I’m the Bharosa agent for Telangana public problems: ${CIVIC_SCOPE_HINT_EN}\n\nTell me which public issue you need help with — for example Aadhaar mobile change, no power, blocked drain, or road potholes — and I’ll guide you with the right steps and contacts.`
+}
+
+function outsideTelanganaReply(lang: GuideLang, name: string): string {
+  const who = name ? `, ${name}` : ''
+  if (lang === 'te') {
+    return `క్షమించండి${who}. నేను తెలంగాణ రాష్ట్రం (హైదరాబాద్ మరియు ఇతర జిల్లాలు) లోని పౌర సమస్యలకు మాత్రమే సహాయం చేస్తాను. వేరే రాష్ట్రం / నగరం కోసం స్థానిక హెల్ప్‌లైన్ చూడండి. తెలంగాణలో ఉంటే ప్రాంతం చెప్పండి — సహాయం చేస్తాను.`
+  }
+  if (lang === 'hi') {
+    return `माफ़ कीजिए${who}. मैं केवल तेलंगाना राज्य (हैदराबाद और अन्य ज़िले) की नागरिक समस्याओं में मदद करती हूँ। दूसरे राज्य / शहर के लिए वहाँ की स्थानीय हेल्पलाइन देखें। अगर आप तेलंगाना में हैं तो इलाका बताइए — मैं मदद करूँगी।`
+  }
+  return `Sorry${who} — I can help with citizen issues in Telangana state only (Hyderabad and other TG districts). For another state or city, please use that area’s local helpline. If you’re in Telangana, tell me your area and I’ll help.`
+}
 
 const COPY = {
   en: {
@@ -109,14 +153,16 @@ const COPY = {
     sendFailed: 'The mail could not be sent. Your details are saved. Please call the department number as well.',
     noMail: 'This department publishes a phone and website. We can still record your case on our side and follow up — share mobile and email if you want that.',
     offer: 'If you want us to escalate from our desk (party / help desk side), send your mobile, email, and area. I will show the mail before it goes, and you will be copied.',
-    searchIntro: 'This is not one of the 20 problems I have a fixed script for. I looked it up. Check the official page before you act:',
-    searchEmpty: 'Say which service it is, in a few words. For example: electricity, Aadhaar address, ration card, or a blocked drain. I will tell you the number to call and the steps.',
+    searchIntro:
+      'I looked up public / official info. Help only with Telangana civic problems (Aadhaar, power, water, roads, documents). Prefer official contacts and steps. If this is lifestyle (movies/salons/personal), redirect to public problems.',
+    searchEmpty:
+      'Stay in the civic circle. Ask which public problem (Aadhaar, power, water, road, drain…) and area/landmark, or give the best official next step you know. Never answer as open ChatGPT for movies or personal chat.',
     prior: (topic: string) => `You had an earlier chat about ${topic}. If that is still stuck, say what happened at the last step.`,
   },
   te: {
     hello:
-      'నమస్కారం — నేను ప్రియ, తెలంగాణ సహాయం కోసం మీ వ్యక్తిగత ఏజెంట్ (ఆధార్, రేషన్, కరెంట్, నీళ్లు, రోడ్లు, మురుగు). మిమ్మల్ని ఏమని పిలవాలి?',
-    askName: 'మిమ్మల్ని ఏమని పిలవాలి?',
+      'నమస్కారం — నేను ప్రియ, తెలంగాణ సహాయం కోసం మీ వ్యక్తిగత ఏజెంట్ (ఆధార్, రేషన్, కరెంట్, నీళ్లు, రోడ్లు, మురుగు). మీ పేరు ఏమిటి?',
+    askName: 'మీ పేరు ఏమిటి?',
     askNameAgain: 'క్షమించండి — మీ పేరు ఏమిటి?',
     askProblem: (name: string) => `సరే, ${name}. ఏ సమస్యలో సహాయం కావాలి?`,
     askArea: (name: string) =>
@@ -147,14 +193,16 @@ const COPY = {
     sendFailed: 'మెయిల్ వెళ్లలేదు. మీ వివరాలు దాచాం. డిపార్ట్‌మెంట్ నంబర్‌కు కూడా కాల్ చేయండి.',
     noMail: 'ఈ శాఖ ఫోన్/వెబ్‌సైట్ ఇచ్చింది. మా వైపు నమోదు + ఫాలో-అప్ కావాలంటే మొబైల్, ఇమెయిల్ పంపండి.',
     offer: 'మా డెస్క్ నుంచి escalate చేయాలంటే మొబైల్, ఇమెయిల్, ప్రాంతం పంపండి. పంపే ముందు మెయిల్ చూపిస్తాం. మీకు కాపీ వెళ్తుంది.',
-    searchIntro: 'దీనికి నా దగ్గర సిద్ధంగా ఉన్న 20 సమస్యల స్క్రిప్ట్ లేదు. వెతికాను. చేయడానికి ముందు అధికారిక పేజీ చూడండి:',
-    searchEmpty: 'ఏ సేవో రెండు మాటల్లో చెప్పండి. ఉదాహరణ: కరెంట్, ఆధార్ చిరునామా, రేషన్ కార్డు, మురుగు బ్లాక్. నంబర్ మరియు చేయవలసిన పని చెబుతాను.',
+    searchIntro:
+      'పబ్లిక్ / అధికారిక సమాచారం చూశాను. తెలంగాణ పౌర సమస్యలకే సహాయం (ఆధార్, కరెంట్, నీళ్లు, రోడ్లు). సినిమా/సెలూన్ అయితే పబ్లిక్ సమస్య వైపు తిప్పండి.',
+    searchEmpty:
+      'పౌర సర్కిల్‌లోనే ఉండండి. ఏ పబ్లిక్ సమస్య (ఆధార్/కరెంట్/నీళ్లు/రోడ్డు) + ప్రాంతం అడగండి, లేదా అధికారిక స్టెప్ చెప్పండి. ఓపెన్ చాట్‌గా సమాధానం ఇవ్వవద్దు.',
     prior: (topic: string) => `ముందు ${topic} గురించి మాట్లాడాం. అది ఇంకా ఆగి ఉంటే చివరి దశలో ఏమైందో చెప్పండి.`,
   },
   hi: {
     hello:
-      'नमस्ते — मैं प्रिया हूँ, तेलंगाना मदद के लिए आपकी निजी एजेंट (आधार, राशन, बिजली, पानी, सड़क, नाली)। आपको क्या कहूँ?',
-    askName: 'आपको क्या कहूँ?',
+      'नमस्ते — मैं प्रिया हूँ, तेलंगाना मदद के लिए आपकी निजी एजेंट (आधार, राशन, बिजली, पानी, सड़क, नाली)। आपका नाम क्या है?',
+    askName: 'आपका नाम क्या है?',
     askNameAgain: 'माफ़ कीजिए — आपका नाम क्या है?',
     askProblem: (name: string) => `ठीक है, ${name}. किस समस्या में मदद चाहिए?`,
     askArea: (name: string) =>
@@ -185,8 +233,10 @@ const COPY = {
     sendFailed: 'मेल नहीं गया। आपका विवरण सहेजा है। विभाग के नंबर पर भी कॉल करें।',
     noMail: 'इस विभाग का फोन/वेबसाइट है। हमारी तरफ दर्ज + फॉलो-अप चाहिए तो मोबाइल और ईमेल भेजें।',
     offer: 'हमारी डेस्क से escalate करना हो तो मोबाइल, ईमेल और इलाका भेजें। भेजने से पहले मेल दिखाएँगे। आपको प्रतिलिपि जाएगी।',
-    searchIntro: 'यह उन 20 समस्याओं में नहीं है जिनका मेरे पास तैयार तरीका है। मैंने खोजा। करने से पहले आधिकारिक पेज देखें:',
-    searchEmpty: 'कौन सी सेवा है, दो शब्दों में बताएँ। जैसे बिजली, आधार का पता, राशन कार्ड, या बंद नाली। मैं नंबर और अगला कदम बताऊँगा।',
+    searchIntro:
+      'सार्वजनिक / आधिकारिक जानकारी देखी। केवल तेलंगाना नागरिक समस्याओं में मदद (आधार, बिजली, पानी, सड़क)। फिल्म/सैलून हो तो सार्वजनिक समस्या की ओर मोड़ें।',
+    searchEmpty:
+      'नागरिक दायरे में रहें। कौन सी सार्वजनिक समस्या (आधार/बिजली/पानी/सड़क) + इलाका पूछें, या आधिकारिक कदम बताएँ। खुली ChatGPT चैट न दें।',
     prior: (topic: string) => `पहले ${topic} पर बात हुई थी। वही अभी भी अटका है तो आखिरी कदम पर क्या हुआ बताएँ।`,
   },
 } as const
@@ -253,7 +303,15 @@ export async function handleGuideTurn(args: {
     if (memory.name && !session.contact.name) session.contact.name = memory.name
     if (memory.phone && !session.contact.phone) session.contact.phone = memory.phone
     if (memory.email && !session.contact.email) session.contact.email = memory.email
-    if (memory.areas[0] && !session.contact.place) session.contact.place = memory.areas[0]
+    // Only seed Telangana places; never re-apply after citizen starts a fresh problem
+    if (!session.contact.place && !session.contact.block_memory_place) {
+      const tgArea = memory.areas.find((area) => area && !looksOutsideTelangana(area))
+      if (tgArea) session.contact.place = tgArea
+    }
+    // Drop a stale out-of-state place stuck on the session
+    if (session.contact.place && looksOutsideTelangana(session.contact.place)) {
+      session.contact.place = undefined
+    }
     if (args.citizenName && !session.contact.name) session.contact.name = args.citizenName
     if (args.citizenPhone && !session.contact.phone) {
       session.contact.phone = args.citizenPhone.replace(/\D/g, '').slice(-10)
@@ -262,7 +320,7 @@ export async function handleGuideTurn(args: {
   }
   let memoryPrompt = memoryContextForPrompt(memory)
   if (session.contact.active_case_title) {
-    memoryPrompt = `${memoryPrompt}\nFOCUSED CASE: "${session.contact.active_case_title}" (${session.contact.active_case_kind ?? 'case'} ${session.contact.active_case_id ?? ''}). Prefer answering about this case unless they clearly change topic.`.trim()
+    memoryPrompt = `${memoryPrompt}\nFOCUSED CASE: "${session.contact.active_case_title}" (${session.contact.active_case_kind ?? 'case'} ${session.contact.active_case_id ?? ''}). Prefer answering about this case unless they clearly change topic. Ignore non-Telangana locations in old case text.`.trim()
   }
 
   syncPhase(session)
@@ -315,6 +373,49 @@ export async function handleGuideTurn(args: {
     return replyWith(session, lang, [prior ? COPY[lang].prior(prior) : '', COPY[lang].satisfied].filter(Boolean).join('\n\n'), playbookById(session.problem_id), [], false)
   }
 
+  // Hard divert: lifestyle/personal (movies, salons, fights) OR coding/math — stay in civic circle
+  if (isLifestyleOutOfScopeQuery(text)) {
+    if (isLifestyleOutOfScopeQuery(session.contact.problem_summary || '')) {
+      session.contact.problem_summary = undefined
+      session.contact.needs_area = undefined
+      session.problem_id = null
+      session.contact.close_offered = false
+    }
+    session.phase = session.contact.name ? 'ask_problem' : session.phase
+    return replyWith(session, lang, civicScopeRedirect(lang, session.contact.name?.trim() || ''), null, [], false)
+  }
+  if (OFF_TOPIC.test(text)) {
+    return replyWith(
+      session,
+      lang,
+      offTopicReply(lang, session.contact.name?.trim() || ''),
+      playbookById(session.problem_id),
+      [],
+      false,
+    )
+  }
+
+  // Outside Telangana → scope reply (do not give GHMC / TG advice for Punjab etc.)
+  if (looksOutsideTelangana(text) || looksOutsideTelangana(session.contact.place)) {
+    // If they just corrected INTO Telangana in this message, keep going
+    if (looksOutsideTelangana(text)) {
+      if (session.contact.place && looksOutsideTelangana(session.contact.place)) {
+        session.contact.place = undefined
+      }
+      const turn = await replyWith(
+        session,
+        lang,
+        outsideTelanganaReply(lang, session.contact.name?.trim() || ''),
+        playbookById(session.problem_id),
+        [],
+        false,
+      )
+      return turn
+    }
+    // Stale out-of-state place on file — clear and ask for TG area instead of advising wrong city
+    session.contact.place = undefined
+  }
+
   // Short thanks — no dual-path boilerplate
   if (THANKS_ONLY.test(text)) {
     const nm = session.contact.name?.trim()
@@ -360,24 +461,46 @@ export async function handleGuideTurn(args: {
   const ladderReply = await handleIntakeLadder(session, lang, text, args.orgId, history)
   if (ladderReply) return ladderReply
 
+  // Lifestyle leftover on file (e.g. earlier movie ask) — clear and redirect once
+  if (isLifestyleOutOfScopeQuery(session.contact.problem_summary || '')) {
+    session.contact.problem_summary = undefined
+    session.contact.needs_area = undefined
+    session.problem_id = null
+    session.contact.close_offered = false
+    session.phase = 'ask_problem'
+    return replyWith(session, lang, civicScopeRedirect(lang, session.contact.name?.trim() || ''), null, [], false)
+  }
+
   const existing = playbookById(session.problem_id)
-  const latestOnly = matchPlaybook(text)
+  // Place-only replies ("Road No. 4, KPHB" / "Power Welfare Society") must not rematch civic topics
+  const placeReply =
+    isPlaceReplyForCurrentIssue(text) ||
+    (looksLikeAddress(text) && !looksLikeProblem(text.replace(/\b(rd|road|society|colony|nagar|phase)\b/gi, ' ')))
+  const skipCivicRematch = placeReply
+  const latestOnly = skipCivicRematch ? null : matchPlaybook(text)
   const problemBlob = [session.contact.problem_summary, text].filter(Boolean).join('\n')
-  let playbook = latestOnly?.playbook ?? matchPlaybook(problemBlob)?.playbook ?? existing ?? null
+  let playbook: Playbook | null =
+    latestOnly?.playbook ??
+    (skipCivicRematch && existing ? existing : null) ??
+    (skipCivicRematch ? null : matchPlaybook(problemBlob)?.playbook) ??
+    existing ??
+    null
 
   // Switching topics: latest message matches a different playbook → switch, don't stay stuck
-  if (existing && latestOnly?.playbook && latestOnly.playbook.id !== existing.id) {
+  if (existing && latestOnly?.playbook && latestOnly.playbook.id !== existing.id && !skipCivicRematch) {
     playbook = latestOnly.playbook
     session.contact.problem_summary = text.slice(0, 500)
     session.contact.needs_area = undefined
     session.contact.close_offered = false
     session.contact.place = problemNeedsArea(text) ? undefined : session.contact.place
     session.draft = null
-  } else if (existing && playbook && playbook.id !== existing.id && staysOnTopic(text, existing)) {
+  } else if (existing && playbook && playbook.id !== existing.id && (skipCivicRematch || staysOnTopic(text, existing))) {
     playbook = existing
   }
 
-  if (!playbook) playbook = await classifyPlaybook(session, text)
+  if (!playbook && !skipCivicRematch) {
+    playbook = await classifyPlaybook(session, text)
+  }
   if (playbook) session.problem_id = playbook.id
   session.phase = 'help'
 
@@ -393,16 +516,25 @@ export async function handleGuideTurn(args: {
   }
 
   const followUp = history.filter((m) => m.role === 'user').length > 1
-  const needsResearch = !playbook || followUp || /document|option|how|what|step|website|family|father|mother|otp|పత్ర|कैसे|दस्तावेज़|pan\b|aadhaar|aadhar/i.test(text)
-  const hits = needsResearch ? await searchPublicWeb(text, researchFocus(playbook)) : []
+  const needsResearch =
+    !playbook ||
+    followUp ||
+    /document|option|how|what|step|website|family|father|mother|otp|pin\s*code|pincode|postal|పత్ర|कैसे|दस्तावेज़|pan\b|aadhaar|aadhar/i.test(
+      text,
+    )
+  const researchQuery = [session.contact.problem_summary, session.contact.place, text]
+    .filter(Boolean)
+    .join(' ')
+    .slice(0, 180)
+  // Civic / official search only — no salon/movie DuckDuckGo fan-out (saves credits + stays on mission)
+  const hits = needsResearch ? await searchPublicWeb(researchQuery || text, researchFocus(playbook)) : []
   const wantsRecord = WANTS_RECORD.test(text)
 
   let body: string
   let draft: GuideDraft | null = null
   if (!playbook) {
-    body = hits.length
-      ? await phrase(session, lang, COPY[lang].searchIntro, history, hits, memoryPrompt)
-      : COPY[lang].searchEmpty
+    // Open civic help only — never ChatGPT-style lifestyle answers
+    body = await answerOpen(session, lang, history, hits, memoryPrompt, text)
   } else if (wantsRecord && playbook.mode === 'department') {
     const mailTo = departmentEmail(playbook)
     const required = mailTo ? ['name', 'phone', 'email', 'place'] : ['name', 'phone', 'place']
@@ -429,7 +561,7 @@ export async function handleGuideTurn(args: {
     body = await answerDirect(session, lang, playbook, history, hits, memoryPrompt)
   }
 
-  // Dual-path close ONLY once, and only for local department grievances (not PAN/Aadhaar self-serve)
+  // Dual-path close ONLY once, only for real civic department grievances
   const shouldOfferClose =
     !wantsRecord &&
     !session.contact.close_offered &&
@@ -466,6 +598,7 @@ function resetCurrentProblem(session: GuideSession): void {
   session.contact.needs_area = undefined
   session.contact.close_offered = false
   session.contact.place = undefined
+  session.contact.block_memory_place = true
   session.draft = null
   session.contact.active_case_id = undefined
   session.contact.active_case_kind = undefined
@@ -611,9 +744,9 @@ async function refreshNeedsAreaHint(session: GuideSession, latestText: string): 
   const problem = (session.contact.problem_summary || latestText || '').trim()
   if (!problem || !looksLikeProblem(problem)) return
 
-  if (session.contact.needs_area === undefined) {
-    // Local heuristic first (covers electricity even if Dify is down)
-    if (problemNeedsArea(problem)) session.contact.needs_area = true
+  // Local civic heuristic wins; Dify may only turn area ON, never clear a local need
+  if (problemNeedsArea(problem)) {
+    session.contact.needs_area = true
   }
 
   const dify = await difyIntakeClassify({
@@ -623,7 +756,8 @@ async function refreshNeedsAreaHint(session: GuideSession, latestText: string): 
     name: session.contact.name ?? null,
   })
   if (!dify) return
-  session.contact.needs_area = dify.needs_area
+  if (dify.needs_area) session.contact.needs_area = true
+  else if (session.contact.needs_area !== true) session.contact.needs_area = dify.needs_area
   if (dify.summary && !session.contact.problem_summary) {
     session.contact.problem_summary = dify.summary.slice(0, 500)
   }
@@ -661,10 +795,14 @@ function absorbLadderSlots(text: string, session: GuideSession): void {
 
   // Place: absorb soft city from "from hyderabad", or a full address when asked / volunteered
   if (slots.place) {
-    if (!session.contact.place || isVaguePlace(session.contact.place) || looksLikeAddress(text)) {
-      // Prefer a specific address over a vague city we already had
-      if (!isVaguePlace(slots.place) || !session.contact.place) {
+    if (looksOutsideTelangana(slots.place)) {
+      // Keep out-of-state text visible to the outside-TG gate; don't lock GHMC advice to it
+      session.contact.place = slots.place
+    } else if (!session.contact.place || isVaguePlace(session.contact.place) || looksLikeAddress(text) || looksOutsideTelangana(session.contact.place || '')) {
+      // Prefer a specific Telangana address; overwrite stale out-of-state memory places
+      if (!isVaguePlace(slots.place) || !session.contact.place || looksOutsideTelangana(session.contact.place || '')) {
         session.contact.place = slots.place
+        session.contact.block_memory_place = true
       }
     }
   }
@@ -698,16 +836,16 @@ async function naturalAsk(
 
   const goal =
     intent === 'greet'
-      ? 'Greet warmly as Priya, their personal Telangana help agent. Ask only for their name. One or two short sentences.'
+      ? 'Greet warmly as Priya, their personal Telangana help agent. Ask only for their name (say “name” / పేరు / नाम clearly). One or two short sentences.'
       : intent === 'ask_name'
-        ? 'Ask only for their name, briefly and politely. One short sentence.'
+        ? 'Ask only for their name, briefly and politely. Use the word name / పేరు / नाम. One short sentence.'
         : intent === 'ask_problem'
-          ? `You already know their name is ${name || '(unknown)'}. Acknowledge it naturally. Ask only what problem they need help with. Do NOT ask for address, phone, or email yet. One or two short sentences.`
-          : `Name: ${name || 'unknown'}. Problem: ${problem || 'unknown'}. Soft place hint: ${place || 'none'}. Ask only for a more specific local address (colony / street / landmark). Do NOT ask phone or email. One or two short sentences.`
+          ? `You already know their name is ${name || '(unknown)'}. Acknowledge that name once. Ask ONLY what problem they need help with. Do NOT ask again for their name or “full name”. Do NOT ask for address, phone, or email yet. One or two short sentences.`
+          : `Name: ${name || 'unknown'}. Problem: ${problem || 'unknown'}. Soft place hint: ${place || 'none'}. Ask only for a more specific local address (colony / street / landmark). Do NOT ask phone or email. Do NOT change the problem topic. One or two short sentences.`
 
   const result = await llmText({
     agent: 'guide',
-    promptVersion: 'guide.ladder.v1',
+    promptVersion: 'guide.ladder.v2',
     orgId: session.organization_id,
     language: lang,
     system: `You are Priya, a warm personal help agent for people in Telangana (Bharosa / My Leader). Speak ${languageName}.
@@ -715,7 +853,7 @@ Sound human — not a form, not a script. Vary your wording. No bullets, no mark
 ${goal}
 If the seed below helps, paraphrase it; do not copy it word-for-word unless the model fails.`,
     messages: [...recent, { role: 'user', content: `Seed (paraphrase, do not quote): ${seed}` }],
-    temperature: 0.55,
+    temperature: 0.45,
     maxTokens: 120,
   })
   const text = result.ok ? result.text.trim() : ''
@@ -790,6 +928,8 @@ async function handleIntakeLadder(
       const line = await naturalAsk(session, lang, history, 'ask_problem', COPY[lang].askProblem(name || 'there'))
       return replyWith(session, lang, line, null, [], false)
     }
+    // Lock playbook as soon as the problem is known (even before area)
+    const locked = await lockPlaybookFromProblem(session)
     // Problem known — only ask area when this issue type needs a local spot
     if (
       problemNeedsArea(session.contact.problem_summary, session.contact.needs_area) &&
@@ -797,22 +937,40 @@ async function handleIntakeLadder(
     ) {
       session.phase = 'ask_area'
       const line = await naturalAsk(session, lang, history, 'ask_area', COPY[lang].askArea(name))
-      return replyWith(session, lang, line, null, [], false)
+      return replyWith(session, lang, line, locked, [], false)
     }
     session.phase = 'help'
     return null
   }
 
   if (session.phase === 'ask_area') {
+    const locked = await lockPlaybookFromProblem(session)
     if (!session.contact.place || isVaguePlace(session.contact.place)) {
       if (session.contact.place && isVaguePlace(session.contact.place)) session.contact.place = undefined
       const line = await naturalAsk(session, lang, history, 'ask_area', COPY[lang].askArea(name || ''))
-      return replyWith(session, lang, line, null, [], false)
+      return replyWith(session, lang, line, locked, [], false)
     }
     session.phase = 'help'
   }
 
   return null
+}
+
+/** Match + persist playbook from problem_summary so area turns still expose problem.id. */
+async function lockPlaybookFromProblem(session: GuideSession): Promise<Playbook | null> {
+  const blob = (session.contact.problem_summary || '').trim()
+  // Lifestyle leftovers must not lock a civic playbook
+  if (blob && isLifestyleOutOfScopeQuery(blob)) {
+    session.problem_id = null
+    return null
+  }
+  const existing = playbookById(session.problem_id)
+  if (existing) return existing
+  if (!blob) return null
+  let playbook = matchPlaybook(blob)?.playbook ?? null
+  if (!playbook) playbook = await classifyPlaybook(session, blob)
+  if (playbook) session.problem_id = playbook.id
+  return playbook
 }
 
 async function continuityPrompt(session: GuideSession, lang: GuideLang, orgId: string): Promise<string | null> {
@@ -988,9 +1146,14 @@ async function classifyPlaybook(session: GuideSession, text: string): Promise<Pl
 }
 
 function staysOnTopic(text: string, existing: Playbook): boolean {
+  if (isPlaceReplyForCurrentIssue(text)) return true
   if (existing.id.startsWith('aadhaar') && /aadhaar|aadhar|uid|otp|document|proof|family|father|mother|parent|option|step|website|app|myaadhaar|ఆధార్|आधार|పత్ర|दस्तावेज़|परिवार/i.test(text)) {
     return true
   }
+  if (existing.id.startsWith('power') && /1912|outage|bill|meter|tgspdcl|tgnpdcl|కరెంట్|बिजली/i.test(text)) return true
+  if (existing.id === 'sewer' && /drain|sewer|overflow|మురుగు|नाली/i.test(text)) return true
+  if (existing.id === 'streetlight' && /light|lamp|దీపం|लाइट/i.test(text)) return true
+  if (existing.id === 'manhole' && /manhole|మ్యాన్|मैनहोल/i.test(text)) return true
   const title = existing.titles.en.split(' ').filter((word) => word.length > 4)
   return title.some((word) => text.toLowerCase().includes(word.toLowerCase()))
 }
@@ -1010,7 +1173,33 @@ async function answerDirect(
   hits: WebHit[],
   memoryPrompt = '',
 ): Promise<string> {
-  return phrase(session, lang, voiceFacts(playbook, lang), history, hits, memoryPrompt)
+  return phrase(session, lang, voiceFacts(playbook, lang), history, hits, memoryPrompt, 'playbook')
+}
+
+/** No fixed playbook — civic open help only: clarify public problems or redirect lifestyle. */
+async function answerOpen(
+  session: GuideSession,
+  lang: GuideLang,
+  history: GuideMessage[],
+  hits: WebHit[],
+  memoryPrompt: string,
+  latestText: string,
+): Promise<string> {
+  if (isLifestyleOutOfScopeQuery(latestText)) {
+    return civicScopeRedirect(lang, session.contact.name?.trim() || '')
+  }
+  const seed = hits.length ? COPY[lang].searchIntro : COPY[lang].searchEmpty
+  const fallback =
+    lang === 'te'
+      ? 'అర్థమైంది. మీ పబ్లిక్ సమస్యను కొంచెం స్పష్టం చెప్పండి — ఆధార్ / కరెంట్ / నీళ్లు / రోడ్డు లాంటివి, ఏ ప్రాంతం, సరిగ్గా ఏమి జరుగుతోంది? అప్పుడు అధికారిక స్టెప్ చెబుతాను.'
+      : lang === 'hi'
+        ? 'समझ गई। अपनी सार्वजनिक समस्या थोड़ा साफ़ बताइए — आधार / बिजली / पानी / सड़क जैसी, कौन सा इलाका, ठीक क्या दिक्कत है? फिर आधिकारिक कदम बताऊँगी।'
+        : 'Got it. Tell me the public problem a bit more clearly — for example Aadhaar, power, water, or roads — which area, and what exactly is going wrong? Then I will give the official next step.'
+  const text = await phrase(session, lang, seed, history, hits, memoryPrompt, 'open', latestText)
+  if (!text || /say which service|which service it is|కొన్ని మాటల్లో|कौन सी सेवा|20 problems|fixed script/i.test(text)) {
+    return fallback
+  }
+  return text
 }
 
 function voiceFacts(playbook: Playbook, lang: GuideLang): string {
@@ -1029,37 +1218,82 @@ async function phrase(
   history: GuideMessage[],
   hits: WebHit[] = [],
   memoryPrompt = '',
+  mode: 'playbook' | 'open' = 'playbook',
+  latestText = '',
 ): Promise<string> {
   const languageName = lang === 'te' ? 'Telugu' : lang === 'hi' ? 'Hindi' : 'English'
   const recent = history
     .filter((m) => m.role === 'user' || m.role === 'assistant')
-    .slice(-8)
+    .slice(-10)
     .map((m) => ({ role: m.role, content: m.body.slice(0, 700) }))
   const research = hits.length
-    ? hits.map((hit) => `${hit.title}. ${hit.snippet}`).join(' ')
-    : 'No extra page was found. Answer from the FACTS.'
+    ? hits.map((hit, i) => `${i + 1}. ${hit.title} — ${hit.snippet} (${hit.url})`).join('\n')
+    : 'No extra page was found yet. Ask one clarifying question about their public / civic problem.'
+  const openRules =
+    mode === 'open'
+      ? `You are Priya for Bharosa / My Leader — a CIVIC agent for Telangana public problems only, NOT an open ChatGPT.
+IN SCOPE: Aadhaar, ration, voter, PAN, power, water, drains, roads/potholes, garbage, streetlights, traffic as a public issue, certificates, MeeSeva, pensions, LPG — official steps, department numbers, how to file, help-desk escalate when they ask.
+OUT OF SCOPE (do not answer as ChatGPT): movies, salons, restaurants, gyms, shopping, dating, personal fights, coding, homework, entertainment. If they ask those, briefly say you help with public/civic problems and invite them to name one (Aadhaar / power / road / water etc.).
+Never say “say which service” as a cold menu dump — name 3–5 example public problems warmly.
+If the ask is vague (“help me”, “problem”), ask which public issue and which colony/landmark — one short question.
+If they already named a civic issue + area, give practical official next steps using RESEARCH; use short paragraphs / numbered lists with line breaks.
+Understand typos (Gachibowli / hydrabad). Telangana only — if another state, say you only cover TG.
+Do not invent shop lists, showtimes, or salon prices.`
+      : `Answer from FACTS and RESEARCH. If they changed topic, drop the previous issue completely — do not mention electricity, power cuts, TSSPDCL, or the old problem unless they asked about it again.
+If the latest message is a short local follow-up (pin code, spelling of the area, which station / office, landmark), answer THAT from RESEARCH or common knowledge — do not paste the whole complaint script again.
+Scope: Telangana civic / public problems only. Do not advise using out-of-state places from chat history.`
+
   const result = await llmText({
     agent: 'guide',
-    promptVersion: 'guide.answer.v5',
+    promptVersion: mode === 'open' ? 'guide.open.v4' : 'guide.answer.v7',
     orgId: session.organization_id,
     language: lang,
-    system: `You are Priya, personal help agent for Bharosa / My Leader in Telangana. Speak ${languageName}, warmly and plainly.
-Citizen name: ${session.contact.name ?? 'unknown'}. Area: ${session.contact.place ?? 'not given yet'}.
-Answer ONLY the citizen's latest message. If they changed topic, drop the previous issue completely — do not mention electricity, power cuts, TSSPDCL, or the old problem unless they asked about it again.
-Do not append a fixed closing about Help Desk / leadership / share mobile and email — that is added separately when needed.
-Give a direct useful answer from FACTS and RESEARCH (3–6 sentences). Official steps and site names are fine; no raw URLs, no bullets, no markdown.
+    system: `You are Priya, civic help agent for Bharosa / My Leader — Telangana public problems only. Speak ${languageName}, warmly and plainly.
+Citizen name: ${session.contact.name ?? 'unknown'}. Area on file: ${session.contact.place ?? 'not given yet'}. Problem so far: ${session.contact.problem_summary ?? 'not locked yet'}.
+Answer ONLY the citizen's latest message — stay inside the civic circle.
+Do not append a fixed closing about Help Desk / leadership / share mobile and email — that is added separately when needed (civic complaints only).
+${mode === 'open' ? 'Give a direct useful civic answer (2–8 short sentences or a short list with line breaks). If out of scope, redirect to public problems.' : 'Give a direct useful answer (2–6 sentences).'} Official steps and site names are fine; avoid raw URL spam. Light markdown OK for open (**bold**, numbered lists).
 Do not ask for Aadhaar number, PAN number, OTP, or bank details.
+${openRules}
 ${memoryPrompt ? `\n${memoryPrompt}\n` : ''}
-FACTS:
+FACTS / GUIDANCE SEED:
 ${facts}
-RESEARCH:
+RESEARCH (official / public web snippets — use for civic steps only):
 ${research}`,
     messages: recent,
-    temperature: 0.2,
-    maxTokens: 500,
+    temperature: mode === 'open' ? 0.3 : 0.2,
+    maxTokens: mode === 'open' ? 700 : 500,
+    // No live web-search tool here — DuckDuckGo snippets already in RESEARCH when needed
+    enableWebSearch: false,
   })
-  const latestUser = [...history].reverse().find((m) => m.role === 'user')?.body ?? ''
-  return spokenAnswer(result.ok ? result.text : facts, facts, latestUser)
+  const latestUser =
+    latestText || [...history].reverse().find((m) => m.role === 'user')?.body || ''
+  const raw = result.ok ? result.text : facts
+  if (mode === 'open') {
+    return stripAccidentalDeskCta(preserveChatFormatting(raw)).slice(0, 3200) || facts
+  }
+  return spokenAnswer(raw, facts, latestUser)
+}
+
+/** Keep paragraphs / numbered lists readable in the chat UI (do not flatten to one line). */
+function preserveChatFormatting(text: string): string {
+  return text
+    .replace(/\r\n/g, '\n')
+    .replace(/[ \t]+\n/g, '\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim()
+}
+
+/** Safety net: models sometimes paste civic dual-path copy into movie/salon answers. */
+function stripAccidentalDeskCta(text: string): string {
+  const cut = text.search(
+    /\n+(You can try the official route|we can also take it up from our side|this help desk works with the local leadership|If you want us to raise this with the authority|share your mobile and email\. We record it|Official:\s*call\s+TGSPDCL|call TGSPDCL \(southern power)/i,
+  )
+  if (cut > 80) return text.slice(0, cut).trim()
+  return text
+    .replace(/\s*You can try the official route yourself[\s\S]*$/i, '')
+    .replace(/\s*If you want us to raise this with the authority[\s\S]*$/i, '')
+    .trim()
 }
 
 async function rememberGuideTurn(

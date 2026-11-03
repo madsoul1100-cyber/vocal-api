@@ -849,9 +849,11 @@ const HINTS: { id: string; re: RegExp }[] = [
   { id: 'water_leak', re: /pipe|leak|పైపు|లీకేజ|पाइप|लीकेज|रिसाव/i },
   { id: 'water_supply', re: /water|నీళ్లు|నీటి|पानी/i },
   { id: 'garbage', re: /garbage|trash|waste|చెత్త|कचरा|कूड़ा/i },
-  { id: 'encroachment', re: /encroach|parking|ఆక్రమణ|పార్కింగ్|अतिक्रमण|पार्किंग/i },
-  { id: 'roads', re: /pothole|road|రోడ్డు|గుంత|सड़क|गड्ढ/i },
-  { id: 'power_outage', re: /electric|\bpower\b|outage|voltage|current\s+(cut|problem|issue|gone)|no\s+current|కరెంట్|విద్యుత్|बिजली|करंट/i },
+  { id: 'encroachment', re: /encroach|parking|traffic|jam|congestion|ఆక్రమణ|పార్కింగ్|ట్రాఫిక్|अतिक्रमण|पार्किंग|ट्रैफिक|जाम/i },
+  // Avoid bare "road" — addresses like "Road No. 4" must not steal other civic topics
+  { id: 'roads', re: /pothole|pot\s*hole|bad\s+road|damaged\s+road|broken\s+road|road\s+(is|has|near).{0,30}(broken|bad|damage|pit|hole)|రోడ్డు|గుంత|सड़क|गड्ढ/i },
+  // Avoid bare "power" — place names like "Power Welfare Society" must not match electricity
+  { id: 'power_outage', re: /electric|\bpower\s+(cut|out|issue|problem|failure|supply)\b|\bno\s+power\b|outage|voltage|current\s+(cut|problem|issue|gone)|no\s+current|no\s+electricity|కరెంట్|విద్యుత్|बिजली|करंट/i },
   { id: 'aadhaar_mobile', re: /(aadhaar|aadhar|ఆధార్|आधार).{0,40}(mobile|phone|number|నంబర్|मोबाइल|फोन)|(mobile|phone|నంబర్|मोबाइल).{0,40}(aadhaar|aadhar|ఆధార్|आधार)/i },
   { id: 'aadhaar_address', re: /(aadhaar|aadhar|ఆధార్|आधार).{0,40}(address|చిరునామా|पता)|(address|చిరునామా|पता).{0,40}(aadhaar|aadhar|ఆధార్|आधार)/i },
   { id: 'aadhaar_name_dob', re: /(aadhaar|aadhar|ఆధార్|आधार).{0,30}(name|dob|birth|పేరు|తేదీ|नाम|जन्म)/i },

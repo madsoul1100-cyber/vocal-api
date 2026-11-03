@@ -18,12 +18,20 @@ const NEW_ISSUE_INTENT =
 const SKIP_CONTACT =
   /^(skip|later|no|nahi|ledu|pass|none|వద్దు|తర్వాత|नहीं|बाद में|छोड़)\s*[!.]?$/iu
 
-/** Civic / local issues where a pinpoint place actually matters. */
-const NEEDS_AREA =
-  /\b(road|drain|drainage|sewer|sewage|blockage|blocked|clog|garbage|water|power|electric|electricity|outage|current|street|light|pothole|manhole|pipe|flood|leak|overflow|కరెంట్|చెత్త|మురుగు|రోడ్|నీరు|सड़क|नाली|कचरा|पानी|बिजली)\b/i
+/** Word-ish boundary that works for Latin AND Telugu/Hindi (JS \\b does not). */
+const WB = String.raw`(?<![\p{L}\p{N}_])`
+const WE = String.raw`(?![\p{L}\p{N}_])`
 
-const PROBLEM_HINT =
-  /\b(road|drain|drainage|sewer|sewage|blockage|blocked|clog|clogged|overflow|manhole|pipe|pipeline|garbage|water|power|electric|aadhaar|aadhar|ration|voter|pan|street|light|toilet|pension|police|dog|stray|leak|broken|flood|smell|stink|dirty|problem|issue|complaint|help|రోడ్|మురుగు|చెత్త|నీరు|కరెంట్|ఆధార్|సమస్య|सड़क|नाली|कचरा|पानी|बिजली|आधार|समस्या|शिकायत)\b/i
+/** Civic / local issues where a pinpoint place actually matters. */
+const NEEDS_AREA = new RegExp(
+  `${WB}(road|drain|drainage|sewer|sewage|blockage|blocked|clog|garbage|water|power|electric|electricity|outage|current|street|light|pothole|manhole|pipe|flood|leak|overflow|traffic|jam|congestion|parking|కరెంట్|చెత్త|మురుగు|రోడ్|నీరు|నీళ్లు|ట్రాఫిక్|सड़क|नाली|कचरा|पानी|बिजली|ट्रैफिक)${WE}`,
+  'iu',
+)
+
+const PROBLEM_HINT = new RegExp(
+  `${WB}(road|drain|drainage|sewer|sewage|blockage|blocked|clog|clogged|overflow|manhole|pipe|pipeline|garbage|water|power|electric|aadhaar|aadhar|ration|voter|pan|street|light|toilet|pension|police|dog|stray|leak|broken|flood|smell|stink|dirty|problem|issue|complaint|help|traffic|jam|congestion|parking|salon|saloon|spa|restaurant|clinic|hospital|gym|pharmacy|రోడ్|మురుగు|చెత్త|నీరు|నీళ్లు|కరెంట్|ఆధార్|సమస్య|ట్రాఫిక్|सड़क|नाली|कचरा|पानी|बिजली|आधार|समस्या|शिकायत|पता|ट्रैफिक)${WE}`,
+  'iu',
+)
 
 const VAGUE_PLACE =
   /^(telangana|hyderabad|hydrabad|warangal|india|tg|ts|హైదరాబాద్|తెలంగాణ|हैदराबाद|तेलंगाना)\s*$/i
@@ -76,18 +84,81 @@ export function isVaguePlace(text: string): boolean {
   return false
 }
 
+const TELANGANA_PLACE =
+  /\b(telangana|hyderabad|hydrabad|secunderabad|gachibowli|gachbowli|gachiboli|narsingi|manchirevula|kukatpally|kphb|madhapur|hitec|hitech|warangal|karimnagar|nizamabad|khammam|mahbubnagar|rangareddy|medchal|sanga\s*reddy|uppal|lb\s*nagar|amberpet|shaikpet|bachupally|miyapur|హైదరాబాద్|తెలంగాణ|हैदराबाद|तेलंगाना)\b/i
+
+/** Clear other-state / other-city signals (Priya is Telangana-only). */
+const OUTSIDE_TELANGANA =
+  /\b(punjab|mohali|chandigarh|ludhiana|amritsar|delhi|noida|gurgaon|gurugram|mumbai|pune|bangalore|bengaluru|chennai|kolkata|jaipur|lucknow|ahmedabad|kerala|karnataka|tamil\s*nadu|maharashtra|gujarat|rajasthan|bihar|odisha|assam|goa|haryana|uttar\s*pradesh|west\s*bengal|shimla|indore|bhopal|nagpur|surat|patna|ranchi|dehradun|sector\s*\d+)\b/i
+
+/** True when the text points at a place outside Telangana (and not also naming a TG place). */
+export function looksOutsideTelangana(text: string | null | undefined): boolean {
+  const t = (text || '').trim()
+  if (!t) return false
+  if (TELANGANA_PLACE.test(t)) return false
+  return OUTSIDE_TELANGANA.test(t)
+}
+
 /** True when the reply looks like a real address / colony line. */
 export function looksLikeAddress(text: string): boolean {
   const t = text.trim()
   if (t.length < 8) return false
   if (isShortGreeting(t)) return false
   if (/^(my name is|i am|i'm|నా పేరు|मेरा नाम)\b/i.test(t)) return false
+  // Second issue in same breath is not a place reply
+  if (/\b(also|another|plus|and also|one more).{0,40}\b(garbage|drain|sewer|aadhaar|pan|pension|light|power|water|road|manhole)\b/i.test(t)) {
+    return false
+  }
+  // "manhole on my street" / "parking near the market" = problem, not an address
+  const strongProblem =
+    /\b(manhole|pothole|garbage|sewer|drain|street\s*light|no\s+(water|electricity|power|current)|power\s+cut|water\s+leak|pipe\s+burst|pension|aadhaar|aadhar|\bpan\b|encroach|illegal\s+park)\b/i
+  const hasSpecificPlace =
+    /\d{5,6}/.test(t) ||
+    (/,/.test(t) && t.length >= 20) ||
+    /\b(colony|nagar|society|phase|plot|h\.?\s*no|landmark|kphb|gachibowli|narsingi|manchirevula|bachupally|kukatpally|uppal|amberpet|shaikpet|jubilee|osman|lb\s*nagar|saroornagar)\b/i.test(
+      t,
+    )
+  if (strongProblem.test(t) && !hasSpecificPlace) return false
+
   if (/\d{5,6}/.test(t)) return true // pin code
   if (/,/.test(t) && t.length >= 20) return true
-  if (/\b(rd|road|colony|nagar|society|ward|gali|street|lane|plot|h\.?\s*no|osman|manchirevula|narsingi)\b/i.test(t)) {
+  if (
+    /\b(rd|road\s*no|road number|colony|nagar|society|ward|gali|lane|plot|phase|h\.?\s*no|osman|manchirevula|narsingi|bachupally|kukatpally|kphb|gachibowli|uppal|amberpet|jubilee|landmark)\b/i.test(
+      t,
+    )
+  ) {
     return true
   }
-  // Long free-text with place words, but not a plain name intro
+  // Bare "street" / "road" only count with another place signal
+  if (/\b(street|road)\b/i.test(t) && hasSpecificPlace) return true
+  // Telugu / Hindi place-ish lines (colony + city)
+  if (/[\u0C00-\u0C7F]{3,}/.test(t) && /(హైదరాబాద్|నర్సింగి|కాలనీ|కాలని)/.test(t)) return true
+  if (/[\u0900-\u097F]{3,}/.test(t) && /(हैदराबाद|कॉलोनी|नगर)/.test(t)) return true
+  return false
+}
+
+/**
+ * True when this user turn is almost certainly supplying a place for the
+ * current issue — not naming a new civic/self-serve topic.
+ * Prevents "Road No. 4, KPHB" from rematching the roads playbook.
+ */
+export function isPlaceReplyForCurrentIssue(text: string): boolean {
+  const t = text.trim()
+  if (!t) return false
+  if (!looksLikeAddress(t)) return false
+  // Strip place boilerplate; leftover should not look like a fresh problem
+  const stripped = t
+    .replace(
+      /\b(rd|road\s*no\.?|road number|road|street|lane|colony|nagar|society|ward|gali|plot|phase|h\.?\s*no\.?|near|beside|at|in|hyderabad|warangal|secunderabad|kukatpally|kphb|gachibowli|narsingi|manchirevula|bachupally|uppal|amberpet|shaikpet|lb\s*nagar|saroornagar|landmark|bus\s*depot|apartment|gate)\b/gi,
+      ' ',
+    )
+    .replace(/\d+/g, ' ')
+    .replace(/[.,/\\\-]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim()
+  if (stripped.length <= 3) return true
+  // Remaining tokens are mostly proper nouns (area names) — still a place reply
+  if (stripped.split(/\s+/).length <= 4 && !PROBLEM_HINT.test(stripped)) return true
   return false
 }
 
@@ -102,13 +173,17 @@ export function extractNamedIntro(text: string): string | null {
 export function extractBareName(text: string): string | null {
   const t = text.trim()
   if (!t || isShortGreeting(t)) return null
-  if (looksLikeProblem(t) && !/^(my name is|i am|i'm)/i.test(t)) return null
+  if (looksLikeProblem(t) && !/^(my name is|i am|i'm|నా పేరు|मेरा नाम)/i.test(t)) return null
   if (/[0-9@]/.test(t)) return null
   // "my name is anurag i am from hyderabad" → handled by extractNamedIntro
   const intro = extractNamedIntro(t)
   if (intro) return intro
-  if (t.split(/\s+/).length > 5) return null
-  if (!/^[\p{L}][\p{L} .']{1,50}$/u.test(t)) return null
+  // Real names are short — never swallow a whole Telugu/Hindi sentence as a name
+  const words = t.split(/\s+/).filter(Boolean)
+  if (words.length > 3) return null
+  if (t.length > 40) return null
+  // Allow combining marks (Telugu virama ్, Hindi matras already in letters, etc.)
+  if (!/^[\p{L}][\p{L}\p{M} .']{0,50}$/u.test(t)) return null
   return cleanName(t)
 }
 
@@ -145,9 +220,12 @@ function cleanName(raw: string): string | null {
   name = name.replace(/[,.].*$/, '').trim().slice(0, 40)
   if (name.length < 2) return null
   if (PROBLEM_HINT.test(name)) return null
+  name = name.replace(/\s+/g, ' ')
+  // Title-case Latin only — leave Telugu / Hindi / mixed scripts unchanged
+  if (/^[\p{Script=Latin}\s'.]+$/u.test(name)) {
+    name = name.replace(/\p{L}+/gu, (word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
+  }
   return name
-    .replace(/\s+/g, ' ')
-    .replace(/\p{L}+/gu, (word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
 }
 
 /**

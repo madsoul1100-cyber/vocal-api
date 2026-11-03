@@ -191,6 +191,8 @@ export async function llmText(args: {
   messages: Array<{ role: 'user' | 'assistant'; content: string }>
   temperature?: number
   maxTokens?: number
+  /** Live web grounding via OpenRouter (prices, ratings, local listings). */
+  enableWebSearch?: boolean
 }): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
   const model = modelFor(args.agent)
   const started = Date.now()
@@ -202,6 +204,18 @@ export async function llmText(args: {
     messages.push({ role: 'user', content: 'Help me with this.' })
   }
 
+  const body: Record<string, unknown> = {
+    model,
+    messages: [{ role: 'system', content: args.system }, ...messages],
+    temperature: args.temperature ?? 0.35,
+    max_tokens: args.maxTokens ?? 180,
+  }
+  if (args.enableWebSearch) {
+    // Prefer server tool; also keep web plugin for providers that still use it
+    body.tools = [{ type: 'openrouter:web_search' }]
+    body.plugins = [{ id: 'web', max_results: 8 }]
+  }
+
   try {
     const res = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
       method: 'POST',
@@ -210,13 +224,8 @@ export async function llmText(args: {
         Authorization: `Bearer ${apiKey}`,
         'X-Title': `Bharosa ${args.agent}`,
       },
-      body: JSON.stringify({
-        model,
-        messages: [{ role: 'system', content: args.system }, ...messages],
-        temperature: args.temperature ?? 0.35,
-        max_tokens: args.maxTokens ?? 180,
-      }),
-      signal: AbortSignal.timeout(25_000),
+      body: JSON.stringify(body),
+      signal: AbortSignal.timeout(args.enableWebSearch ? 45_000 : 25_000),
     })
     if (!res.ok) {
       const body = await res.text().catch(() => '')

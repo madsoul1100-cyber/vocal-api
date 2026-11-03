@@ -30,6 +30,8 @@ export interface GuideContactInfo {
   active_case_kind?: string
   active_case_id?: string
   active_case_title?: string
+  /** After “new problem”, do not re-seed place from old memory areas. */
+  block_memory_place?: boolean
 }
 
 export interface GuideDraft {
@@ -93,6 +95,7 @@ function asContact(value: unknown): GuideContactInfo {
     active_case_kind: pick('active_case_kind'),
     active_case_id: pick('active_case_id'),
     active_case_title: pick('active_case_title'),
+    block_memory_place: row.block_memory_place === true,
   }
 }
 
