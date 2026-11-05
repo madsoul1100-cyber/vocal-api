@@ -162,12 +162,49 @@ export function isPlaceReplyForCurrentIssue(text: string): boolean {
   return false
 }
 
+/**
+ * A name word. Includes combining marks (\p{M}): Telugu / Hindi vowel signs such as
+ * the "ి" in "రవి" are marks, not letters, so a letters-only class cut "రవి" to "రవ".
+ */
+const NAME_WORD = String.raw`[\p{L}][\p{L}\p{M}']*`
+
+/** Explicit name intros. */
+const STRONG_INTRO = new RegExp(
+  String.raw`(?:my name is|this is|నా పేరు|मेरा नाम)\s+(${NAME_WORD}(?:\s+${NAME_WORD}){0,2})`,
+  'iu',
+)
+/** "I am ..." style intros are ambiguous ("I am facing...", "I'm from..."), so they are filtered harder. */
+const WEAK_INTRO = new RegExp(
+  String.raw`(?:^|[\s,.;!?])(?:i am|i'm|నేను|मैं)\s+(${NAME_WORD}(?:\s+${NAME_WORD}){0,1})`,
+  'iu',
+)
+const NOT_A_NAME_START =
+  /^(not|from|in|at|on|near|here|there|a|an|the|very|so|also|just|still|really|trying|looking|facing|having|getting|unable|worried|angry|upset|tired|sorry|sure|new|calling|writing|asking|waiting|living|staying|stuck|confused|fine|good|ok|okay|happy|sad|late|going|coming)(?![\p{L}\p{M}])/iu
+
 export function extractNamedIntro(text: string): string | null {
-  const m = text.match(
-    /(?:my name is|i am|i'm|this is|నా పేరు|నేను|मेरा नाम|मैं)\s+([\p{L}][\p{L}']*(?:\s+[\p{L}][\p{L}']*){0,2})/iu,
-  )
-  if (!m?.[1]) return null
-  return cleanName(m[1])
+  const strong = text.match(STRONG_INTRO)
+  if (strong?.[1]) return cleanName(strong[1])
+  const weak = text.match(WEAK_INTRO)
+  if (weak?.[1]) {
+    if (NOT_A_NAME_START.test(weak[1])) return null
+    return cleanName(weak[1])
+  }
+  return null
+}
+
+const DECLINES_NAME = new RegExp(
+  [
+    String.raw`(?:rather not|prefer not|do not want to|don'?t want to|not comfortable|no need|not going to|won'?t|do not|don'?t|skip)[^.?!\n]{0,30}\b(?:name)\b`,
+    String.raw`\bname\b[^.?!\n]{0,25}\b(?:not|no need|skip|don'?t|private|secret)\b`,
+    String.raw`పేరు[^.?!\n]{0,20}(?:చెప్పను|చెప్పడం ఇష్టం లేదు|వద్దు|అవసరం లేదు|చెప్పక్కర్లేదు)`,
+    String.raw`नाम[^.?!\n]{0,20}(?:नहीं बताना|नहीं बताऊँ|नहीं बताऊंगा|नहीं बताऊंगी|ज़रूरी नहीं|जरूरी नहीं)`,
+  ].join('|'),
+  'iu',
+)
+
+/** True when the citizen says they do not want to give a name ("I'd rather not share my name"). */
+export function declinesName(text: string): boolean {
+  return DECLINES_NAME.test(text)
 }
 
 export function extractBareName(text: string): string | null {
@@ -216,7 +253,10 @@ function cleanName(raw: string): string | null {
   let name = raw.trim()
   // Cut at the first stop-word so "anurag i am from …" → "anurag"
   const stop = name.search(NAME_STOP)
+  if (stop === 0) return null // starts with "from / in / my ..." — not a name
   if (stop > 0) name = name.slice(0, stop)
+  // Trailing Hindi / Telugu verbs and particles ("अनीता है", "రవి అండి") are not part of the name.
+  name = name.replace(/\s+(?:है|हूँ|हूं|जी|hai|అండి|ఉన్నాను)\s*$/iu, '')
   name = name.replace(/[,.].*$/, '').trim().slice(0, 40)
   if (name.length < 2) return null
   if (PROBLEM_HINT.test(name)) return null

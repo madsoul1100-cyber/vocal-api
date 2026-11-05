@@ -124,25 +124,34 @@ export async function llmJson<S extends z.ZodTypeAny>(args: LlmJsonArgs<S>): Pro
 
   let raw: unknown
   try {
-    const res = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${apiKey}`,
-        'X-Title': `Bharosa ${args.agent}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages: [
-          { role: 'system', content: `${args.system}\n\nRespond with a single JSON object only. No prose, no code fences.` },
-          { role: 'user', content: args.user },
-        ],
-        temperature: args.temperature ?? 0.2,
-        max_tokens: args.maxTokens ?? 1500,
-        response_format: { type: 'json_object' },
-      }),
-      signal: AbortSignal.timeout(args.timeoutMs ?? 30_000),
-    })
+    const payload: Record<string, unknown> = {
+      model,
+      messages: [
+        { role: 'system', content: `${args.system}\n\nRespond with a single JSON object only. No prose, no code fences.` },
+        { role: 'user', content: args.user },
+      ],
+      temperature: args.temperature ?? 0.2,
+      max_tokens: args.maxTokens ?? 1500,
+      response_format: { type: 'json_object' },
+    }
+    // Guide classification uses tiny token limits; hidden thinking tokens would eat them and return empty JSON.
+    if (args.agent === 'guide') payload.reasoning = { enabled: false }
+    const post = (body: Record<string, unknown>) =>
+      fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: `Bearer ${apiKey}`,
+          'X-Title': `Bharosa ${args.agent}`,
+        },
+        body: JSON.stringify(body),
+        signal: AbortSignal.timeout(args.timeoutMs ?? 30_000),
+      })
+    let res = await post(payload)
+    if (res.status === 400 && 'reasoning' in payload) {
+      const { reasoning: _reasoning, ...plain } = payload
+      res = await post(plain)
+    }
     if (!res.ok) {
       const body = await res.text().catch(() => '')
       throw new Error(`OpenRouter ${res.status}: ${body.slice(0, 300)}`)
@@ -193,13 +202,13 @@ export async function llmText(args: {
   maxTokens?: number
   /** Live web grounding via OpenRouter (prices, ratings, local listings). */
   enableWebSearch?: boolean
-}): Promise<{ ok: true; text: string } | { ok: false; error: string }> {
+}): Promise<{ ok: true; text: string; truncated: boolean } | { ok: false; error: string }> {
   const model = modelFor(args.agent)
   const started = Date.now()
   const apiKey = process.env.OPENROUTER_API_KEY?.trim()
   if (!apiKey) return { ok: false, error: 'OPENROUTER_API_KEY not configured' }
 
-  const messages = args.messages.filter((m) => m.content.trim()).slice(-8)
+  const messages = args.messages.filter((m) => m.content.trim()).slice(-12)
   if (!messages.length || messages[messages.length - 1]?.role !== 'user') {
     messages.push({ role: 'user', content: 'Help me with this.' })
   }
@@ -209,6 +218,9 @@ export async function llmText(args: {
     messages: [{ role: 'system', content: args.system }, ...messages],
     temperature: args.temperature ?? 0.35,
     max_tokens: args.maxTokens ?? 180,
+    // Thinking tokens share the max_tokens budget on Gemini 2.5 / similar models, which is
+    // what cut replies off mid-word. Short civic answers do not need hidden reasoning.
+    reasoning: { enabled: false },
   }
   if (args.enableWebSearch) {
     // Prefer server tool; also keep web plugin for providers that still use it
@@ -216,34 +228,50 @@ export async function llmText(args: {
     body.plugins = [{ id: 'web', max_results: 8 }]
   }
 
-  try {
-    const res = await fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
+  type ChatResponse = { choices?: Array<{ message?: { content?: string }; finish_reason?: string | null }> }
+
+  async function call(payload: Record<string, unknown>): Promise<Response> {
+    return fetch(`${OPENROUTER_BASE_URL}/chat/completions`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
         Authorization: `Bearer ${apiKey}`,
         'X-Title': `Bharosa ${args.agent}`,
       },
-      body: JSON.stringify(body),
+      body: JSON.stringify(payload),
       signal: AbortSignal.timeout(args.enableWebSearch ? 45_000 : 25_000),
     })
+  }
+
+  try {
+    let res = await call(body)
+    if (res.status === 400 && 'reasoning' in body) {
+      // A provider that rejects the reasoning switch: retry once without it.
+      const { reasoning: _reasoning, ...plain } = body
+      res = await call(plain)
+    }
     if (!res.ok) {
       const body = await res.text().catch(() => '')
       throw new Error(`OpenRouter ${res.status}: ${body.slice(0, 300)}`)
     }
-    const data = (await res.json()) as { choices?: Array<{ message?: { content?: string } }> }
-    const text = (data.choices?.[0]?.message?.content ?? '').trim()
+    const data = (await res.json()) as ChatResponse
+    const choice = data.choices?.[0]
+    const text = (choice?.message?.content ?? '').trim()
     if (!text) throw new Error('Empty AI response')
+    const truncated = choice?.finish_reason === 'length'
+    if (truncated) {
+      console.warn(`[bharosa:ai] ${args.agent}/${args.promptVersion} hit max_tokens (${args.maxTokens ?? 180}); reply was cut`)
+    }
     await recordRun({
       ctx: args,
       agent: args.agent,
       model,
       promptVersion: args.promptVersion,
       status: 'succeeded',
-      output: { reply: text },
+      output: { reply: text, truncated },
       latencyMs: Date.now() - started,
     })
-    return { ok: true, text }
+    return { ok: true, text, truncated }
   } catch (err) {
     const error = err instanceof Error ? err.message : String(err)
     await recordRun({

@@ -1,5 +1,7 @@
 # Priya Guide — conversation test cases (top 20 playbooks)
 
+> **Update, Nov 2026:** the Guide no longer gates help behind a name or an area (test review of 4 Nov 2026). The name is optional, the area is asked after the answer, and the "name / area" ladder expectations below are historical. The current suite and the fixes are in [BHAROSA_REGRESSION_SUITE.md](./BHAROSA_REGRESSION_SUITE.md); `scripts/guide-conversation-evals.mjs` implements it.
+
 **Purpose:** Dummy multi-turn chats that prove Priya is proficient, elegant, and gives proper guidance — before / after manager feedback on which conversation styles to keep.
 
 **Date:** Oct 2026  

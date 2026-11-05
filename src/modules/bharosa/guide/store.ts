@@ -13,6 +13,10 @@ export interface GuideContactInfo {
   needs_area?: boolean
   /** Dual-path close already shown once for the current problem. */
   close_offered?: boolean
+  /** Help-desk offer shown once in this conversation; never repeat the same paragraph. */
+  desk_offered?: boolean
+  /** Citizen said they would rather not share a name. Never ask again. */
+  name_declined?: boolean
   /** Citizen chose skip/later for phone or email. */
   skipped_phone?: boolean
   skipped_email?: boolean
@@ -66,12 +70,12 @@ function asLang(value: string): GuideLang {
 }
 
 function asPhase(value: unknown): IntakePhase {
-  if (value === 'ask_name' || value === 'ask_problem' || value === 'ask_area' || value === 'help') {
-    return value
-  }
+  // The Guide no longer gates help behind a name or an area; old sessions resume without those steps.
+  if (value === 'ask_problem' || value === 'help') return value
+  if (value === 'ask_area') return 'help'
   // Old sessions that stored ask_phone / ask_email — treat as ready to help.
   if (value === 'ask_phone' || value === 'ask_email') return 'help'
-  return 'ask_name'
+  return 'ask_problem'
 }
 
 function asContact(value: unknown): GuideContactInfo {
@@ -86,6 +90,8 @@ function asContact(value: unknown): GuideContactInfo {
     problem_summary: pick('problem_summary'),
     needs_area: typeof row.needs_area === 'boolean' ? row.needs_area : undefined,
     close_offered: row.close_offered === true,
+    desk_offered: row.desk_offered === true,
+    name_declined: row.name_declined === true,
     skipped_phone: row.skipped_phone === true,
     skipped_email: row.skipped_email === true,
     case_list_offset: typeof row.case_list_offset === 'number' ? row.case_list_offset : undefined,
@@ -130,7 +136,7 @@ export async function createGuideSession(
     status: 'open',
     problem_id: null,
     citizen_id: citizenId ?? null,
-    phase: 'ask_name',
+    phase: 'ask_problem',
     contact: {},
     draft: null,
   }

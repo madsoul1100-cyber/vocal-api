@@ -1,7 +1,7 @@
 import { z } from 'zod'
 import {
   absorbIntakeSlots,
-  extractBareName,
+  declinesName,
   extractEmail,
   extractNamedIntro,
   extractPhone,
@@ -12,7 +12,6 @@ import {
   looksLikeAddress,
   looksLikeProblem,
   looksOutsideTelangana,
-  nextPhase,
   problemNeedsArea,
   wantsContinue,
   wantsNewIssue,
@@ -46,7 +45,9 @@ import {
   type GuideLang,
   type Playbook,
 } from './playbooks.js'
+import { buildGuideSystemPrompt, GUIDE_PROMPT_VERSION } from './prompts.js'
 import { isLifestyleOutOfScopeQuery, searchPublicWeb, type WebHit } from './search.js'
+import { clipAtSentence, dropDanglingTail, groupPhoneNumbers } from './text.js'
 import {
   appendGuideMessage,
   createGuideSession,
@@ -75,54 +76,50 @@ const WANTS_RECORD =
 const OFF_TOPIC =
   /\b(python|javascript|java|c\+\+|golang|rust|sql query|leetcode|hackerrank|write (me )?(code|a function|an essay)|debug (this|my) code|solve (this )?(math|equation|integral)|calculus|homework|stock tip|crypto trade|medical diagnos|prescribe)\b/i
 
-/** What Bharosa is for — used in redirects so the citizen knows the circle. */
-const CIVIC_SCOPE_HINT_EN =
-  'Aadhaar, ration, voter ID, PAN, power cuts, water, drains, roads / potholes, garbage, traffic as a public issue, certificates, MeeSeva — and similar public problems in Telangana. I can share official steps, department numbers, and raise it from our help desk when needed.'
-
+/**
+ * Boundary replies (Rule 6): one or two warm sentences, what Bharosa does once, the closest
+ * useful pointer. No capability lists, no scolding, no chatbot comparisons.
+ */
 function offTopicReply(lang: GuideLang, name: string): string {
   const who = name ? `, ${name}` : ''
   if (lang === 'te') {
-    return `క్షమించండి${who}. నేను కోడింగ్ / మ్యాత్ / హోంవర్క్ సాఫ్ట్‌వేర్ కాదు — తెలంగాణ పౌర / ప్రభుత్వ సమస్యలకు సహాయం చేస్తాను (ఆధార్, రేషన్, కరెంట్, నీళ్లు, రోడ్లు, ధృవపత్రాలు). మీ పబ్లిక్ సమస్య ఏమిటో చెప్పండి.`
+    return `ఇది నా పరిధిలో లేదు${who}. కానీ కరెంట్, నీళ్లు, రోడ్లు, రేషన్, ఆధార్ లాంటి తెలంగాణ ప్రభుత్వ సేవల్లో ఏదైనా ఆగిపోతే చెప్పండి, సరైన నంబర్ ఇస్తాను.`
   }
   if (lang === 'hi') {
-    return `माफ़ कीजिए${who}. मैं कोडिंग / मैथ / होमवर्क सॉफ़्टवेयर नहीं हूँ — तेलंगाना की नागरिक / सरकारी समस्याओं में मदद करती हूँ (आधार, राशन, बिजली, पानी, सड़क, प्रमाण पत्र)। अपनी सार्वजनिक समस्या बताइए।`
+    return `यह मेरे दायरे से बाहर है${who}। बिजली, पानी, सड़क, राशन, आधार जैसी तेलंगाना की सरकारी सेवा में कुछ अटका हो तो बताइए, सही नंबर दूँगी।`
   }
-  return `Sorry${who} — I’m not a general ChatGPT. I’m trained to help with Telangana public / civic problems. ${CIVIC_SCOPE_HINT_EN} What public issue are you facing?`
+  return `That one is outside what I do${who}. If anything with Telangana public services is stuck, like power, water, roads, ration or Aadhaar, tell me and I will give you the right number.`
 }
 
-/** Movies, salons, personal fights, lifestyle — pull them back into the civic circle. */
+/** Movies, salons, personal fights, lifestyle — one warm line and one useful pointer. */
 function civicScopeRedirect(lang: GuideLang, name: string): string {
   const who = name ? `, ${name}` : ''
   if (lang === 'te') {
-    return `అర్థమైంది${who}. సినిమా / సెలూన్ / వ్యక్తిగత విషయాలకు నేను సాధారణ ఓపెన్ చాట్ కాదు. నేను భరోసా ఏజెంట్ — తెలంగాణలో పబ్లిక్ సమస్యలకు సహాయం చేస్తాను: ఆధార్, రేషన్, ఓటరు, కరెంట్, నీళ్లు, మురుగు, రోడ్డు గుంతలు, చెత్త, ధృవపత్రాలు. అధికారిక స్టెప్‌లు, డిపార్ట్‌మెంట్ నంబర్, అవసరమైతే మా హెల్ప్ డెస్క్ నుంచి కూడా తీసుకెళ్తాం. మీకు ఏ పబ్లిక్ సమస్యలో సహాయం కావాలి?`
+    return `దాని గురించి నేను సహాయం చేయలేను${who}. తెలంగాణ ప్రభుత్వ సేవల్లో ఏదైనా సమస్య ఉంటే చెప్పండి, అది చూద్దాం.`
   }
   if (lang === 'hi') {
-    return `समझ गई${who}. फिल्म / सैलून / निजी बातों के लिए मैं खुली ChatGPT जैसी चैट नहीं हूँ। मैं भरोसा एजेंट हूँ — तेलंगाना की सार्वजनिक समस्याओं में मदद करती हूँ: आधार, राशन, वोटर, बिजली, पानी, नाली, सड़क के गड्ढे, कचरा, प्रमाण पत्र। आधिकारिक कदम, विभाग नंबर, और ज़रूरत हो तो हमारे हेल्प डेस्क से आगे भी बढ़ा सकते हैं। आपको किस सार्वजनिक समस्या में मदद चाहिए?`
+    return `इसमें मैं मदद नहीं कर पाऊँगी${who}। तेलंगाना की सरकारी सेवाओं में कोई समस्या हो तो बताइए, वह देखते हैं।`
   }
-  return `I hear you${who}. I’m not an open ChatGPT for movies, salons, or personal matters. I’m the Bharosa agent for Telangana public problems: ${CIVIC_SCOPE_HINT_EN}\n\nTell me which public issue you need help with — for example Aadhaar mobile change, no power, blocked drain, or road potholes — and I’ll guide you with the right steps and contacts.`
+  return `I can't help with that one${who}. If something with a Telangana public service is stuck, tell me and we will sort it out.`
 }
 
 function outsideTelanganaReply(lang: GuideLang, name: string): string {
   const who = name ? `, ${name}` : ''
   if (lang === 'te') {
-    return `క్షమించండి${who}. నేను తెలంగాణ రాష్ట్రం (హైదరాబాద్ మరియు ఇతర జిల్లాలు) లోని పౌర సమస్యలకు మాత్రమే సహాయం చేస్తాను. వేరే రాష్ట్రం / నగరం కోసం స్థానిక హెల్ప్‌లైన్ చూడండి. తెలంగాణలో ఉంటే ప్రాంతం చెప్పండి — సహాయం చేస్తాను.`
+    return `నేను తెలంగాణ లోని సమస్యలకే సహాయం చేయగలను${who}. వేరే రాష్ట్రం అయితే అక్కడి అధికారిక హెల్ప్‌లైన్ చూడండి. తెలంగాణలో ఉంటే ప్రాంతం చెప్పండి.`
   }
   if (lang === 'hi') {
-    return `माफ़ कीजिए${who}. मैं केवल तेलंगाना राज्य (हैदराबाद और अन्य ज़िले) की नागरिक समस्याओं में मदद करती हूँ। दूसरे राज्य / शहर के लिए वहाँ की स्थानीय हेल्पलाइन देखें। अगर आप तेलंगाना में हैं तो इलाका बताइए — मैं मदद करूँगी।`
+    return `मैं सिर्फ़ तेलंगाना की समस्याओं में मदद कर सकती हूँ${who}। दूसरे राज्य के लिए वहाँ की आधिकारिक हेल्पलाइन देखें। तेलंगाना में हैं तो इलाका बताइए।`
   }
-  return `Sorry${who} — I can help with citizen issues in Telangana state only (Hyderabad and other TG districts). For another state or city, please use that area’s local helpline. If you’re in Telangana, tell me your area and I’ll help.`
+  return `I can only help with problems in Telangana${who}. For another state, please use that state's official helpline. If you are in Telangana, tell me the area and we will start.`
 }
 
 const COPY = {
   en: {
     hello:
-      "Hi — I'm Priya, your personal agent for Telangana help (Aadhaar, ration, power, water, roads, drains). What should I call you?",
-    askName: 'What should I call you?',
-    askNameAgain: 'Sorry — what name should I use for you?',
+      "Hi, I'm Priya. I help with Telangana public services: power, water, drains, roads, ration cards, Aadhaar, pensions and certificates. What's the issue?",
     askProblem: (name: string) =>
-      `Got it, ${name}. What's going on — what do you need help with?`,
-    askArea: (name: string) =>
-      `Thanks${name ? `, ${name}` : ''}. Which colony or landmark is this in? I need the local spot before we escalate — street / colony / nearby landmark.`,
+      name ? `Got it, ${name}. What's the issue?` : "What's the issue? Tell me what's happening and where.",
     resume: (name: string, topic: string) =>
       `Welcome back${name ? `, ${name}` : ''}. You left an unfinished chat about "${topic}". Reply *1* to continue, or *2* for a new issue.`,
     pastCases: (name: string, lines: string) =>
@@ -132,41 +129,31 @@ const COPY = {
     recorded: (id: string) => `Recorded on our side. Your reference is ${id.slice(0, 8)}. Call the department number above and quote your area.`,
     confirm: 'Read the mail below. If it is right, press Send. A copy goes to your email.',
     sent: (id: string) => `Sent from our mail. You are copied, so you can see the thread. If the department replies, it comes back to us and you stay on the copy. Reference ${id.slice(0, 8)}.`,
-    anythingElse: 'Is there anything else I can help you with?',
     close: (phone: { name: string; phone: string } | null, mail: { name: string; email: string } | null) => {
-      const lines = [
-        'You can try the official route yourself, and we can also take it up from our side — this help desk works with the local leadership team.',
-      ]
-      if (phone) lines.push(`Official: call ${phone.name} on ${phone.phone} and note the complaint number.`)
-      if (mail) {
-        lines.push(
-          `Or email ${mail.name} at ${mail.email}. If you want us to send it from our desk and follow up, share your mobile and email — I will show you the draft first and copy you.`,
-        )
-      } else {
-        lines.push(
-          'If you want us to raise this with the authority on your behalf, share your mobile and email. We record it on our side, follow up, and keep you in the loop.',
-        )
-      }
-      lines.push('Is there anything else I can help you with?')
+      // Shown once per conversation (never repeated), and never ends with a stock "anything else?".
+      const lines = ['If it stays stuck, our help desk can also take it up with the authority.']
+      if (phone) lines.push(`Call ${phone.name} on ${phone.phone} first and note the complaint number.`)
+      lines.push(
+        mail
+          ? 'To have us send it and follow up, share your mobile and email. I will show you the draft before anything goes out.'
+          : 'To have us record it and follow up, share your mobile and email.',
+      )
       return lines.join(' ')
     },
     sendFailed: 'The mail could not be sent. Your details are saved. Please call the department number as well.',
     noMail: 'This department publishes a phone and website. We can still record your case on our side and follow up — share mobile and email if you want that.',
     offer: 'If you want us to escalate from our desk (party / help desk side), send your mobile, email, and area. I will show the mail before it goes, and you will be copied.',
     searchIntro:
-      'I looked up public / official info. Help only with Telangana civic problems (Aadhaar, power, water, roads, documents). Prefer official contacts and steps. If this is lifestyle (movies/salons/personal), redirect to public problems.',
+      'Official / public web snippets are listed under RESEARCH. Answer from them and the verified reference data. Give the official route first.',
     searchEmpty:
-      'Stay in the civic circle. Ask which public problem (Aadhaar, power, water, road, drain…) and area/landmark, or give the best official next step you know. Never answer as open ChatGPT for movies or personal chat.',
+      'No extra page was found. Give the best verified official next step you know. If the message is too vague to act on, ask one short question about which public problem it is.',
     prior: (topic: string) => `You had an earlier chat about ${topic}. If that is still stuck, say what happened at the last step.`,
   },
   te: {
     hello:
-      'నమస్కారం — నేను ప్రియ, తెలంగాణ సహాయం కోసం మీ వ్యక్తిగత ఏజెంట్ (ఆధార్, రేషన్, కరెంట్, నీళ్లు, రోడ్లు, మురుగు). మీ పేరు ఏమిటి?',
-    askName: 'మీ పేరు ఏమిటి?',
-    askNameAgain: 'క్షమించండి — మీ పేరు ఏమిటి?',
-    askProblem: (name: string) => `సరే, ${name}. ఏ సమస్యలో సహాయం కావాలి?`,
-    askArea: (name: string) =>
-      `ధన్యవాదాలు${name ? `, ${name}` : ''}. ఏ కాలనీ లేదా ల్యాండ్‌మార్క్? స్థానిక చిరునామా చెప్పండి — అప్పుడే ముందుకు తీసుకెళ్తాం.`,
+      'నమస్కారం, నేను ప్రియ. తెలంగాణ ప్రభుత్వ సేవల్లో సహాయం చేస్తాను: కరెంట్, నీళ్లు, మురుగు, రోడ్లు, రేషన్ కార్డు, ఆధార్, పెన్షన్, సర్టిఫికెట్లు. మీ సమస్య ఏమిటి?',
+    askProblem: (name: string) =>
+      name ? `సరే, ${name} గారు. ఏ సమస్యలో సహాయం కావాలి?` : 'మీ సమస్య ఏమిటి? ఏం జరుగుతోందో, ఎక్కడో చెప్పండి.',
     resume: (name: string, topic: string) =>
       `మళ్లీ స్వాగతం${name ? `, ${name}` : ''}. "${topic}" చాట్ అసంపూర్ణం. *1* కొనసాగింపు, *2* కొత్తది.`,
     pastCases: (name: string, lines: string) =>
@@ -176,37 +163,30 @@ const COPY = {
     recorded: (id: string) => `మా వైపు నమోదు అయింది. రిఫరెన్స్ ${id.slice(0, 8)}. పైన ఉన్న డిపార్ట్‌మెంట్ నంబర్‌కు కాల్ చేసి ప్రాంతం చెప్పండి.`,
     confirm: 'కింద ఉన్న మెయిల్ చదవండి. సరిగ్గా ఉంటే Send నొక్కండి. కాపీ మీ ఇమెయిల్‌కు వెళ్తుంది.',
     sent: (id: string) => `మా మెయిల్ నుంచి పంపాం. మీకు కాపీ వెళ్తుంది. శాఖ సమాధానం మా దగ్గరికి వస్తుంది, మీరు కాపీలో ఉంటారు. రిఫరెన్స్ ${id.slice(0, 8)}.`,
-    anythingElse: 'ఇంకేమైనా కావాలా?',
     close: (phone: { name: string; phone: string } | null, mail: { name: string; email: string } | null) => {
-      const lines = ['అధికారిక మార్గం మీరు కూడా తీసుకోవచ్చు; మా హెల్ప్ డెస్క్ / నాయకత్వ బృందం వైపు నుంచి కూడా తీసుకుంటాం.']
-      if (phone) lines.push(`అధికారికం: ${phone.name} కు ${phone.phone} కాల్ చేసి ఫిర్యాదు నంబర్ రాసుకోండి.`)
-      if (mail) {
-        lines.push(
-          `లేదా ${mail.email} కు రాయండి. మా వైపు నుంచి పంపి ఫాలో-అప్ చేయాలంటే మొబైల్, ఇమెయిల్ పంపండి — ముందు డ్రాఫ్ట్ చూపిస్తాం, మీకు కాపీ ఉంటుంది.`,
-        )
-      } else {
-        lines.push('మా వైపు నమోదు చేసి అధికారుల దగ్గరికి తీసుకెళ్లాలంటే మొబైల్, ఇమెయిల్ పంపండి.')
-      }
-      lines.push('ఇంకేమైనా కావాలా?')
+      const lines = ['అది ఆగిపోతే మా హెల్ప్ డెస్క్ కూడా అధికారుల దగ్గరికి తీసుకెళ్తుంది.']
+      if (phone) lines.push(`ముందు ${phone.name} కు ${phone.phone} కాల్ చేసి ఫిర్యాదు నంబర్ రాసుకోండి.`)
+      lines.push(
+        mail
+          ? 'మేమే పంపి ఫాలో-అప్ చేయాలంటే మొబైల్, ఇమెయిల్ పంపండి. పంపే ముందు డ్రాఫ్ట్ చూపిస్తాను.'
+          : 'మేము నమోదు చేసి ఫాలో-అప్ చేయాలంటే మొబైల్, ఇమెయిల్ పంపండి.',
+      )
       return lines.join(' ')
     },
     sendFailed: 'మెయిల్ వెళ్లలేదు. మీ వివరాలు దాచాం. డిపార్ట్‌మెంట్ నంబర్‌కు కూడా కాల్ చేయండి.',
     noMail: 'ఈ శాఖ ఫోన్/వెబ్‌సైట్ ఇచ్చింది. మా వైపు నమోదు + ఫాలో-అప్ కావాలంటే మొబైల్, ఇమెయిల్ పంపండి.',
     offer: 'మా డెస్క్ నుంచి escalate చేయాలంటే మొబైల్, ఇమెయిల్, ప్రాంతం పంపండి. పంపే ముందు మెయిల్ చూపిస్తాం. మీకు కాపీ వెళ్తుంది.',
     searchIntro:
-      'పబ్లిక్ / అధికారిక సమాచారం చూశాను. తెలంగాణ పౌర సమస్యలకే సహాయం (ఆధార్, కరెంట్, నీళ్లు, రోడ్లు). సినిమా/సెలూన్ అయితే పబ్లిక్ సమస్య వైపు తిప్పండి.',
+      'RESEARCH లో అధికారిక / పబ్లిక్ సమాచారం ఉంది. దాని ఆధారంగా, ధృవీకరించిన సమాచారంతో సమాధానం ఇవ్వండి. ముందు అధికారిక మార్గం చెప్పండి.',
     searchEmpty:
-      'పౌర సర్కిల్‌లోనే ఉండండి. ఏ పబ్లిక్ సమస్య (ఆధార్/కరెంట్/నీళ్లు/రోడ్డు) + ప్రాంతం అడగండి, లేదా అధికారిక స్టెప్ చెప్పండి. ఓపెన్ చాట్‌గా సమాధానం ఇవ్వవద్దు.',
+      'అదనపు సమాచారం దొరకలేదు. మీకు తెలిసిన ధృవీకరించిన అధికారిక స్టెప్ చెప్పండి. సందేశం చాలా అస్పష్టంగా ఉంటే ఏ ప్రభుత్వ సమస్య అని ఒక చిన్న ప్రశ్న అడగండి.',
     prior: (topic: string) => `ముందు ${topic} గురించి మాట్లాడాం. అది ఇంకా ఆగి ఉంటే చివరి దశలో ఏమైందో చెప్పండి.`,
   },
   hi: {
     hello:
-      'नमस्ते — मैं प्रिया हूँ, तेलंगाना मदद के लिए आपकी निजी एजेंट (आधार, राशन, बिजली, पानी, सड़क, नाली)। आपका नाम क्या है?',
-    askName: 'आपका नाम क्या है?',
-    askNameAgain: 'माफ़ कीजिए — आपका नाम क्या है?',
-    askProblem: (name: string) => `ठीक है, ${name}. किस समस्या में मदद चाहिए?`,
-    askArea: (name: string) =>
-      `धन्यवाद${name ? `, ${name}` : ''}। कौन सी कॉलोनी या लैंडमार्क? स्थानीय जगह बताएँ — तब आगे बढ़ाएँगे।`,
+      'नमस्ते, मैं प्रिया हूँ। मैं तेलंगाना की सरकारी सेवाओं में मदद करती हूँ: बिजली, पानी, नाली, सड़क, राशन कार्ड, आधार, पेंशन, प्रमाण पत्र। आपकी समस्या क्या है?',
+    askProblem: (name: string) =>
+      name ? `ठीक है, ${name} जी। किस समस्या में मदद चाहिए?` : 'आपकी समस्या क्या है? क्या हो रहा है और कहाँ, बताइए।',
     resume: (name: string, topic: string) =>
       `वापस स्वागत है${name ? `, ${name}` : ''}। "${topic}" अधूरी थी। *1* जारी, *2* नई।`,
     pastCases: (name: string, lines: string) =>
@@ -216,27 +196,23 @@ const COPY = {
     recorded: (id: string) => `हमारी तरफ दर्ज हो गया। संदर्भ ${id.slice(0, 8)}। ऊपर दिए विभाग के नंबर पर कॉल करके इलाका बताएँ।`,
     confirm: 'नीचे का मेल पढ़ें। सही हो तो Send दबाएँ। प्रतिलिपि आपके ईमेल पर जाएगी।',
     sent: (id: string) => `हमारे मेल से भेज दिया। आपको प्रतिलिपि गई है। विभाग का जवाब हमारे पास आएगा, और आप प्रतिलिपि पर रहेंगे। संदर्भ ${id.slice(0, 8)}।`,
-    anythingElse: 'और कुछ मदद चाहिए?',
     close: (phone: { name: string; phone: string } | null, mail: { name: string; email: string } | null) => {
-      const lines = ['आधिकारिक रास्ता आप खुद भी अपना सकते हैं; हमारी हेल्प डेस्क / नेतृत्व टीम भी आपकी तरफ से आगे बढ़ा सकती है।']
-      if (phone) lines.push(`आधिकारिक: ${phone.name} को ${phone.phone} पर कॉल करें और शिकायत नंबर लिख लें।`)
-      if (mail) {
-        lines.push(
-          `या ${mail.email} पर लिखें। हम अपनी तरफ से भेजकर फॉलो-अप करें तो मोबाइल और ईमेल भेजें — पहले ड्राफ्ट दिखाएँगे, आपको प्रतिलिपि रहेगी।`,
-        )
-      } else {
-        lines.push('हमारी तरफ दर्ज कर अधिकारियों तक ले जाना हो तो मोबाइल और ईमेल भेजें।')
-      }
-      lines.push('और कुछ मदद चाहिए?')
+      const lines = ['अटक जाए तो हमारी हेल्प डेस्क भी अधिकारियों तक ले जा सकती है।']
+      if (phone) lines.push(`पहले ${phone.name} को ${phone.phone} पर कॉल करें और शिकायत नंबर लिख लें।`)
+      lines.push(
+        mail
+          ? 'हम भेजकर फॉलो-अप करें तो मोबाइल और ईमेल भेजें। भेजने से पहले ड्राफ्ट दिखाऊँगी।'
+          : 'हम दर्ज करके फॉलो-अप करें तो मोबाइल और ईमेल भेजें।',
+      )
       return lines.join(' ')
     },
     sendFailed: 'मेल नहीं गया। आपका विवरण सहेजा है। विभाग के नंबर पर भी कॉल करें।',
     noMail: 'इस विभाग का फोन/वेबसाइट है। हमारी तरफ दर्ज + फॉलो-अप चाहिए तो मोबाइल और ईमेल भेजें।',
     offer: 'हमारी डेस्क से escalate करना हो तो मोबाइल, ईमेल और इलाका भेजें। भेजने से पहले मेल दिखाएँगे। आपको प्रतिलिपि जाएगी।',
     searchIntro:
-      'सार्वजनिक / आधिकारिक जानकारी देखी। केवल तेलंगाना नागरिक समस्याओं में मदद (आधार, बिजली, पानी, सड़क)। फिल्म/सैलून हो तो सार्वजनिक समस्या की ओर मोड़ें।',
+      'RESEARCH में आधिकारिक / सार्वजनिक जानकारी है। उसी और सत्यापित जानकारी से जवाब दें। पहले आधिकारिक रास्ता बताएँ।',
     searchEmpty:
-      'नागरिक दायरे में रहें। कौन सी सार्वजनिक समस्या (आधार/बिजली/पानी/सड़क) + इलाका पूछें, या आधिकारिक कदम बताएँ। खुली ChatGPT चैट न दें।',
+      'अतिरिक्त जानकारी नहीं मिली। जो सत्यापित आधिकारिक कदम आपको पता हो वह बताएँ। संदेश बहुत अस्पष्ट हो तो कौन सी सरकारी समस्या है, एक छोटा सवाल पूछें।',
     prior: (topic: string) => `पहले ${topic} पर बात हुई थी। वही अभी भी अटका है तो आखिरी कदम पर क्या हुआ बताएँ।`,
   },
 } as const
@@ -340,8 +316,7 @@ export async function handleGuideTurn(args: {
       const welcome =
         (memory ? memoryWelcomeLine(memory, session.language) : null) || COPY[session.language].hello
       await appendGuideMessage(session.id, 'assistant', welcome)
-      session.phase = session.contact.name ? 'ask_problem' : 'ask_name'
-      if (memory?.name) session.phase = 'ask_problem'
+      session.phase = 'ask_problem'
       await saveGuideSession(session)
     }
     return snapshot(session, null, [], false)
@@ -354,8 +329,10 @@ export async function handleGuideTurn(args: {
 
   const history = await listGuideMessages(session.id)
   const userText = history.filter((m) => m.role === 'user').map((m) => m.body).join('\n')
+  const lastAssistantBody = [...history].reverse().find((m) => m.role === 'assistant')?.body ?? ''
   absorbContact(userText, session.contact)
-  absorbLadderSlots(text, session)
+  absorbLadderSlots(text, session, askedForPlace(lastAssistantBody))
+  if (declinesName(text)) session.contact.name_declined = true
   await refreshNeedsAreaHint(session, text)
   syncPhase(session)
 
@@ -504,16 +481,8 @@ export async function handleGuideTurn(args: {
   if (playbook) session.problem_id = playbook.id
   session.phase = 'help'
 
-  // If new problem needs area and we cleared place, ask before advice
-  if (
-    problemNeedsArea(session.contact.problem_summary || text, session.contact.needs_area) &&
-    (!session.contact.place || isVaguePlace(session.contact.place))
-  ) {
-    session.phase = 'ask_area'
-    const name = session.contact.name?.trim() || ''
-    const line = await naturalAsk(session, lang, history, 'ask_area', COPY[lang].askArea(name))
-    return replyWith(session, lang, line, playbook, [], false)
-  }
+  // Help first (Rule 1): the area is asked AFTER the useful answer, inside the same reply,
+  // never instead of it. The model sees "Area on file" and asks one short question if it helps.
 
   const followUp = history.filter((m) => m.role === 'user').length > 1
   const needsResearch =
@@ -565,16 +534,27 @@ export async function handleGuideTurn(args: {
   const shouldOfferClose =
     !wantsRecord &&
     !session.contact.close_offered &&
+    !session.contact.desk_offered &&
     !!playbook &&
     playbook.mode === 'department' &&
     !THANKS_ONLY.test(text) &&
     !ANOTHER_PROBLEM.test(text)
   if (shouldOfferClose) {
-    body = `${body}\n\n${closingOffer(playbook, lang)}`
+    const offer = closingOffer(playbook, lang)
+    if (offer) body = `${body}\n\n${offer}`
     session.contact.close_offered = true
+    session.contact.desk_offered = true
   }
 
-  const turn = await replyWith(session, lang, body, playbook, hits, hits.length > 0, draft)
+  // Show contact chips only when this reply is actually about that playbook's topic.
+  const chipsRelevant =
+    !!playbook &&
+    (!existing ||
+      existing.id !== playbook.id ||
+      !!latestOnly?.playbook ||
+      placeReply ||
+      staysOnTopic(text, playbook))
+  const turn = await replyWith(session, lang, body, chipsRelevant ? playbook : null, hits, hits.length > 0, draft)
   await rememberGuideTurn(session, {
     event: wantsRecord
       ? 'wants_desk'
@@ -730,13 +710,13 @@ async function handleCaseHistoryTurn(
   return null
 }
 
+/**
+ * Guide phases are only "waiting for a problem" and "helping". The name is optional and the
+ * area is asked after the answer, so neither gates help (test log findings 1, 2 and 6).
+ */
 function syncPhase(session: GuideSession): void {
-  session.phase = nextPhase({
-    name: session.contact.name,
-    problem: session.contact.problem_summary || session.problem_id,
-    place: session.contact.place,
-    needsArea: session.contact.needs_area,
-  })
+  const hasProblem = !!(session.contact.problem_summary?.trim() || session.problem_id)
+  session.phase = hasProblem ? 'help' : 'ask_problem'
 }
 
 /** Use Dify (or local heuristics) so power/road/etc. ask for area before advice. */
@@ -763,10 +743,13 @@ async function refreshNeedsAreaHint(session: GuideSession, latestText: string): 
   }
 }
 
-function absorbLadderSlots(text: string, session: GuideSession): void {
+function absorbLadderSlots(text: string, session: GuideSession, placeWasAsked = false): void {
   const phaseBefore = session.phase
   const slots = absorbIntakeSlots(text)
-  if (slots.name && !session.contact.name) session.contact.name = slots.name
+  // Names only from an explicit intro ("my name is Ravi"). A bare short reply such as "ok" or
+  // "thanks" must never become the name, and a stated name is never replaced by a guess.
+  const intro = extractNamedIntro(text)
+  if (intro) session.contact.name = intro
   if (slots.phone) {
     session.contact.phone = slots.phone
     session.contact.skipped_phone = false
@@ -776,16 +759,11 @@ function absorbLadderSlots(text: string, session: GuideSession): void {
     session.contact.skipped_email = false
   }
 
-  if (!session.contact.name) {
-    const bare = extractBareName(text) || extractNamedIntro(text)
-    if (bare) session.contact.name = bare
-  }
-
   // Problem: only real issues — never “list my queries” / status / greetings as the issue
   if (slots.problem && !session.contact.problem_summary && !isMetaOrNonIssue(slots.problem)) {
     session.contact.problem_summary = slots.problem
   } else if (
-    (phaseBefore === 'ask_problem' || phaseBefore === 'ask_name') &&
+    phaseBefore === 'ask_problem' &&
     looksLikeProblem(text) &&
     !isMetaOrNonIssue(text) &&
     !session.contact.problem_summary
@@ -807,9 +785,9 @@ function absorbLadderSlots(text: string, session: GuideSession): void {
     }
   }
 
-  if (phaseBefore === 'ask_area') {
-    if (looksLikeAddress(text) || (text.trim().length >= 8 && !isShortGreeting(text))) {
-      // In ask_area, almost any real reply is the place — don't reject long addresses as "problems"
+  if (placeWasAsked) {
+    if (looksLikeAddress(text) || (text.trim().length >= 4 && text.trim().length <= 120 && !isShortGreeting(text) && !looksLikeProblem(text))) {
+      // We just asked for the colony / landmark, so a short non-problem reply is the place.
       if (!extractPhone(text) && !extractEmail(text)) {
         session.contact.place = text.trim().slice(0, 160)
       }
@@ -817,50 +795,29 @@ function absorbLadderSlots(text: string, session: GuideSession): void {
   }
 }
 
-/** Short natural line via LLM; falls back to a seed sentence if the model is down. */
-async function naturalAsk(
-  session: GuideSession,
-  lang: GuideLang,
-  history: GuideMessage[],
-  intent: 'greet' | 'ask_name' | 'ask_problem' | 'ask_area',
-  seed: string,
-): Promise<string> {
-  const languageName = lang === 'te' ? 'Telugu' : lang === 'hi' ? 'Hindi' : 'English'
-  const name = session.contact.name ?? ''
-  const problem = session.contact.problem_summary ?? ''
-  const place = session.contact.place ?? ''
-  const recent = history
-    .filter((m) => m.role === 'user' || m.role === 'assistant')
-    .slice(-6)
-    .map((m) => ({ role: m.role as 'user' | 'assistant', content: m.body.slice(0, 400) }))
-
-  const goal =
-    intent === 'greet'
-      ? 'Greet warmly as Priya, their personal Telangana help agent. Ask only for their name (say “name” / పేరు / नाम clearly). One or two short sentences.'
-      : intent === 'ask_name'
-        ? 'Ask only for their name, briefly and politely. Use the word name / పేరు / नाम. One short sentence.'
-        : intent === 'ask_problem'
-          ? `You already know their name is ${name || '(unknown)'}. Acknowledge that name once. Ask ONLY what problem they need help with. Do NOT ask again for their name or “full name”. Do NOT ask for address, phone, or email yet. One or two short sentences.`
-          : `Name: ${name || 'unknown'}. Problem: ${problem || 'unknown'}. Soft place hint: ${place || 'none'}. Ask only for a more specific local address (colony / street / landmark). Do NOT ask phone or email. Do NOT change the problem topic. One or two short sentences.`
-
-  const result = await llmText({
-    agent: 'guide',
-    promptVersion: 'guide.ladder.v2',
-    orgId: session.organization_id,
-    language: lang,
-    system: `You are Priya, a warm personal help agent for people in Telangana (Bharosa / My Leader). Speak ${languageName}.
-Sound human — not a form, not a script. Vary your wording. No bullets, no markdown, no URLs.
-${goal}
-If the seed below helps, paraphrase it; do not copy it word-for-word unless the model fails.`,
-    messages: [...recent, { role: 'user', content: `Seed (paraphrase, do not quote): ${seed}` }],
-    temperature: 0.45,
-    maxTokens: 120,
-  })
-  const text = result.ok ? result.text.trim() : ''
-  if (!text || /as an ai|i cannot|json/i.test(text)) return seed
-  return text.replace(/\s+/g, ' ').slice(0, 400)
+/** True when the assistant's last message asked the citizen for a colony / landmark. */
+function askedForPlace(lastAssistant: string): boolean {
+  const tail = lastAssistant.slice(-220)
+  return (
+    /[?？]/.test(tail) &&
+    /(colony|landmark|which area|what area|street|locality|village|మీ ప్రాంతం|ఏ ప్రాంతం|కాలనీ|ల్యాండ్‌?మార్క్|ఏ ఊరు|कॉलोनी|लैंडमार्क|इलाका|गाँव)/i.test(tail)
+  )
 }
 
+/** Greeting-only or name-only messages carry no problem yet; everything else gets an answer. */
+function isMinimalMessage(text: string): boolean {
+  const t = text.trim()
+  if (!t) return true
+  if (/[?？]/.test(t)) return false
+  return t.split(/\s+/).filter(Boolean).length <= 2
+}
+
+/**
+ * Light intake. No name gate and no area gate: the citizen gets help in the same reply.
+ *  - greeting → short scope line + invitation to describe the problem
+ *  - name-only / one-word message with no problem yet → ask for the problem
+ *  - everything else → fall through to the answer pipeline
+ */
 async function handleIntakeLadder(
   session: GuideSession,
   lang: GuideLang,
@@ -870,21 +827,14 @@ async function handleIntakeLadder(
 ): Promise<GuideTurn | null> {
   const name = session.contact.name?.trim() || ''
   const userTurns = history.filter((m) => m.role === 'user').length
-  const lastAssistant = [...history].reverse().find((m) => m.role === 'assistant')?.body ?? ''
-  const wasAskingName = /call you|your name|మీ పేరు|పిలవాలి|आपका नाम|क्या कहूँ|personal agent/i.test(lastAssistant)
+  const hasProblem = !!(session.contact.problem_summary || session.problem_id)
 
   if (isShortGreeting(text) && userTurns <= 2) {
     const continuity = await continuityPrompt(session, lang, orgId)
     if (continuity) return replyWith(session, lang, continuity, playbookById(session.problem_id), [], false)
-
-    if (!name) {
-      session.phase = 'ask_name'
-      const line = await naturalAsk(session, lang, history, 'greet', COPY[lang].hello)
-      return replyWith(session, lang, line, null, [], false)
-    }
-    if (!session.contact.problem_summary && !session.problem_id) {
+    if (!hasProblem) {
       session.phase = 'ask_problem'
-      const line = await naturalAsk(session, lang, history, 'ask_problem', COPY[lang].askProblem(name))
+      const line = name ? COPY[lang].askProblem(name) : COPY[lang].hello
       return replyWith(session, lang, line, null, [], false)
     }
   }
@@ -899,60 +849,15 @@ async function handleIntakeLadder(
     if (handled) return handled
   }
 
-  // Just got a name (no problem yet) → ask for the problem, never jump to area.
-  if (name && !session.contact.problem_summary && !session.problem_id && !looksLikeProblem(text)) {
-    session.phase = 'ask_problem'
-    const seed = wasAskingName || userTurns <= 2 ? COPY[lang].askProblem(name) : COPY[lang].askProblem(name)
-    const line = await naturalAsk(session, lang, history, 'ask_problem', seed)
-    return replyWith(session, lang, line, null, [], false)
-  }
-
   syncPhase(session)
 
-  if (session.phase === 'ask_name') {
-    if (isShortGreeting(text)) {
-      const line = await naturalAsk(session, lang, history, 'greet', COPY[lang].hello)
-      return replyWith(session, lang, line, null, [], false)
-    }
-    if (!session.contact.name) {
-      const line = await naturalAsk(session, lang, history, 'ask_name', COPY[lang].askNameAgain)
-      return replyWith(session, lang, line, null, [], false)
-    }
+  if (!hasProblem && !looksLikeProblem(text) && (isMinimalMessage(text) || extractNamedIntro(text))) {
     session.phase = 'ask_problem'
-    const line = await naturalAsk(session, lang, history, 'ask_problem', COPY[lang].askProblem(session.contact.name))
-    return replyWith(session, lang, line, null, [], false)
+    return replyWith(session, lang, COPY[lang].askProblem(name), null, [], false)
   }
 
-  if (session.phase === 'ask_problem') {
-    if (!session.contact.problem_summary && !session.problem_id) {
-      const line = await naturalAsk(session, lang, history, 'ask_problem', COPY[lang].askProblem(name || 'there'))
-      return replyWith(session, lang, line, null, [], false)
-    }
-    // Lock playbook as soon as the problem is known (even before area)
-    const locked = await lockPlaybookFromProblem(session)
-    // Problem known — only ask area when this issue type needs a local spot
-    if (
-      problemNeedsArea(session.contact.problem_summary, session.contact.needs_area) &&
-      (!session.contact.place || isVaguePlace(session.contact.place))
-    ) {
-      session.phase = 'ask_area'
-      const line = await naturalAsk(session, lang, history, 'ask_area', COPY[lang].askArea(name))
-      return replyWith(session, lang, line, locked, [], false)
-    }
-    session.phase = 'help'
-    return null
-  }
-
-  if (session.phase === 'ask_area') {
-    const locked = await lockPlaybookFromProblem(session)
-    if (!session.contact.place || isVaguePlace(session.contact.place)) {
-      if (session.contact.place && isVaguePlace(session.contact.place)) session.contact.place = undefined
-      const line = await naturalAsk(session, lang, history, 'ask_area', COPY[lang].askArea(name || ''))
-      return replyWith(session, lang, line, locked, [], false)
-    }
-    session.phase = 'help'
-  }
-
+  // Lock the playbook as soon as the problem is known so contacts and facts follow the topic.
+  await lockPlaybookFromProblem(session)
   return null
 }
 
@@ -1016,11 +921,8 @@ async function handleContinuityChoice(
 
   if (wantsNewIssue(text) || text.trim() === '2') {
     resetCurrentProblem(session)
-    session.phase = session.contact.name ? 'ask_problem' : 'ask_name'
-    const body = session.contact.name
-      ? COPY[lang].askProblem(session.contact.name)
-      : COPY[lang].askName
-    return replyWith(session, lang, body, null, [], false)
+    session.phase = 'ask_problem'
+    return replyWith(session, lang, COPY[lang].askProblem(session.contact.name ?? ''), null, [], false)
   }
 
   const incomplete = await findIncompleteGuideSession(orgId, phone, session.id)
@@ -1173,7 +1075,7 @@ async function answerDirect(
   hits: WebHit[],
   memoryPrompt = '',
 ): Promise<string> {
-  return phrase(session, lang, voiceFacts(playbook, lang), history, hits, memoryPrompt, 'playbook')
+  return phrase(session, lang, voiceFacts(playbook, lang), history, hits, memoryPrompt, 'playbook', '', playbook.mode === 'department')
 }
 
 /** No fixed playbook — civic open help only: clarify public problems or redirect lifestyle. */
@@ -1220,59 +1122,53 @@ async function phrase(
   memoryPrompt = '',
   mode: 'playbook' | 'open' = 'playbook',
   latestText = '',
+  keepHelpline = false,
 ): Promise<string> {
   const languageName = lang === 'te' ? 'Telugu' : lang === 'hi' ? 'Hindi' : 'English'
   const recent = history
     .filter((m) => m.role === 'user' || m.role === 'assistant')
-    .slice(-10)
+    .slice(-12)
     .map((m) => ({ role: m.role, content: m.body.slice(0, 700) }))
   const research = hits.length
     ? hits.map((hit, i) => `${i + 1}. ${hit.title} — ${hit.snippet} (${hit.url})`).join('\n')
-    : 'No extra page was found yet. Ask one clarifying question about their public / civic problem.'
-  const openRules =
+    : ''
+  const task =
     mode === 'open'
-      ? `You are Priya for Bharosa / My Leader — a CIVIC agent for Telangana public problems only, NOT an open ChatGPT.
-IN SCOPE: Aadhaar, ration, voter, PAN, power, water, drains, roads/potholes, garbage, streetlights, traffic as a public issue, certificates, MeeSeva, pensions, LPG — official steps, department numbers, how to file, help-desk escalate when they ask.
-OUT OF SCOPE (do not answer as ChatGPT): movies, salons, restaurants, gyms, shopping, dating, personal fights, coding, homework, entertainment. If they ask those, briefly say you help with public/civic problems and invite them to name one (Aadhaar / power / road / water etc.).
-Never say “say which service” as a cold menu dump — name 3–5 example public problems warmly.
-If the ask is vague (“help me”, “problem”), ask which public issue and which colony/landmark — one short question.
-If they already named a civic issue + area, give practical official next steps using RESEARCH; use short paragraphs / numbered lists with line breaks.
-Understand typos (Gachibowli / hydrabad). Telangana only — if another state, say you only cover TG.
-Do not invent shop lists, showtimes, or salon prices.`
-      : `Answer from FACTS and RESEARCH. If they changed topic, drop the previous issue completely — do not mention electricity, power cuts, TSSPDCL, or the old problem unless they asked about it again.
-If the latest message is a short local follow-up (pin code, spelling of the area, which station / office, landmark), answer THAT from RESEARCH or common knowledge — do not paste the whole complaint script again.
-Scope: Telangana civic / public problems only. Do not advise using out-of-state places from chat history.`
+      ? `No fixed playbook matches. Answer the citizen's latest message with the best verified official next step (department, helpline or portal from the reference data). If the message is too vague to act on, ask ONE short question about which public problem it is. If it is outside Telangana public services, follow the boundaries rule: one or two warm sentences and the closest useful pointer. If another state is mentioned, say you only cover Telangana. Use short paragraphs. Do not invent shop lists, showtimes or prices.`
+      : `Answer the latest message from the GUIDANCE FACTS and RESEARCH. Give 2 to 6 short sentences. If they changed topic, drop the previous issue completely and do not mention it unless they raise it again. If the latest message is a short local follow-up (pin code, spelling of the area, which office, landmark), answer THAT directly and do not paste the whole complaint script again. Do not advise using out-of-state places from the chat history.`
 
   const result = await llmText({
     agent: 'guide',
-    promptVersion: mode === 'open' ? 'guide.open.v4' : 'guide.answer.v7',
+    promptVersion: `${GUIDE_PROMPT_VERSION}.${mode}`,
     orgId: session.organization_id,
     language: lang,
-    system: `You are Priya, civic help agent for Bharosa / My Leader — Telangana public problems only. Speak ${languageName}, warmly and plainly.
-Citizen name: ${session.contact.name ?? 'unknown'}. Area on file: ${session.contact.place ?? 'not given yet'}. Problem so far: ${session.contact.problem_summary ?? 'not locked yet'}.
-Answer ONLY the citizen's latest message — stay inside the civic circle.
-Do not append a fixed closing about Help Desk / leadership / share mobile and email — that is added separately when needed (civic complaints only).
-${mode === 'open' ? 'Give a direct useful civic answer (2–8 short sentences or a short list with line breaks). If out of scope, redirect to public problems.' : 'Give a direct useful answer (2–6 sentences).'} Official steps and site names are fine; avoid raw URL spam. Light markdown OK for open (**bold**, numbered lists).
-Do not ask for Aadhaar number, PAN number, OTP, or bank details.
-${openRules}
-${memoryPrompt ? `\n${memoryPrompt}\n` : ''}
-FACTS / GUIDANCE SEED:
-${facts}
-RESEARCH (official / public web snippets — use for civic steps only):
-${research}`,
+    system: buildGuideSystemPrompt({
+      languageName,
+      name: session.contact.name,
+      nameDeclined: session.contact.name_declined,
+      place: session.contact.place,
+      problem: session.contact.problem_summary,
+      memory: memoryPrompt,
+      facts,
+      research,
+      task,
+    }),
     messages: recent,
     temperature: mode === 'open' ? 0.3 : 0.2,
-    maxTokens: mode === 'open' ? 700 : 500,
+    // Telugu is token-heavy; the old 500/700 limits cut replies mid-word.
+    maxTokens: mode === 'open' ? 1400 : 1200,
     // No live web-search tool here — DuckDuckGo snippets already in RESEARCH when needed
     enableWebSearch: false,
   })
   const latestUser =
     latestText || [...history].reverse().find((m) => m.role === 'user')?.body || ''
-  const raw = result.ok ? result.text : facts
+  // A reply cut by the token limit must never reach the citizen mid-word.
+  const modelText = result.ok ? (result.truncated ? dropDanglingTail(result.text) : result.text) : ''
+  const raw = modelText.length >= 20 ? modelText : facts
   if (mode === 'open') {
-    return stripAccidentalDeskCta(preserveChatFormatting(raw)).slice(0, 3200) || facts
+    return clipAtSentence(stripAccidentalDeskCta(preserveChatFormatting(raw)), 3200) || facts
   }
-  return spokenAnswer(raw, facts, latestUser)
+  return spokenAnswer(raw, facts, latestUser, keepHelpline)
 }
 
 /** Keep paragraphs / numbered lists readable in the chat UI (do not flatten to one line). */
@@ -1333,14 +1229,15 @@ async function rememberGuideTurn(
   }
 }
 
-function spokenAnswer(raw: string, facts: string, latestUser = ''): string {
+function spokenAnswer(raw: string, facts: string, latestUser = '', keepHelpline = false): string {
   const clean = raw.replace(/https?:\/\/\S+/g, ' ').replace(/[*#_`]/g, ' ').replace(/\s+/g, ' ').trim()
   if (/do not have a telangana script|tell me the district|what you already tried|tell me your name|what is your name|your email address|send me your mobile|మీ పేరు చెప్పండి|अपना नाम बता|जिला बता|cannot resolve|i am an ai|as an ai/i.test(clean)) {
     return firstSentences(withoutHelpline(facts), 8)
   }
   const parts = clean.split(/(?<=[.!?।])\s+/).map((part) => part.trim()).filter((part) => part.length > 8)
   const body = /^(please\s+)?(call|email|mail|phone)\b/i.test(parts[0] ?? '') && parts.length > 1 ? parts.slice(1) : parts
-  const answer = dropHelpline(body.slice(0, 8).join(' ').slice(0, 1600), latestUser)
+  const joined = clipAtSentence(body.slice(0, 8).join(' '), 1600)
+  const answer = keepHelpline ? joined : dropHelpline(joined, latestUser)
   if (/^(please\s+)?(call|email)\b/i.test(answer)) return firstSentences(withoutHelpline(facts), 8)
   return answer || firstSentences(withoutHelpline(facts), 8)
 }
@@ -1363,11 +1260,11 @@ function withoutHelpline(text: string): string {
 
 function firstSentences(text: string, count: number): string {
   const parts = text.split(/(?<=[.!?।])\s+/).map((part) => part.trim()).filter((part) => part.length > 8)
-  return parts.slice(0, count).join(' ').slice(0, 1600)
+  return clipAtSentence(parts.slice(0, count).join(' '), 1600)
 }
 
 function closingOffer(playbook: Playbook | null, lang: GuideLang): string {
-  if (!playbook) return COPY[lang].anythingElse
+  if (!playbook) return ''
   const phone = playbook.contacts.find((contact) => contact.phone)
   const mail = playbook.contacts.find((contact) => contact.email)
   return COPY[lang].close(
@@ -1413,8 +1310,8 @@ function absorbContact(text: string, contact: GuideContactInfo): void {
     contact.phone = phone
     contact.skipped_phone = false
   }
-  const name = extractNamedIntro(text) || extractBareName(text)
-  if (name && !contact.name) contact.name = name
+  const name = extractNamedIntro(text)
+  if (name) contact.name = name
   const place = text.match(/(?:place is|area is|location is|address is|ప్రాంతం|ఊరు|इलाका|जगह)\s*[:\-]?\s*([\p{L}\d][\p{L}\d .,-]{2,60})/iu)
   if (place && !contact.place) contact.place = place[1].trim().slice(0, 80)
 }
@@ -1428,7 +1325,7 @@ export function toSpoken(text: string): string {
     .map((line) => line.replace(/^\s*\d+\.\s*/, '').replace(/\s+/g, ' ').replace(/:\s*$/, '').trim())
     .filter((line) => line.length > 8 && !/^—/.test(line))
   const picked = lines.slice(0, 4).join(' ')
-  return picked.replace(/\s{2,}/g, ' ').trim().slice(0, 700)
+  return clipAtSentence(picked.replace(/\s{2,}/g, ' ').trim(), 700)
 }
 
 function detectLanguage(text: string): GuideLang | null {
@@ -1450,7 +1347,8 @@ async function replyWith(
 ): Promise<GuideTurn> {
   if (draft !== undefined) session.draft = draft
   session.language = lang
-  await appendGuideMessage(session.id, 'assistant', text)
+  // Group toll-free numbers (1800 425 00333) so they read and speak well.
+  await appendGuideMessage(session.id, 'assistant', groupPhoneNumbers(text))
   await saveGuideSession(session)
   return snapshot(session, playbook, hits, searched, caseChoices, focusedCase)
 }
@@ -1472,7 +1370,9 @@ async function snapshot(
     spoken: toSpoken(messages.filter((m) => m.role === 'assistant').at(-1)?.body ?? ''),
     status: session.status,
     problem: resolved ? { id: resolved.id, title: resolved.titles[session.language], mode: resolved.mode } : null,
-    contacts: resolved?.contacts ?? [],
+    // Contacts belong to the answer that was just given. Only the playbook passed in for THIS reply
+    // is shown; never fall back to the session's old topic (stale source chips, finding 8).
+    contacts: playbook?.contacts ?? [],
     draft: session.draft,
     searched,
     messages,
