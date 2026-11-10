@@ -290,7 +290,7 @@ export async function findOrCreateCitizenByPhone(args: {
   phoneRaw: string
   displayName?: string | null
   language?: string | null
-  channel: 'call' | 'manual'
+  channel: 'call' | 'manual' | 'whatsapp'
 }): Promise<CitizenRow> {
   const phone = normalizePhone(args.phoneRaw)
   if (!phone) throw new HttpError(400, 'Enter a valid mobile number', 'INVALID_PHONE')
