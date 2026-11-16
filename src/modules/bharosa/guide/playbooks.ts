@@ -514,6 +514,70 @@ export const PLAYBOOKS: Playbook[] = [
     sources: ['https://tgsouthernpower.org', 'https://tgnpdcl.com'],
   },
   {
+    id: 'power_bill_explain',
+    mode: 'self_serve',
+    titles: {
+      en: 'Understand my electricity bill',
+      te: 'నా కరెంట్ బిల్లు అర్థం చేసుకోవాలి',
+      hi: 'मेरा बिजली बिल समझना है',
+    },
+    keywords: [
+      'understand bill', 'explain bill', 'bill photo', 'analyse bill', 'analyze bill',
+      'బిల్లు అర్థం', 'బిల్లు ఫోటో', 'बिल समझ', 'बिल फोटो',
+    ],
+    steps: {
+      en: [
+        'Send a clear photo of your electricity bill, or type the units, total and billing month.',
+        'I will show what I read and ask you to confirm or fix any value. I never guess unclear numbers.',
+        'Then I explain each charge in plain words, show usage over the bills you sent, and give a next-bill range only when there is enough history — always labelled as an estimate.',
+      ],
+      te: [
+        'కరెంట్ బిల్లు స్పష్ట ఫోటో పంపండి, లేదా యూనిట్లు, మొత్తం, నెల టైప్ చేయండి.',
+        'నేను చదివినది చూపి Confirm / Fix అడుగుతాను. అస్పష్ట అంకెలు ఊహించను.',
+        'తర్వాత ప్రతి ఛార్జ్ సాధారణ మాటల్లో చెబుతాను, మీరు పంపిన బిల్లుల వాడకం చూపిస్తాను, చరిత్ర ఉంటే తదుపరి బిల్లు పరిధి అంచనాగా ఇస్తాను.',
+      ],
+      hi: [
+        'बिजली बिल की साफ़ फोटो भेजें, या यूनिट, कुल और महीना टाइप करें।',
+        'मैं जो पढ़ूँगी वह दिखाकर Confirm / Fix पूछूँगी। धुँधली संख्या नहीं गढ़ूँगी।',
+        'फिर हर शुल्क सादे शब्दों में बताऊँगी, आपके भेजे बिलों का इस्तेमाल दिखाऊँगी, और पर्याप्त इतिहास हो तो अगले बिल की सीमा अनुमान के रूप में दूँगी।',
+      ],
+    },
+    contacts: [TGSPDCL, TGNPDCL],
+    sources: ['https://tgsouthernpower.org', 'https://tgnpdcl.com'],
+  },
+  {
+    id: 'power_new_connection',
+    mode: 'self_serve',
+    titles: {
+      en: 'Cost of a new electricity connection',
+      te: 'కొత్త కరెంట్ కనెక్షన్ ఖర్చు',
+      hi: 'नए बिजली कनेक्शन की लागत',
+    },
+    keywords: [
+      'new connection', 'connection cost', 'new electricity connection', 'new power connection',
+      'కొత్త కనెక్షన్', 'नया कनेक्शन',
+    ],
+    steps: {
+      en: [
+        'Share your location and say whether it is a home, shop or farm, and how many kW you need. If you do not know the load, list your appliances and I will suggest a number you can change.',
+        'When approved pole and charge data is available for the place, I name the nearest suitable pole, list materials, and show materials/work and applicant charges as two separate estimate lines. Until then I explain the official process and do not invent poles or prices.',
+        'Apply on the TGSPDCL or TGNPDCL site or MeeSeva. Call 1912 for help. Bharosa submits nothing to any office.',
+      ],
+      te: [
+        'లొకేషన్ షేర్ చేసి ఇల్లు / దుకాణం / వ్యవసాయం మరియు kW చెప్పండి. లోడ్ తెలియకపోతే పరికరాలు చెప్పండి — సూచన ఇస్తాను, మార్చవచ్చు.',
+        'ఆమోదిత పోల్ / ఛార్జ్ డేటా ఉంటే సమీప పోల్, మెటీరియల్స్, మరియు మెటీరియల్-పని / దరఖాస్తుదారు ఛార్జీలను వేరు వేరు అంచనా లైన్లుగా చూపిస్తాను. లేకపోతే ప్రక్రియ చెబుతాను — పోల్ లేదా ధర ఊహించను.',
+        'TGSPDCL లేదా TGNPDCL సైట్ లేదా MeeSevaలో దరఖాస్తు. సహాయానికి 1912. భరోసా ఏ ఆఫీసుకూ పంపదు.',
+      ],
+      hi: [
+        'लोकेशन साझा करें और बताएँ घर / दुकान / खेत तथा कितने kW चाहिए। लोड न पता हो तो उपकरण बताएँ — सुझाव दूँगी, बदल सकते हैं।',
+        'स्वीकृत पोल / शुल्क डेटा हो तो निकट पोल, सामग्री, और सामग्री-काम / आवेदक शुल्क अलग-अलग अनुमान पंक्तियों में दिखाऊँगी। नहीं तो प्रक्रिया बताऊँगी — पोल या कीमत नहीं गढ़ूँगी।',
+        'TGSPDCL या TGNPDCL साइट या मीसेवा पर आवेदन। मदद के लिए 1912। भरोसा किसी दफ़्तर में नहीं भेजता।',
+      ],
+    },
+    contacts: [TGSPDCL, TGNPDCL, MEESEVA],
+    sources: ['https://tgsouthernpower.org', 'https://tgnpdcl.com', 'https://meeseva.telangana.gov.in'],
+  },
+  {
     id: 'water_supply',
     mode: 'department',
     titles: {
@@ -845,6 +909,8 @@ export function playbookById(id: string | null | undefined): Playbook | null {
 
 /** Checked before the longer keyword list. More specific problems come first. */
 const HINTS: { id: string; re: RegExp }[] = [
+  { id: 'power_bill_explain', re: /(understand|explain|analyse|analyze|read).{0,40}(electricity|power)?\s*bill|bill\s*photo|బిల్లు\s*(అర్థం|వివర|ఫోటో)|बिल\s*(समझ|फोटो|फ़ोटो)/i },
+  { id: 'power_new_connection', re: /new\s+(electricity\s+|power\s+)?connection|connection\s+cost|కొత్త\s*(కరెంట్\s*)?కనెక్షన్|नया\s*(बिजली\s*)?कनेक्शन/i },
   { id: 'power_bill', re: /(electricity|power|discom|tgspdcl|tgnpdcl|కరెంట్|విద్యుత్|बिजली).{0,40}(bill|meter|బిల్లు|మీటర్|बिल|मीटर)|(bill|meter|బిల్లు|बिल).{0,40}(electricity|power|high|wrong|excess|కరెంట్|बिजली)|\buksc\b/i },
   { id: 'streetlight', re: /street\s*light|lamp\s*post|వీధి దీపం|स्ट्रीट लाइट|सड़क की बत्ती/i },
   { id: 'manhole', re: /manhole|మ్యాన్‌హోల్|मैनहोल/i },
@@ -873,7 +939,15 @@ export function matchPlaybook(text: string): { playbook: Playbook; score: number
   const hay = text.toLowerCase()
   const documentExample = /aadhaar|aadhar|ఆధార్|आधार|document|proof|family|father|mother|option/.test(hay)
   for (const hint of HINTS) {
-    if (documentExample && (hint.id === 'power_bill' || hint.id === 'power_outage')) continue
+    if (
+      documentExample &&
+      (hint.id === 'power_bill' ||
+        hint.id === 'power_outage' ||
+        hint.id === 'power_bill_explain' ||
+        hint.id === 'power_new_connection')
+    ) {
+      continue
+    }
     if (!hint.re.test(text) && !hint.re.test(hay)) continue
     const playbook = playbookById(hint.id)
     if (playbook) return { playbook, score: 6 }

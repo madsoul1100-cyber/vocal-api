@@ -1,4 +1,5 @@
 import { Router, type Request } from 'express'
+import multer from 'multer'
 import { dbQuery } from '@/lib/db.js'
 import { tenantApp } from '@/config/tenant.config.js'
 import { resolveOtpDeliveryMode } from '@/lib/otp/config.js'
@@ -340,6 +341,37 @@ function guideLang(v: unknown): GuideLang | null {
   return v === 'en' || v === 'hi' || v === 'te' ? v : null
 }
 
+const guideBillUpload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 8 * 1024 * 1024, files: 1 },
+})
+
+function parseGuideLocation(body: unknown): { lat: number; lng: number; label?: string } | null {
+  if (!body || typeof body !== 'object') return null
+  const row = body as Record<string, unknown>
+  const loc = row.location && typeof row.location === 'object' ? (row.location as Record<string, unknown>) : row
+  const lat = typeof loc.lat === 'number' ? loc.lat : typeof loc.latitude === 'number' ? loc.latitude : Number(loc.lat ?? loc.latitude)
+  const lng = typeof loc.lng === 'number' ? loc.lng : typeof loc.longitude === 'number' ? loc.longitude : Number(loc.lng ?? loc.longitude)
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return null
+  const label = typeof loc.label === 'string' ? loc.label.slice(0, 120) : typeof loc.address === 'string' ? loc.address.slice(0, 120) : undefined
+  return { lat, lng, label }
+}
+
+function parseGuideImage(body: unknown): { buffer: Buffer; mimetype: string } | null {
+  if (!body || typeof body !== 'object') return null
+  const row = body as Record<string, unknown>
+  const b64 = typeof row.image_base64 === 'string' ? row.image_base64 : typeof row.bill_image_base64 === 'string' ? row.bill_image_base64 : null
+  if (!b64) return null
+  const mime = (typeof row.image_mime === 'string' ? row.image_mime : 'image/jpeg').slice(0, 80)
+  try {
+    const buffer = Buffer.from(b64.replace(/^data:image\/\w+;base64,/, ''), 'base64')
+    if (buffer.length < 200) return null
+    return { buffer, mimetype: mime }
+  } catch {
+    return null
+  }
+}
+
 router.post(
   '/guide/messages',
   optionalCitizen,
@@ -352,10 +384,16 @@ router.post(
     const orgId = await resolvePublicOrgId(req)
     const message = str(req.body?.message, 4000)
     const confirmSend = req.body?.confirm_send === true
-    if (!message && !confirmSend) throw new HttpError(400, 'Message is required', 'MESSAGE_REQUIRED')
+    const location = parseGuideLocation(req.body)
+    const image = parseGuideImage(req.body)
     const sessionId = uuid(req.body?.session_id)
     if (req.body?.session_id && !sessionId) throw new HttpError(400, 'Invalid session', 'INVALID_SESSION')
     const citizen = tryCitizenFromReq(req)
+    // Empty message is allowed for logged-in bootstrap (case list) and for media/location turns.
+    // Anonymous empty posts with nothing else are still rejected.
+    if (!message && !confirmSend && !location && !image && !citizen) {
+      throw new HttpError(400, 'Message is required', 'MESSAGE_REQUIRED')
+    }
     res.json(await handleGuideTurn({
       orgId,
       sessionId,
@@ -366,6 +404,44 @@ router.post(
       citizenName: citizen?.display_name ?? null,
       citizenPhone: citizen?.phone_e164 ?? null,
       citizenEmail: citizen?.email ?? null,
+      image,
+      location,
+    }))
+  }),
+)
+
+/** Multipart bill photo upload for Feature 1 (web chat). */
+router.post(
+  '/guide/bill-photo',
+  optionalCitizen,
+  rateLimit({
+    windowMs: 60_000,
+    max: 10,
+    key: (r) => `guide-bill:${tryCitizenFromReq(r)?.id ?? clientIp(r)}`,
+  }),
+  guideBillUpload.single('photo'),
+  route(async (req, res) => {
+    const orgId = await resolvePublicOrgId(req)
+    const file = req.file
+    if (!file?.buffer?.length) throw new HttpError(400, 'Bill photo is required', 'PHOTO_REQUIRED')
+    if (!file.mimetype.startsWith('image/')) {
+      throw new HttpError(400, 'Please send an image of the bill', 'PHOTO_INVALID')
+    }
+    const sessionId = uuid(req.body?.session_id)
+    if (req.body?.session_id && !sessionId) throw new HttpError(400, 'Invalid session', 'INVALID_SESSION')
+    const citizen = tryCitizenFromReq(req)
+    const caption = str(req.body?.message, 500) || 'Explain my electricity bill'
+    res.json(await handleGuideTurn({
+      orgId,
+      sessionId,
+      language: guideLang(req.body?.language),
+      message: caption,
+      confirmSend: false,
+      citizenId: citizen?.id ?? null,
+      citizenName: citizen?.display_name ?? null,
+      citizenPhone: citizen?.phone_e164 ?? null,
+      citizenEmail: citizen?.email ?? null,
+      image: { buffer: file.buffer, mimetype: file.mimetype },
     }))
   }),
 )

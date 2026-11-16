@@ -33,21 +33,30 @@ function detectLang(text: string): GuideLang | null {
   return null
 }
 
-const COPY: Record<GuideLang, { media: string; error: string; draftHint: string; draftHeader: string }> = {
+const COPY: Record<
+  GuideLang,
+  { media: string; billPhotoHint: string; error: string; draftHint: string; draftHeader: string }
+> = {
   en: {
     media: 'I can only read text messages here for now. Please type your problem in a few words.',
+    billPhotoHint:
+      'I received your photo. On WhatsApp I cannot open the image file yet — please type the units, total amount (Rs), and billing month from the bill (example: units 182 total 1450 period Sep 2026). Or open Bharosa Help on the web to upload the photo.',
     error: 'Sorry, something went wrong on our side. Please send your message again in a moment.',
     draftHeader: 'Draft email to the department',
     draftHint: 'Reply *SEND* to email this to the department, or tell me what to change.',
   },
   te: {
     media: 'ప్రస్తుతం ఇక్కడ టెక్స్ట్ సందేశాలు మాత్రమే చదవగలను. దయచేసి మీ సమస్యను కొన్ని మాటల్లో టైప్ చేయండి.',
+    billPhotoHint:
+      'ఫోటో వచ్చింది. WhatsAppలో ఇంకా చిత్రం తెరవలేను — బిల్లు నుంచి యూనిట్లు, మొత్తం (Rs), నెల టైప్ చేయండి (ఉదా: units 182 total 1450 period Sep 2026). లేదా వెబ్‌లో Bharosa Helpలో ఫోటో అప్‌లోడ్ చేయండి.',
     error: 'క్షమించండి, మా వైపు ఏదో సమస్య వచ్చింది. కాసేపటి తర్వాత మళ్లీ సందేశం పంపండి.',
     draftHeader: 'విభాగానికి డ్రాఫ్ట్ మెయిల్',
     draftHint: 'విభాగానికి పంపాలంటే *SEND* అని రిప్లై ఇవ్వండి, లేదా ఏం మార్చాలో చెప్పండి.',
   },
   hi: {
     media: 'अभी मैं यहाँ सिर्फ़ टेक्स्ट संदेश पढ़ सकती हूँ। कृपया अपनी समस्या कुछ शब्दों में लिखें।',
+    billPhotoHint:
+      'फोटो मिल गई। WhatsApp पर अभी चित्र नहीं खोल सकती — बिल से यूनिट, कुल रकम (Rs) और महीना टाइप करें (जैसे: units 182 total 1450 period Sep 2026)। या वेब पर Bharosa Help में फोटो अपलोड करें।',
     error: 'माफ़ कीजिए, हमारी तरफ़ कुछ गड़बड़ हुई। थोड़ी देर बाद फिर संदेश भेजें।',
     draftHeader: 'विभाग को ड्राफ़्ट ईमेल',
     draftHint: 'विभाग को भेजने के लिए *SEND* लिखें, या बताएँ क्या बदलना है।',
@@ -112,8 +121,36 @@ export async function handleWhatsAppInbound(args: { orgId: string; msg: InboundW
 
   let lang: GuideLang = detectLang(msg.text) ?? 'en'
   try {
-    // Media we can't read and no caption -> ask for text.
-    if (!msg.text) {
+    // Image without caption: start / continue bill flow with typed-value instructions.
+    if (!msg.text && msg.hasImage) {
+      const citizen = await findOrCreateCitizenByPhone({
+        orgId,
+        phoneRaw: wa,
+        displayName: msg.name,
+        channel: 'whatsapp',
+      })
+      const existing = await activeSessionId(orgId, wa)
+      const turn = await handleGuideTurn({
+        orgId,
+        sessionId: existing?.id ?? null,
+        language: existing ? null : ((citizen.preferred_language as GuideLang) ?? 'te'),
+        message: 'Explain my electricity bill',
+        confirmSend: false,
+        citizenId: citizen.id,
+        citizenName: citizen.display_name ?? msg.name,
+        citizenPhone: citizen.phone_e164 ?? `+${wa}`,
+        citizenEmail: citizen.email,
+      })
+      lang = turn.language
+      await bindSession(orgId, wa, turn.session_id)
+      const body = `${COPY[lang].billPhotoHint}\n\n${formatReply(turn)}`
+      const sent = await sendWhatsAppText(wa, body)
+      if (!sent.ok) console.error(`${tag} send failed: ${sent.error}`)
+      return
+    }
+
+    // Other media we can't read and no caption -> ask for text.
+    if (!msg.text && !msg.location) {
       await sendWhatsAppText(wa, COPY[lang].media)
       return
     }
@@ -125,21 +162,32 @@ export async function handleWhatsAppInbound(args: { orgId: string; msg: InboundW
       channel: 'whatsapp',
     })
 
-    const reset = RESET_RE.test(msg.text)
+    const reset = msg.text ? RESET_RE.test(msg.text) : false
     const existing = reset ? null : await activeSessionId(orgId, wa)
-    const confirm = !!existing?.hasDraft && CONFIRM_RE.test(msg.text)
+    const confirm = !!existing?.hasDraft && !!msg.text && CONFIRM_RE.test(msg.text)
+
+    // Location pin with no text → treat as new-connection share when already in that flow,
+    // otherwise pass location into the guide with a short prompt.
+    const message =
+      reset || confirm
+        ? null
+        : msg.text ||
+          (msg.location ? 'New electricity connection' : null)
 
     const turn = await handleGuideTurn({
       orgId,
       sessionId: existing?.id ?? null,
       // Language is only chosen when a session starts; afterwards the guide follows the citizen's script.
-      language: existing ? null : (detectLang(msg.text) ?? (citizen.preferred_language as GuideLang) ?? 'te'),
-      message: reset || confirm ? null : msg.text,
+      language: existing
+        ? null
+        : (detectLang(msg.text) ?? (citizen.preferred_language as GuideLang) ?? 'te'),
+      message,
       confirmSend: confirm,
       citizenId: citizen.id,
       citizenName: citizen.display_name ?? msg.name,
       citizenPhone: citizen.phone_e164 ?? `+${wa}`,
       citizenEmail: citizen.email,
+      location: msg.location ?? null,
     })
     lang = turn.language
 

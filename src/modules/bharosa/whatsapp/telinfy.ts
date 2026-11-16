@@ -170,6 +170,10 @@ export interface InboundWhatsApp {
   text: string
   /** Original provider type (image, audio, ...) for logging / friendly replies. */
   providerType: string
+  /** Structured GPS when the citizen shared a WhatsApp location pin. */
+  location?: { lat: number; lng: number; label?: string } | null
+  /** True when an image was attached (bill photo path). Bytes may be unavailable. */
+  hasImage?: boolean
 }
 
 type Obj = Record<string, unknown>
@@ -198,12 +202,28 @@ function parseOne(msg: Obj, profileName: string | null): InboundWhatsApp | null 
   if (type === 'location') {
     const loc = asObj(msg.location)
     const bits = [asStr(loc.name), asStr(loc.address)].filter(Boolean).join(', ')
+    const lat = Number(loc.latitude)
+    const lng = Number(loc.longitude)
     const coords = `${asStr(loc.latitude)}, ${asStr(loc.longitude)}`
-    return { ...base, kind: 'location', text: `My location: ${bits ? `${bits} (${coords})` : coords}` }
+    const location =
+      Number.isFinite(lat) && Number.isFinite(lng)
+        ? { lat, lng, label: bits || undefined }
+        : null
+    return {
+      ...base,
+      kind: 'location',
+      text: `My location: ${bits ? `${bits} (${coords})` : coords}`,
+      location,
+    }
   }
   if (['image', 'video', 'audio', 'document', 'sticker'].includes(type)) {
     const caption = asStr(asObj(msg[type]).caption).trim()
-    return { ...base, kind: 'media', text: caption }
+    return {
+      ...base,
+      kind: 'media',
+      text: caption,
+      hasImage: type === 'image' || type === 'document',
+    }
   }
   return { ...base, kind: 'unsupported', text: '' }
 }

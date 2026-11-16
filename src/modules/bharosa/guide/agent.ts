@@ -38,6 +38,13 @@ import {
   type GuideCaseChoice,
 } from './history.js'
 import {
+  handleElectricityTurn,
+  isElectricityActive,
+  parseElectricityState,
+  type ElectricityUiPayload,
+  type GeoPoint,
+} from '../electricity/index.js'
+import {
   matchPlaybook,
   PLAYBOOKS,
   playbookById,
@@ -238,6 +245,8 @@ export interface GuideTurn {
   /** Clickable previous cases (logged-in). */
   case_choices?: GuideCaseChoice[]
   focused_case?: { kind: string; id: string; title: string; status: string } | null
+  /** Electricity bill / new-connection UI payload (charts, confirm actions). */
+  electricity?: ElectricityUiPayload | null
 }
 
 export async function handleGuideTurn(args: {
@@ -251,6 +260,10 @@ export async function handleGuideTurn(args: {
   citizenName?: string | null
   citizenPhone?: string | null
   citizenEmail?: string | null
+  /** Optional bill photo for Feature 1. */
+  image?: { buffer: Buffer; mimetype: string } | null
+  /** Optional GPS pin for Feature 2. */
+  location?: GeoPoint | null
 }): Promise<GuideTurn> {
   const session = args.sessionId
     ? await loadGuideSession(args.orgId, args.sessionId)
@@ -306,7 +319,8 @@ export async function handleGuideTurn(args: {
   }
 
   const text = (args.message ?? '').trim()
-  if (!text) {
+  const hasElectricityMedia = !!(args.image || args.location)
+  if (!text && !hasElectricityMedia) {
     const messages = await listGuideMessages(session.id)
     if (!messages.length) {
       if (session.citizen_id) {
@@ -322,19 +336,62 @@ export async function handleGuideTurn(args: {
     return snapshot(session, null, [], false)
   }
 
-  const detected = detectLanguage(text)
+  const detected = text ? detectLanguage(text) : null
   if (detected) session.language = detected
   const lang = session.language
-  await appendGuideMessage(session.id, 'user', text.slice(0, 4000))
+  const userLog =
+    text ||
+    (args.image ? '[Bill photo]' : args.location ? `[Location ${args.location.lat}, ${args.location.lng}]` : '')
+  if (userLog) await appendGuideMessage(session.id, 'user', userLog.slice(0, 4000))
 
   const history = await listGuideMessages(session.id)
   const userText = history.filter((m) => m.role === 'user').map((m) => m.body).join('\n')
   const lastAssistantBody = [...history].reverse().find((m) => m.role === 'assistant')?.body ?? ''
   absorbContact(userText, session.contact)
-  absorbLadderSlots(text, session, askedForPlace(lastAssistantBody))
-  if (declinesName(text)) session.contact.name_declined = true
-  await refreshNeedsAreaHint(session, text)
+  if (text) absorbLadderSlots(text, session, askedForPlace(lastAssistantBody))
+  if (text && declinesName(text)) session.contact.name_declined = true
+  if (text) await refreshNeedsAreaHint(session, text)
   syncPhase(session)
+
+  // Electricity features (bill photo / new connection) — multi-turn, before civic playbook LLM
+  {
+    const eState = parseElectricityState(session.contact.electricity)
+    if (isElectricityActive(eState) || text || args.image || args.location) {
+      const eTurn = await handleElectricityTurn({
+        state: eState,
+        lang,
+        text,
+        image: args.image ?? null,
+        location: args.location ?? null,
+      })
+      if (eTurn) {
+        session.contact.electricity = eTurn.state
+        session.problem_id = eTurn.problem_id
+        session.phase = 'help'
+        session.contact.problem_summary = eTurn.problem_id === 'power_bill_explain'
+          ? 'Understand electricity bill'
+          : 'New electricity connection'
+        const playbook = playbookById(eTurn.problem_id)
+        const turn = await replyWith(
+          session,
+          lang,
+          eTurn.reply,
+          playbook,
+          [],
+          false,
+          undefined,
+          undefined,
+          undefined,
+          eTurn.ui,
+        )
+        // Attach contacts from the electricity module when playbook contacts are empty
+        if (!turn.contacts.length && eTurn.contacts.length) {
+          turn.contacts = eTurn.contacts
+        }
+        return turn
+      }
+    }
+  }
 
   const prior = session.contact.phone ? await previousGuideTopic(args.orgId, session.contact.phone, session.id) : null
 
@@ -583,6 +640,7 @@ function resetCurrentProblem(session: GuideSession): void {
   session.contact.active_case_id = undefined
   session.contact.active_case_kind = undefined
   session.contact.active_case_title = undefined
+  session.contact.electricity = null
 }
 
 async function offerCaseHistory(
@@ -1344,13 +1402,14 @@ async function replyWith(
   draft?: GuideDraft | null,
   caseChoices?: GuideCaseChoice[],
   focusedCase?: GuideTurn['focused_case'],
+  electricity?: ElectricityUiPayload | null,
 ): Promise<GuideTurn> {
   if (draft !== undefined) session.draft = draft
   session.language = lang
   // Group toll-free numbers (1800 425 00333) so they read and speak well.
   await appendGuideMessage(session.id, 'assistant', groupPhoneNumbers(text))
   await saveGuideSession(session)
-  return snapshot(session, playbook, hits, searched, caseChoices, focusedCase)
+  return snapshot(session, playbook, hits, searched, caseChoices, focusedCase, electricity)
 }
 
 async function snapshot(
@@ -1360,6 +1419,7 @@ async function snapshot(
   searched: boolean,
   caseChoices?: GuideCaseChoice[],
   focusedCase?: GuideTurn['focused_case'],
+  electricity?: ElectricityUiPayload | null,
 ): Promise<GuideTurn> {
   const messages = await listGuideMessages(session.id)
   const resolved = playbook ?? playbookById(session.problem_id)
@@ -1387,5 +1447,6 @@ async function snapshot(
             status: 'open',
           }
         : null),
+    electricity: electricity ?? null,
   }
 }
