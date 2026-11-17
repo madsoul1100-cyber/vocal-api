@@ -41,17 +41,17 @@ export const ECOPY = {
 
   confirmPrompt: (lang: L) =>
     lang === 'te'
-      ? 'ఇది సరియైతే *Correct* అని చెప్పండి. ఏదైనా తప్పు ఉంటే *Fix units 182* లాగా సరిదిద్దండి.'
+      ? 'సరియైతే సాధారణంగా చెప్పండి — “సరే”, “correct”, “explain చెయ్”. తప్పు ఉంటే “units 227 కాదు, 210” లాగా చెప్పండి.'
       : lang === 'hi'
-        ? 'सही हो तो *Correct* लिखें। कुछ गलत हो तो *Fix units 182* जैसे सुधारें।'
-        : 'If this is right, reply *Correct*. To change a value, say *Fix units 182* (or total / period).',
+        ? 'सही हो तो आम भाषा में लिखें — “हाँ”, “correct”, “समझाओ”। गलत हो तो “units 227 नहीं, 210” जैसे सुधारें।'
+        : 'If this looks right, just say so in normal words — “yes”, “looks correct”, or “explain”. If something is wrong, say what to change — e.g. “units should be 210”.',
 
   confirmConnection: (lang: L) =>
     lang === 'te'
-      ? 'ఇది సరియైతే *Correct* అని చెప్పండి. మార్చాలంటే లొకేషన్ / ఇల్లు-దుకాణం-వ్యవసాయం / kW మళ్లీ చెప్పండి.'
+      ? 'సరియైతే “సరే / correct / explain” అని చెప్పండి. మార్చాలంటే లొకేషన్ / ఇల్లు-దుకాణం-వ్యవసాయం / kW మళ్లీ చెప్పండి.'
       : lang === 'hi'
-        ? 'सही हो तो *Correct* लिखें। बदलना हो तो लोकेशन / घर-दुकान-खेत / kW फिर बताएँ।'
-        : 'If this is right, reply *Correct*. To change something, send the location, home/shop/farm, or kW again.',
+        ? 'सही हो तो आम भाषा में “हाँ / correct / समझाओ” लिखें। बदलना हो तो लोकेशन / घर-दुकान-खेत / kW फिर बताएँ।'
+        : 'If this looks right, say so in normal words — “yes”, “correct”, or “explain”. To change something, send the location, home/shop/farm, or kW again.',
 
   unsupportedLang: (lang: L) =>
     lang === 'te'
@@ -118,8 +118,18 @@ export const ECOPY = {
 } as const
 
 export const BILL_ACTIONS = (lang: L) => [
-  { id: 'correct', label: lang === 'te' ? 'సరియైంది (Correct)' : lang === 'hi' ? 'सही है (Correct)' : 'Correct' },
-  { id: 'fix', label: lang === 'te' ? 'సరిదిద్దు (Fix)' : lang === 'hi' ? 'सुधारें (Fix)' : 'Fix a value' },
+  {
+    id: 'correct',
+    label: lang === 'te' ? 'సరియైంది — వివరించు' : lang === 'hi' ? 'सही है — समझाओ' : 'Looks correct — explain',
+  },
+  {
+    id: 'fix',
+    label: lang === 'te' ? 'ఏదో తప్పు ఉంది' : lang === 'hi' ? 'कुछ गलत है' : 'Something is wrong',
+  },
+  {
+    id: 'why_high',
+    label: lang === 'te' ? 'బిల్లు ఎందుకు ఎక్కువ?' : lang === 'hi' ? 'बिल क्यों ज़्यादा?' : 'Why is the bill high?',
+  },
 ]
 
 export const CONNECTION_TYPE_ACTIONS = (lang: L) => [

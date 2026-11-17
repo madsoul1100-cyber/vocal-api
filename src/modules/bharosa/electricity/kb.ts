@@ -189,13 +189,13 @@ export const ELECTRICITY_KB: KbRecord[] = [
   },
   {
     id: 'kb-dps',
-    match_labels: ['DPS', 'DELAYED PAYMENT SURCHARGE', 'DELAYED PAYMENT'],
+    match_labels: ['DPS', 'LPSC', 'DELAYED PAYMENT SURCHARGE', 'DELAYED PAYMENT', 'LATE PAYMENT SURCHARGE'],
     status: 'official',
     attention: true,
     meaning: {
-      en: 'Delayed payment surcharge for paying after the due date.',
-      te: 'గడువు తర్వాత కట్టితే వచ్చే డిలేడ్ పేమెంట్ సర్‌ఛార్జ్.',
-      hi: 'नियत तारीख के बाद भुगतान पर विलंब अधिभार।',
+      en: 'Late / delayed payment surcharge (LPSC or DPS) for paying after the due date.',
+      te: 'గడువు తర్వాత కట్టితే వచ్చే ఆలస్య / డిలేడ్ పేమెంట్ సర్‌ఛార్జ్ (LPSC/DPS).',
+      hi: 'नियत तारीख के बाद भुगतान पर विलंब अधिभार (LPSC/DPS)।',
     },
     when: {
       en: 'Existence official; show printed amount; do not invent the rate.',
@@ -362,13 +362,24 @@ export const ELECTRICITY_KB: KbRecord[] = [
   },
   {
     id: 'kb-totals',
-    match_labels: ['BILL AMOUNT', 'NET', 'NET BILL AMOUNT', 'TOTAL', 'TOTAL DUE', 'TOTAL AMOUNT DUE', 'NET AMOUNT'],
+    match_labels: [
+      'BILL AMOUNT',
+      'NET',
+      'NET BILL AMOUNT',
+      'NET CURRENT BILL',
+      'GROSS BILL',
+      'AMOUNT PAYABLE',
+      'TOTAL',
+      'TOTAL DUE',
+      'TOTAL AMOUNT DUE',
+      'NET AMOUNT',
+    ],
     status: 'structural',
     lumpable: false,
     meaning: {
-      en: 'A total / net line on the bill.',
-      te: 'బిల్లు మొత్తం / నెట్ లైన్.',
-      hi: 'बिल का कुल / नेट पंक्ति।',
+      en: 'A total / net / payable line on the bill (not a separate charge type).',
+      te: 'బిల్లు మొత్తం / నెట్ / చెల్లించాల్సిన లైన్ (వేరే ఛార్జ్ రకం కాదు).',
+      hi: 'बिल का कुल / नेट / देय पंक्ति (अलग शुल्क प्रकार नहीं)।',
     },
     when: {
       en: 'State once as totals. Never itemize as a charge explanation.',
@@ -377,6 +388,25 @@ export const ELECTRICITY_KB: KbRecord[] = [
     },
     allowed: ['state_as_total'],
     not_allowed: ['itemize_as_charge'],
+    sources: [],
+  },
+  {
+    id: 'kb-advance-payment',
+    match_labels: ['ADVANCE PAYMENT', 'ADVANCE', 'ADVANCE AMOUNT'],
+    status: 'structural',
+    attention: true,
+    meaning: {
+      en: 'Advance payment already with the discom, adjusted against this bill when printed.',
+      te: 'డిస్కం వద్ద ఉన్న అడ్వాన్స్ చెల్లింపు — బిల్లులో సర్దుబాటు అయితే చూపుతుంది.',
+      hi: 'डिस्कॉम के पास पहले से एडवांस भुगतान — बिल में समायोजन दिखे तो।',
+    },
+    when: {
+      en: 'Show the printed amount. Zero means no advance was applied on this bill.',
+      te: 'బిల్లు మొత్తం చూపండి. సున్నా అంటే ఈ బిల్లుకు అడ్వాన్స్ వర్తించలేదు.',
+      hi: 'बिल की रकम दिखाएँ। शून्य का मतलब इस बिल पर एडवांस नहीं लगा।',
+    },
+    allowed: ['show_printed_line'],
+    not_allowed: [],
     sources: [],
   },
   {

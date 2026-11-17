@@ -50,14 +50,70 @@ const CONNECTION_START =
   /\bnew\s+(electricity\s+)?connection\b|\bconnection\s+cost\b|\bnew\s+power\s+connection\b|కొత్త\s*(కరెంట్\s*)?కనెక్షన్|नया\s*(बिजली\s*)?कनेक्शन|new connection/i
 
 const CANCEL = /^\s*(cancel|stop|exit|quit|never\s*mind|వద్దు|रद्द|बस)\s*$/i
-const CORRECT = /^\s*(correct|yes|looks?\s*good|సరియైంది|సరే|सही|ठीक\s*है)\s*[!.]*\s*$/i
-const FIX = /^\s*(fix|change|update|సరిదిద్దు|सुधार)\b/i
+/** Exact short confirmations */
+const CORRECT_EXACT =
+  /^\s*(correct|yes|yep|yeah|yup|ok|okay|sure|right|fine|good|looks?\s*good|all\s*good|go\s*ahead|proceed|continue|explain|సరియైంది|సరే|అవును|सही|ठीक\s*है|हाँ|हां)\s*[!.]*\s*$/i
+/** Natural “this looks right” even with extra words */
+const CORRECT_SOFT =
+  /\b(correct|looks?\s*(correct|right|good|fine|ok|okay)|details?\s*(look|are|seem)s?\s*(correct|right|good|fine|ok)|yeah\b.*\b(correct|right)|yes\b.*\b(correct|right)|that'?s?\s*(right|correct|fine)|all\s*(good|correct)|go\s*ahead|please\s*explain|can\s*(you\s*)?explain|సరియైంది|సరిపోయింది|సరైనది|सही\s*(लग|है)|ठीक\s*है)\b/i
+const FIX = /^\s*(fix|change|update|wrong|incorrect|సరిదిద్దు|సరియైంది\s*కాదు|सुधार|गलत)\b/i
+const HIGH_BILL =
+  /\b(why|how come|too\s*(much|high)|so\s*high|bill\s*(is\s*)?(high|more|expensive)|higher|what\s*(am\s*i|i'?m)\s*doing\s*wrong|ఎక్కువ|ఎందుకు|ఎక్కువైంది|ज्यादा|महंगा|क्यों)\b/i
 const FINAL_PRICE = /final\s*price|exact\s*(price|amount|cost)|అంతిమ\s*ధర|अंतिम\s*(कीमत|राशि)/i
 const NEW_CONN_HISTORY = /^\s*(new\s+connection\s+history|fresh\s+history|కొత్త\s*చరిత్ర|नया\s*इतिहास)\s*$/i
 const COMPLAINT_ASK =
   /\b(file|raise|register|follow\s*up)\b.{0,30}\b(complaint|grievance)|ఫిర్యాదు\s*(పెట్ట|ఫైల్)|शिकायत\s*(दर्ज|फाइल)/i
 const DEFLECT =
   /\b(aadhaar|ration|pension|pothole|sewer|water\s*supply|passport|voter)\b|ఆధార్|రేషన్|నీళ్లు|రోడ్డు|आधार|राशन|सड़क/i
+
+function isConfirm(text: string): boolean {
+  const t = text.trim()
+  if (!t || FIX.test(t)) return false
+  if (CORRECT_EXACT.test(t)) return true
+  // Soft confirm only if they are not asking to change a number
+  if (/fix\s+\w+/i.test(t)) return false
+  return CORRECT_SOFT.test(t)
+}
+
+function wantsHighBillExplain(text: string): boolean {
+  return HIGH_BILL.test(text)
+}
+
+function explainWhyHigh(reading: BillReading, lang: GuideLang): string {
+  const units = reading.units
+  const energy = reading.charges.find((c) => /energy/i.test(c.label))
+  const subsidy = reading.charges.find((c) => /subsidy|gruha/i.test(c.label))
+  const lpsc = reading.charges.find((c) => /lpsc|delayed|dps|surcharge/i.test(c.label) && (c.amount_inr ?? 0) > 0)
+  const arrears = reading.charges.find((c) => /arrear/i.test(c.label) && (c.amount_inr ?? 0) > 0)
+  const bits: string[] = []
+
+  if (lang === 'te') {
+    bits.push('బిల్లు ఎక్కువగా అనిపించడానికి, ఈ బిల్లులో కనిపించినవి:')
+    if (units != null) bits.push(`• యూనిట్లు: ${units} — వాడకం ఎక్కువైతే ఎనర్జీ ఛార్జీ పెరుగుతుంది.`)
+    if (energy?.amount_inr != null) bits.push(`• ఎనర్జీ ఛార్జీ: Rs ${energy.amount_inr} (ప్రధాన భాగం).`)
+    if (lpsc?.amount_inr != null) bits.push(`• LPSC / ఆలస్య ఛార్జీ: Rs ${lpsc.amount_inr} — గడువు తర్వాత కట్టితే వస్తుంది.`)
+    if (arrears?.amount_inr != null) bits.push(`• బకాయి: Rs ${arrears.amount_inr}.`)
+    if (subsidy?.amount_inr != null) bits.push(`• సబ్సిడీ క్రెడిట్: Rs ${Math.abs(subsidy.amount_inr)} తగ్గింపు.`)
+    bits.push('నేను రేట్లు ఊహించను. మరిన్ని నెలల బిల్లులు పంపితే వాడకం పోల్చి చెప్పగలను.')
+  } else if (lang === 'hi') {
+    bits.push('बिल ज़्यादा लगने के पीछे, इस बिल पर जो दिखा:')
+    if (units != null) bits.push(`• यूनिट: ${units} — इस्तेमाल ज़्यादा हो तो ऊर्जा शुल्क बढ़ता है।`)
+    if (energy?.amount_inr != null) bits.push(`• ऊर्जा शुल्क: Rs ${energy.amount_inr} (मुख्य हिस्सा)।`)
+    if (lpsc?.amount_inr != null) bits.push(`• LPSC / विलंब शुल्क: Rs ${lpsc.amount_inr} — देर से भरने पर।`)
+    if (arrears?.amount_inr != null) bits.push(`• बकाया: Rs ${arrears.amount_inr}.`)
+    if (subsidy?.amount_inr != null) bits.push(`• सब्सिडी क्रेडिट: Rs ${Math.abs(subsidy.amount_inr)} की कटौती।`)
+    bits.push('मैं दरें नहीं गढ़ूँगी। और महीने के बिल भेजें तो तुलना बता सकती हूँ।')
+  } else {
+    bits.push('From what is printed on this bill, here is what usually makes the amount feel high:')
+    if (units != null) bits.push(`• Units: ${units} — higher use raises the energy charge.`)
+    if (energy?.amount_inr != null) bits.push(`• Energy charges: Rs ${energy.amount_inr} (usually the main part).`)
+    if (lpsc?.amount_inr != null) bits.push(`• LPSC / late-payment charge: Rs ${lpsc.amount_inr} — added when payment is after the due date.`)
+    if (arrears?.amount_inr != null) bits.push(`• Arrears: Rs ${arrears.amount_inr}.`)
+    if (subsidy?.amount_inr != null) bits.push(`• Subsidy credit: Rs ${Math.abs(subsidy.amount_inr)} already reduced.`)
+    bits.push('I will not invent tariff rates. Send previous months’ bills if you want a usage comparison.')
+  }
+  return bits.join('\n')
+}
 
 export function detectsBillFeature(text: string): boolean {
   return BILL_START.test(text)
@@ -301,13 +357,15 @@ async function handleBillTurn(args: {
   }
 
   if (state.stage === 'confirm' && state.reading) {
-    if (CORRECT.test(text) || /^correct$/i.test(text.trim())) {
-      return confirmBill(state, lang)
-    }
-    if (FIX.test(text) || /fix\s+\w+/i.test(text)) {
-      const m = text.match(/fix\s+(\w+)\s*[:=]?\s*(.+)$/i)
-      if (m) {
-        const updated = applyBillCorrection(state.reading, m[1]!, m[2]!.trim())
+    // Natural “units should be 210” without requiring the word Fix
+    const softFix = text.match(
+      /\b(units?|total|amount|period|month|service(?:\s*no)?)\b.{0,20}(?:should\s*be|is|are|=|:)?\s*([A-Za-z0-9./-]{1,40})/i,
+    )
+    if (FIX.test(text) || /fix\s+\w+/i.test(text) || (softFix && !isConfirm(text) && !wantsHighBillExplain(text))) {
+      const m = text.match(/fix\s+(\w+)\s*[:=]?\s*(.+)$/i) || softFix
+      if (m && m[2]) {
+        const field = (m[1] || 'units').toLowerCase()
+        const updated = applyBillCorrection(state.reading, field, m[2]!.trim())
         state.reading = updated
         return {
           reply: `${formatReading(updated, lang)}\n\n${ECOPY.confirmPrompt(lang)}`,
@@ -317,20 +375,41 @@ async function handleBillTurn(args: {
           problem_id: 'power_bill_explain',
         }
       }
-      state.stage = 'fix_field'
-      state.fix_field = 'units'
-      return {
-        reply:
-          lang === 'te'
-            ? `ఏది మార్చాలి? ${userFacingField('units', lang)} / ${userFacingField('total', lang)} / ${userFacingField('period', lang)}. తర్వాత విలువ పంపండి.`
-            : lang === 'hi'
-              ? `क्या बदलें? ${userFacingField('units', lang)} / ${userFacingField('total', lang)} / ${userFacingField('period', lang)}। फिर मान भेजें।`
-              : `Which should I change — ${userFacingField('units', lang)}, ${userFacingField('total', lang)}, or ${userFacingField('period', lang)}? Then send the value.`,
-        state,
-        contacts: billContacts(),
-        ui: { feature: 'bill', stage: 'fix_field', actions: [] },
-        problem_id: 'power_bill_explain',
+      if (FIX.test(text) || /wrong|incorrect|తప్పు|गलत/i.test(text)) {
+        state.stage = 'fix_field'
+        state.fix_field = 'units'
+        return {
+          reply:
+            lang === 'te'
+              ? `ఏది మార్చాలి? ${userFacingField('units', lang)} / ${userFacingField('total', lang)} / ${userFacingField('period', lang)}. తర్వాత విలువ పంపండి.`
+              : lang === 'hi'
+                ? `क्या बदलें? ${userFacingField('units', lang)} / ${userFacingField('total', lang)} / ${userFacingField('period', lang)}। फिर मान भेजें।`
+                : `Which should I change — ${userFacingField('units', lang)}, ${userFacingField('total', lang)}, or ${userFacingField('period', lang)}? Then send the value.`,
+          state,
+          contacts: billContacts(),
+          ui: { feature: 'bill', stage: 'fix_field', actions: [] },
+          problem_id: 'power_bill_explain',
+        }
       }
+    }
+
+    if (isConfirm(text) || wantsHighBillExplain(text)) {
+      const confirmed = confirmBill(state, lang)
+      if (wantsHighBillExplain(text) && confirmed.state && 'confirmed' in confirmed.state && confirmed.state.confirmed) {
+        confirmed.reply = `${confirmed.reply}\n\n${explainWhyHigh(confirmed.state.confirmed, lang)}`
+      }
+      return confirmed
+    }
+  }
+
+  // After explanation: “why so high?” without needing a new bill
+  if (state.stage === 'explained' && state.confirmed && wantsHighBillExplain(text)) {
+    return {
+      reply: explainWhyHigh(state.confirmed, lang),
+      state,
+      contacts: billContacts(),
+      ui: { feature: 'bill', stage: 'explained', reading_summary: state.confirmed, usage_chart: state.history },
+      problem_id: 'power_bill_explain',
     }
   }
 
@@ -462,7 +541,7 @@ function handleConnectionTurn(args: {
       !detectsConnectionFeature(text) &&
       !parseConnectionType(text) &&
       parseLoadKw(text) == null &&
-      !CORRECT.test(text) &&
+      !isConfirm(text) &&
       !FIX.test(text) &&
       !CANCEL.test(text) &&
       text.length > 3)
@@ -554,7 +633,7 @@ function handleConnectionTurn(args: {
     }
   }
 
-  if (state.stage === 'confirm' && !CORRECT.test(text) && !/^correct$/i.test(text.trim())) {
+  if (state.stage === 'confirm' && !isConfirm(text)) {
     // Allow fixing type/load/location in place
     if (typed || load != null || args.location) {
       return {

@@ -20,13 +20,19 @@ export function classifyCharges(charges: BillCharge[], lang: GuideLang, units: n
   for (const c of charges) {
     const ex = explainFromKb(c.label, c.amount_inr, lang, { units, loadKw })
     const rec = matchKbRecord(c.label)
-    explained.push(`${ex.title}${c.amount_inr != null ? ` (${money(c.amount_inr, lang)})` : ''}: ${ex.body}`)
 
     if (rec?.id === 'kb-energy-charges' || /energy/i.test(c.label)) {
       energy.push({ charge: c, text: ex.body })
+      explained.push(`${ex.title}${c.amount_inr != null ? ` (${money(c.amount_inr, lang)})` : ''}: ${ex.body}`)
       continue
     }
+    // Totals / payable lines are stated once at the top — don't spam “not a charge” for each
     if (rec?.id === 'kb-totals') continue
+    // Zero advance is noise on most bills — only call out when money was applied
+    if (rec?.id === 'kb-advance-payment' && (c.amount_inr == null || c.amount_inr === 0)) continue
+
+    explained.push(`${ex.title}${c.amount_inr != null ? ` (${money(c.amount_inr, lang)})` : ''}: ${ex.body}`)
+
     if (ex.attention || ex.status === 'unverified' || ex.status === 'disabled' || ex.status === 'unknown' || ex.status === 'partial') {
       attention.push({ charge: c, text: ex.body })
       continue

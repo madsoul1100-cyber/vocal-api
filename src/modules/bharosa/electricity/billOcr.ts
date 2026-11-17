@@ -180,7 +180,7 @@ export function parseBillTextFallback(text: string): BillReading | null {
 
   const charges: BillCharge[] = []
   const chargeRe =
-    /(energy\s*charges?|fixed\s*charges?|electricity\s*duty|interest\s*on\s*ed|ed\s*interest|edint|customer\s*charges?|cust\.?\s*charges?|fsa\/?fca(?:\s*charges?)?|surcharge|arrears?(?:\s+after[^:\n]*)?|acd\s*due|acd\s*surcharges?|int\.?\s*on\s*acd|int\.?\s*on\s*sd|gruha\s*jyothi(?:\s*subsidy)?|subsidy|true-?up\s*charges?|addl\.?\s*charges?|loss\/?gain|dps|delayed\s*payment\s*surcharge)\s*[:=]?\s*(-)?\s*(?:rs\.?|₹)?\s*([\d,.]+)/gi
+    /(energy\s*charges?|fixed\s*charges?|electricity\s*duty|interest\s*on\s*ed|ed\s*interest|edint|customer\s*charges?|cust\.?\s*charges?|fsa\/?fca(?:\s*charges?)?|surcharge|arrears?(?:\s+after[^:\n]*)?|acd\s*due|acd\s*surcharges?|int\.?\s*on\s*acd|int\.?\s*on\s*sd|gruha\s*jyothi(?:\s*subsidy)?|subsidy|true-?up\s*charges?|addl\.?\s*charges?|loss\/?gain|lpsc|dps|delayed\s*payment\s*surcharge|gross\s*bill|net\s*current\s*bill|amount\s*payable|advance\s*payment)\s*[:=]?\s*(-)?\s*(?:rs\.?|₹)?\s*([\d,.]+)/gi
   let m: RegExpExecArray | null
   while ((m = chargeRe.exec(t))) {
     const label = canonicalizeLabel(m[1]!)
