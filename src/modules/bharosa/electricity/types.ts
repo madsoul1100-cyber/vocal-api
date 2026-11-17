@@ -20,12 +20,17 @@ export interface BillReading {
   units: number | null
   total_inr: number | null
   due_date: string | null
+  /** e.g. "1 Domestic", "2B" — used to block LT-I math on commercial */
+  category: string | null
+  contracted_load_kw: number | null
   discom: 'TGSPDCL' | 'TGNPDCL' | 'unknown' | null
   charges: BillCharge[]
   /** Fields the OCR marked unclear — never invent these */
   unclear_fields: string[]
   /** True when the image was not an electricity bill */
   not_a_bill: boolean
+  /** Extracted totals that do not reconcile — flag, do not invent */
+  reconciliation_warning: string | null
   raw_notes: string | null
 }
 
@@ -33,6 +38,8 @@ export interface BillMonthPoint {
   period: string
   units: number
   total_inr: number
+  /** Normalized service / USC number — history never merges across different numbers */
+  service_no: string | null
 }
 
 export interface BillEstimate {
@@ -90,6 +97,10 @@ export interface BillFlowState {
   /** Confirmed / corrected reading used for explanations */
   confirmed: BillReading | null
   history: BillMonthPoint[]
+  /** Active connection for this history thread */
+  history_service_no: string | null
+  /** Different service number awaiting user choice (TC-07b) */
+  pending_foreign: BillReading | null
   fix_field: string | null
 }
 

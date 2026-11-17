@@ -6,17 +6,22 @@ export {
   parseElectricityState,
   serializeElectricityState,
 } from './flow.js'
-export { parseBillTextFallback, readBillFromImage, readBillFromText, applyBillCorrection, parseBillOcrJson } from './billOcr.js'
+export { parseBillTextFallback, readBillFromImage, readBillFromText, applyBillCorrection, parseBillOcrJson, reconcileReading } from './billOcr.js'
 export {
   estimateNextBill,
   estimateSentence,
   usageChangeSentence,
   chartAscii,
   mergeHistory,
+  mergeHistoryForService,
+  normalizeServiceNo,
   readingToHistoryPoint,
+  forecastEnabled,
   MIN_HISTORY_FOR_ESTIMATE,
 } from './billMath.js'
 export { explainAllCharges, explainCharge, matchCharge } from './charges.js'
+export { ELECTRICITY_KB, matchKbRecord, canonicalizeLabel, explainFromKb } from './kb.js'
+export { buildFirstBillReply, answerChargeQuestion, userFacingField } from './kbExplain.js'
 export {
   findNearestPole,
   isInsideTelangana,

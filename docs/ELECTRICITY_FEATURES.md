@@ -1,40 +1,26 @@
 # Bharosa for electricity
 
-Two guided features inside the Bharosa guide (web Help chat + WhatsApp). Same conversation state; WhatsApp can copy the web flows.
+Aligned to manager package **17 Nov 2026** (draft for integration; forecast/true-up gated).
 
 ## Feature 1 — Understand my electricity bill
 
-1. User starts with “Understand my electricity bill” (or Telugu/Hindi equivalent) or uploads a bill photo.
-2. Vision OCR (OpenRouter) or typed values extract units, total, period, charge lines.
-3. Unclear fields are flagged — never guessed. User taps **Correct** or **Fix**.
-4. Each recognised charge gets a plain-language explanation from the curated glossary; unknown lines say to check with the electricity office.
-5. Usage chart + one sentence over bills the user sent.
-6. Next-bill **range** only with ≥2 reliable months; otherwise “cannot estimate yet”.
+Scoped multi-turn flow (`power_bill_explain`) with:
 
-## Feature 2 — Cost of a new electricity connection
+- Photo / typed bill → confirm → explain (KB status-gated)
+- First-message shape: total/due, energy, lumped small charges, attention lines
+- Service-number keyed history (no cross-account merge)
+- Corrections keep all other fields; user-facing names only
+- No complaint filing inside this flow
+- Next-bill forecast **off** unless `ELECTRICITY_BILL_FORECAST_ENABLED=1`
+- True-up: show printed amount only (`disabled` until order text read)
 
-1. User starts “New electricity connection” and shares location (browser GPS / WhatsApp pin / address).
-2. Asks home / shop / farm and load (kW); can suggest load from appliances.
-3. Confirm / fix answers.
-4. **Pole + cost estimates** only when approved data flags are on:
-   - `ELECTRICITY_POLE_DATA_ENABLED=1`
-   - `ELECTRICITY_CONNECTION_COST_ENABLED=1`
-5. Until then: limited form — process + MeeSeva / TGSPDCL / TGNPDCL / 1912; no invented poles or prices.
-6. Outside Telangana → refuse. “Is this the final price?” → no; office decides after inspection.
+Runtime KB: `src/modules/bharosa/electricity/kb.ts`  
+Review YAML: `docs/bharosa-electricity-kb.yaml`  
+Flow notes: `docs/bharosa-electricity-flow-prompt.md`
 
-## Rules
+## Feature 2 — New connection cost
 
-- Reply in the user’s language only (te / en / hi).
-- Never invent numbers, rates, helplines, or links.
-- Label every estimate.
-- Bharosa submits nothing to any office.
-
-## External dependencies (still needed for full Feature 2)
-
-- Official tariff / connection charges (named + dated source).
-- Utility-approved pole / network GIS.
-- Telugu speaker review of all Telugu copy.
-- Product decision: domestic only vs shop/farm (shop/farm currently get process guidance; demo cost bands are home-only).
+Limited form without approved pole/cost data (`ELECTRICITY_POLE_DATA_ENABLED` / `ELECTRICITY_CONNECTION_COST_ENABLED`).
 
 ## Tests
 
@@ -42,6 +28,11 @@ Two guided features inside the Bharosa guide (web Help chat + WhatsApp). Same co
 npx tsx scripts/electricity-unit-checks.ts
 ```
 
-## Web UI
+Fixtures: public TGSPDCL specimen text in `scripts/fixtures/tgspdcl-public-bills.ts`.
 
-Help chat starters + **Bill photo** + **Share location** + Correct/Fix chips when the electricity flow is active.
+## Shared rules (bill flow)
+
+- Answer in chosen language (loanwords OK in Telugu).
+- Never invent numbers/links.
+- Never show internal field keys (`total_inr` → “total”).
+- Offer file/follow-up only outside this flow.

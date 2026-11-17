@@ -4,12 +4,12 @@
  */
 
 import type { GuideLang } from '../guide/playbooks.js'
-import { explainAllCharges } from './charges.js'
 import {
   chartAscii,
   estimateNextBill,
   estimateSentence,
-  mergeHistory,
+  mergeHistoryForService,
+  normalizeServiceNo,
   readingToHistoryPoint,
   usageChangeSentence,
 } from './billMath.js'
@@ -19,6 +19,7 @@ import {
   CONNECTION_TYPE_ACTIONS,
   ECOPY,
 } from './copy.js'
+import { answerChargeQuestion, buildFirstBillReply, userFacingField } from './kbExplain.js'
 import {
   CONNECTION_CONTACTS,
   estimateConnectionCost,
@@ -52,6 +53,11 @@ const CANCEL = /^\s*(cancel|stop|exit|quit|never\s*mind|వద్దు|रद�
 const CORRECT = /^\s*(correct|yes|looks?\s*good|సరియైంది|సరే|सही|ठीक\s*है)\s*[!.]*\s*$/i
 const FIX = /^\s*(fix|change|update|సరిదిద్దు|सुधार)\b/i
 const FINAL_PRICE = /final\s*price|exact\s*(price|amount|cost)|అంతిమ\s*ధర|अंतिम\s*(कीमत|राशि)/i
+const NEW_CONN_HISTORY = /^\s*(new\s+connection\s+history|fresh\s+history|కొత్త\s*చరిత్ర|नया\s*इतिहास)\s*$/i
+const COMPLAINT_ASK =
+  /\b(file|raise|register|follow\s*up)\b.{0,30}\b(complaint|grievance)|ఫిర్యాదు\s*(పెట్ట|ఫైల్)|शिकायत\s*(दर्ज|फाइल)/i
+const DEFLECT =
+  /\b(aadhaar|ration|pension|pothole|sewer|water\s*supply|passport|voter)\b|ఆధార్|రేషన్|నీళ్లు|రోడ్డు|आधार|राशन|सड़क/i
 
 export function detectsBillFeature(text: string): boolean {
   return BILL_START.test(text)
@@ -72,8 +78,26 @@ function emptyBillState(): BillFlowState {
     reading: null,
     confirmed: null,
     history: [],
+    history_service_no: null,
+    pending_foreign: null,
     fix_field: null,
   }
+}
+
+function deflectNonBill(lang: GuideLang): string {
+  return lang === 'te'
+    ? 'ఈ బిల్లు ఫ్లోలో నేను మీ ప్రస్తుత కరెంట్ బిల్లు అర్థం చేయడమే చేస్తాను. వేరే సేవ కావాలంటే *cancel* చెప్పి కొత్త ప్రశ్న అడగండి.'
+    : lang === 'hi'
+      ? 'इस बिल फ़्लो में मैं सिर्फ़ आपका वर्तमान बिजली बिल समझाती हूँ। दूसरी सेवा हो तो *cancel* कहकर नई बात शुरू करें।'
+      : 'In this flow I only help you understand your current electricity bill. For another service, say *cancel* and ask again.'
+}
+
+function noComplaint(lang: GuideLang): string {
+  return lang === 'te'
+    ? 'ఈ బిల్లు ఫ్లోలో ఫిర్యాదు ఫైల్ / ఫాలో-అప్ చేయను. బిల్లు అర్థం చేసుకోవడమే. అవసరమైతే 1912 లేదా డిస్కం సైట్.'
+    : lang === 'hi'
+      ? 'इस बिल फ़्लो में शिकायत दर्ज / फॉलो-अप नहीं करती। सिर्फ़ बिल समझाना। ज़रूरत हो तो 1912 या डिस्कॉम साइट।'
+      : 'I do not file or follow up complaints in this bill flow — I only explain the bill. For a complaint, use 1912 or the discom site.'
 }
 
 function emptyConnectionState(): ConnectionFlowState {
@@ -102,18 +126,32 @@ function formatReading(reading: BillReading, lang: GuideLang): string {
     if (value == null || value === '') return
     lines.push(`• ${label}: ${value}`)
   }
-  row(lang === 'te' ? 'సర్వీస్ నం' : lang === 'hi' ? 'सर्विस नं' : 'Service no', reading.service_no)
-  row(lang === 'te' ? 'కాలం' : lang === 'hi' ? 'अवधि' : 'Billing period', reading.billing_period)
-  row(lang === 'te' ? 'యూనిట్లు' : lang === 'hi' ? 'यूनिट' : 'Units', reading.units)
-  row(lang === 'te' ? 'మొత్తం' : lang === 'hi' ? 'कुल' : 'Total', reading.total_inr != null ? `Rs ${Math.round(reading.total_inr)}` : null)
+  row(userFacingField('service_no', lang), reading.service_no)
+  row(userFacingField('billing_period', lang), reading.billing_period)
+  row(userFacingField('units', lang), reading.units)
+  row(
+    userFacingField('total', lang),
+    reading.total_inr != null ? `Rs ${Math.round(reading.total_inr * 100) / 100}` : null,
+  )
+  row(userFacingField('due_date', lang), reading.due_date)
+  if (reading.category) row(lang === 'te' ? 'వర్గం' : lang === 'hi' ? 'श्रेणी' : 'Category', reading.category)
   if (reading.discom && reading.discom !== 'unknown') row('Discom', reading.discom)
   if (reading.charges.length) {
     lines.push(lang === 'te' ? 'ఛార్జీలు:' : lang === 'hi' ? 'शुल्क:' : 'Charges:')
     for (const c of reading.charges) {
-      const amt = c.amount_inr != null ? `Rs ${Math.round(c.amount_inr)}` : '?'
+      const amt = c.amount_inr != null ? `Rs ${Math.round(c.amount_inr * 100) / 100}` : '?'
       const flag = c.clear ? '' : lang === 'te' ? ' (అస్పష్టం)' : lang === 'hi' ? ' (अस्पष्ट)' : ' (unclear)'
       lines.push(`  – ${c.label}: ${amt}${flag}`)
     }
+  }
+  if (reading.reconciliation_warning) {
+    lines.push(
+      lang === 'te'
+        ? 'గమనిక: కొన్ని అంకెలు బిల్లు మొత్తంతో సరిపోలడం లేదు — ధృవీకరించండి. ఊహించి సరిదిద్దను.'
+        : lang === 'hi'
+          ? 'नोट: कुछ अंक कुल रकम से मेल नहीं खाते — जाँचें। मैं अनुमान से नहीं सुधारूँगी।'
+          : 'Note: some figures do not reconcile with the bill total — please check. I will not invent fixes.',
+    )
   }
   return lines.join('\n')
 }
@@ -128,26 +166,12 @@ function buildBillExplanation(state: BillFlowState, lang: GuideLang): {
   }
   const history = state.history
   const estimate = estimateNextBill(history)
-  const parts = [
-    formatReading(reading, lang),
-    '',
-    lang === 'te' ? 'ప్రతి ఛార్జ్ సాధారణ మాటల్లో:' : lang === 'hi' ? 'हर शुल्क सादे शब्दों में:' : 'Each charge in plain words:',
-    explainAllCharges(reading.charges, lang, reading.units),
-    '',
-    usageChangeSentence(history, lang),
-  ]
+  const first = buildFirstBillReply({ reading, history, lang })
+  const parts = [first]
   if (history.length) {
-    parts.push('', lang === 'te' ? 'వాడకం చార్ట్:' : lang === 'hi' ? 'इस्तेमाल चार्ट:' : 'Usage over recent months:', chartAscii(history))
+    parts.push('', usageChangeSentence(history, lang), chartAscii(history))
   }
-  parts.push('', estimateSentence(estimate, lang))
-  parts.push(
-    '',
-    lang === 'te'
-      ? 'ఇది సమాచారం మాత్రమే. భరోసా ఏ ఆఫీసుకూ బిల్లు పంపదు. మరో బిల్లు పంపితే చరిత్రకు చేరుస్తాను.'
-      : lang === 'hi'
-        ? 'यह केवल जानकारी है। भरोसा किसी दफ़्तर में बिल नहीं भेजता। और बिल भेजेंगे तो इतिहास में जोड़ूँगी।'
-        : 'This is information only. Bharosa submits nothing to any office. Send another bill photo to add to your history.',
-  )
+  parts.push('', estimateSentence(estimate, lang, history))
 
   return {
     reply: parts.filter(Boolean).join('\n'),
@@ -162,6 +186,37 @@ function buildBillExplanation(state: BillFlowState, lang: GuideLang): {
   }
 }
 
+function confirmBill(state: BillFlowState, lang: GuideLang): ElectricityTurnResult {
+  const reading = state.reading!
+  const point = readingToHistoryPoint(reading)
+  if (point) {
+    const merged = mergeHistoryForService(state.history, state.history_service_no, point)
+    if (!merged.ok) {
+      state.pending_foreign = reading
+      return {
+        reply: ECOPY.differentService(lang, merged.existing, merged.incoming),
+        state,
+        contacts: billContacts(),
+        ui: { feature: 'bill', stage: 'confirm', reading_summary: reading, actions: BILL_ACTIONS(lang) },
+        problem_id: 'power_bill_explain',
+      }
+    }
+    state.history = merged.history
+    state.history_service_no = merged.service_no
+  }
+  state.confirmed = reading
+  state.pending_foreign = null
+  state.stage = 'explained'
+  const built = buildBillExplanation(state, lang)
+  return {
+    reply: built.reply,
+    state,
+    contacts: billContacts(),
+    ui: built.ui,
+    problem_id: 'power_bill_explain',
+  }
+}
+
 async function handleBillTurn(args: {
   state: BillFlowState
   lang: GuideLang
@@ -169,19 +224,68 @@ async function handleBillTurn(args: {
   image?: { buffer: Buffer; mimetype: string } | null
 }): Promise<ElectricityTurnResult> {
   const { lang, text, image } = args
-  let state = { ...args.state, history: [...args.state.history] }
+  let state: BillFlowState = {
+    ...args.state,
+    history: [...args.state.history],
+    history_service_no: args.state.history_service_no ?? null,
+    pending_foreign: args.state.pending_foreign ?? null,
+  }
 
   if (CANCEL.test(text)) {
+    return { reply: ECOPY.cancel(lang), state: null, contacts: [], ui: null, problem_id: 'power_bill_explain' }
+  }
+  if (COMPLAINT_ASK.test(text)) {
     return {
-      reply: ECOPY.cancel(lang),
-      state: null,
-      contacts: [],
-      ui: null,
+      reply: noComplaint(lang),
+      state,
+      contacts: billContacts(),
+      ui: { feature: 'bill', stage: state.stage, actions: state.stage === 'confirm' ? BILL_ACTIONS(lang) : [] },
+      problem_id: 'power_bill_explain',
+    }
+  }
+  if (DEFLECT.test(text) && !detectsBillFeature(text) && !parseBillTextFallback(text) && !image) {
+    return {
+      reply: deflectNonBill(lang),
+      state,
+      contacts: billContacts(),
+      ui: { feature: 'bill', stage: state.stage },
       problem_id: 'power_bill_explain',
     }
   }
 
-  // Awaiting a corrected field value
+  // Switch history to the pending foreign service number
+  if (state.pending_foreign && NEW_CONN_HISTORY.test(text)) {
+    state.history = []
+    state.history_service_no = normalizeServiceNo(state.pending_foreign.service_no)
+    state.reading = state.pending_foreign
+    state.pending_foreign = null
+    state.stage = 'confirm'
+    return confirmBill(state, lang)
+  }
+
+  // Mid-flow charge question (RT-02)
+  const chargeQ = answerChargeQuestion(
+    text,
+    state.confirmed ?? state.reading,
+    lang,
+    state.stage === 'confirm',
+  )
+  if (chargeQ) {
+    return {
+      reply: chargeQ,
+      state,
+      contacts: billContacts(),
+      ui: {
+        feature: 'bill',
+        stage: state.stage,
+        reading_summary: state.reading,
+        actions: state.stage === 'confirm' ? BILL_ACTIONS(lang) : [],
+      },
+      problem_id: 'power_bill_explain',
+    }
+  }
+
+  // Awaiting a corrected field value — patch one field, re-show ALL values (TC-04)
   if (state.stage === 'fix_field' && state.fix_field && state.reading) {
     const updated = applyBillCorrection(state.reading, state.fix_field, text)
     state.reading = updated
@@ -191,31 +295,14 @@ async function handleBillTurn(args: {
       reply: `${formatReading(updated, lang)}\n\n${ECOPY.confirmPrompt(lang)}`,
       state,
       contacts: billContacts(),
-      ui: {
-        feature: 'bill',
-        stage: 'confirm',
-        reading_summary: updated,
-        actions: BILL_ACTIONS(lang),
-      },
+      ui: { feature: 'bill', stage: 'confirm', reading_summary: updated, actions: BILL_ACTIONS(lang) },
       problem_id: 'power_bill_explain',
     }
   }
 
-  // Confirm / fix after OCR
   if (state.stage === 'confirm' && state.reading) {
     if (CORRECT.test(text) || /^correct$/i.test(text.trim())) {
-      state.confirmed = state.reading
-      const point = readingToHistoryPoint(state.reading)
-      if (point) state.history = mergeHistory(state.history, point)
-      state.stage = 'explained'
-      const built = buildBillExplanation(state, lang)
-      return {
-        reply: built.reply,
-        state,
-        contacts: billContacts(),
-        ui: built.ui,
-        problem_id: 'power_bill_explain',
-      }
+      return confirmBill(state, lang)
     }
     if (FIX.test(text) || /fix\s+\w+/i.test(text)) {
       const m = text.match(/fix\s+(\w+)\s*[:=]?\s*(.+)$/i)
@@ -235,10 +322,10 @@ async function handleBillTurn(args: {
       return {
         reply:
           lang === 'te'
-            ? 'ఏ ఫీల్డ్ మార్చాలి? ఉదా: units / total / period. ఆపై విలువ పంపండి.'
+            ? `ఏది మార్చాలి? ${userFacingField('units', lang)} / ${userFacingField('total', lang)} / ${userFacingField('period', lang)}. తర్వాత విలువ పంపండి.`
             : lang === 'hi'
-              ? 'कौन सा फ़ील्ड बदलें? जैसे units / total / period। फिर मान भेजें।'
-              : 'Which field should I change — units, total, or period? Then send the value.',
+              ? `क्या बदलें? ${userFacingField('units', lang)} / ${userFacingField('total', lang)} / ${userFacingField('period', lang)}। फिर मान भेजें।`
+              : `Which should I change — ${userFacingField('units', lang)}, ${userFacingField('total', lang)}, or ${userFacingField('period', lang)}? Then send the value.`,
         state,
         contacts: billContacts(),
         ui: { feature: 'bill', stage: 'fix_field', actions: [] },
@@ -247,19 +334,17 @@ async function handleBillTurn(args: {
     }
   }
 
-  // Explained — accept another bill into history
   if (state.stage === 'explained' && (image || parseBillTextFallback(text))) {
     state.stage = 'await_photo'
   }
 
-  // Read photo or typed bill
   if (state.stage === 'await_photo' || state.stage === 'explained' || !state.reading) {
     let reading: BillReading | null = null
     if (image) {
       const ocr = await readBillFromImage(image)
       if (!ocr.ok) {
         return {
-          reply: `${ocr.error}\n\n${ECOPY.billStart(lang)}`,
+          reply: `${ECOPY.unclearPhoto(lang)}\n(${ocr.error})`,
           state: { ...state, stage: 'await_photo' },
           contacts: billContacts(),
           ui: { feature: 'bill', stage: 'await_photo' },
@@ -271,7 +356,6 @@ async function handleBillTurn(args: {
       const ocr = await readBillFromText(text)
       if (ocr.ok) reading = ocr.reading
       else if (!detectsBillFeature(text)) {
-        // stay waiting
         return {
           reply: ECOPY.billStart(lang),
           state: { ...state, stage: 'await_photo' },
@@ -302,22 +386,36 @@ async function handleBillTurn(args: {
       }
     }
 
-    if (reading.unclear_fields.length && (reading.units == null || reading.total_inr == null)) {
-      state.reading = reading
-      state.stage = 'confirm'
+    // Almost everything unclear → retake guidance (not "not a bill")
+    if (
+      reading.units == null &&
+      reading.total_inr == null &&
+      reading.charges.every((c) => !c.clear || c.amount_inr == null)
+    ) {
       return {
-        reply: `${formatReading(reading, lang)}\n\n${ECOPY.unclear(lang, reading.unclear_fields)}\n\n${ECOPY.confirmPrompt(lang)}`,
-        state,
+        reply: ECOPY.unclearPhoto(lang),
+        state: { ...state, stage: 'await_photo', reading: null },
         contacts: billContacts(),
-        ui: { feature: 'bill', stage: 'confirm', reading_summary: reading, actions: BILL_ACTIONS(lang) },
+        ui: { feature: 'bill', stage: 'await_photo' },
         problem_id: 'power_bill_explain',
       }
     }
 
+    const friendlyUnclear = reading.unclear_fields.map((f) => userFacingField(f, lang))
     state.reading = reading
     state.stage = 'confirm'
+    const warn =
+      reading.unclear_fields.length && (reading.units == null || reading.total_inr == null)
+        ? `\n\n${ECOPY.unclear(lang, friendlyUnclear)}`
+        : reading.reconciliation_warning
+          ? lang === 'te'
+            ? '\n\nకొన్ని అంకెలు మొత్తంతో సరిపోలడం లేదు — ధృవీకరించండి.'
+            : lang === 'hi'
+              ? '\n\nकुछ अंक कुल से मेल नहीं खाते — जाँचें।'
+              : '\n\nSome figures do not reconcile with the total — please check.'
+          : ''
     return {
-      reply: `${formatReading(reading, lang)}\n\n${ECOPY.confirmPrompt(lang)}`,
+      reply: `${formatReading(reading, lang)}${warn}\n\n${ECOPY.confirmPrompt(lang)}`,
       state,
       contacts: billContacts(),
       ui: { feature: 'bill', stage: 'confirm', reading_summary: reading, actions: BILL_ACTIONS(lang) },
@@ -666,6 +764,8 @@ export function parseElectricityState(raw: unknown): ElectricityState | null {
       reading: (row.reading as BillReading) || null,
       confirmed: (row.confirmed as BillReading) || null,
       history: Array.isArray(row.history) ? (row.history as BillFlowState['history']) : [],
+      history_service_no: typeof row.history_service_no === 'string' ? row.history_service_no : null,
+      pending_foreign: (row.pending_foreign as BillReading) || null,
       fix_field: typeof row.fix_field === 'string' ? row.fix_field : null,
     }
   }

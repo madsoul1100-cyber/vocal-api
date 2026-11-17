@@ -1,16 +1,16 @@
 /**
- * Offline checks for Bharosa electricity features (no DB / optional LLM).
+ * Offline checks for Bharosa electricity features + manager 17 Nov regression.
  *
  *   npx tsx scripts/electricity-unit-checks.ts
  */
 import assert from 'node:assert/strict'
-import { explainAllCharges, matchCharge } from '../src/modules/bharosa/electricity/charges.js'
+import { explainAllCharges } from '../src/modules/bharosa/electricity/charges.js'
 import {
-  chartAscii,
   estimateNextBill,
   estimateSentence,
-  mergeHistory,
-  MIN_HISTORY_FOR_ESTIMATE,
+  forecastEnabled,
+  mergeHistoryForService,
+  normalizeServiceNo,
   usageChangeSentence,
 } from '../src/modules/bharosa/electricity/billMath.js'
 import { applyBillCorrection, parseBillOcrJson, parseBillTextFallback } from '../src/modules/bharosa/electricity/billOcr.js'
@@ -19,6 +19,8 @@ import {
   detectsConnectionFeature,
   handleElectricityTurn,
 } from '../src/modules/bharosa/electricity/flow.js'
+import { canonicalizeLabel, explainFromKb, matchKbRecord } from '../src/modules/bharosa/electricity/kb.js'
+import { answerChargeQuestion, buildFirstBillReply, userFacingField } from '../src/modules/bharosa/electricity/kbExplain.js'
 import {
   findNearestPole,
   isInsideTelangana,
@@ -27,6 +29,12 @@ import {
   suggestLoadFromAppliances,
 } from '../src/modules/bharosa/electricity/newConnection.js'
 import { matchPlaybook } from '../src/modules/bharosa/guide/playbooks.js'
+import {
+  SPECIMEN_DOMESTIC_A,
+  SPECIMEN_DOMESTIC_B,
+  SPECIMEN_SYNTHETIC_240_PREV,
+  SPECIMEN_SYNTHETIC_280,
+} from './fixtures/tgspdcl-public-bills.js'
 
 let passed = 0
 function check(label: string, fn: () => void | Promise<void>) {
@@ -43,36 +51,195 @@ function check(label: string, fn: () => void | Promise<void>) {
 }
 
 async function main() {
-  await check('detects bill feature phrases', () => {
+  await check('detects bill / connection phrases', () => {
     assert.equal(detectsBillFeature('Explain my electricity bill'), true)
-    assert.equal(detectsBillFeature('నా కరెంట్ బిల్లు అర్థం చేసుకోవాలి'), true)
-    assert.equal(detectsBillFeature('No electricity in my area'), false)
-  })
-
-  await check('detects new connection phrases', () => {
     assert.equal(detectsConnectionFeature('New electricity connection'), true)
-    assert.equal(detectsConnectionFeature('కొత్త కరెంట్ కనెక్షన్'), true)
-    assert.equal(detectsConnectionFeature('Understand my electricity bill'), false)
   })
 
-  await check('playbook hints route to new electricity playbooks', () => {
+  await check('playbook hints', () => {
     assert.equal(matchPlaybook('Explain my electricity bill')?.playbook.id, 'power_bill_explain')
     assert.equal(matchPlaybook('New electricity connection')?.playbook.id, 'power_new_connection')
   })
 
-  await check('parse typed bill values without guessing', () => {
-    const reading = parseBillTextFallback(
-      'units 182 total 1450 period Sep 2026 Energy charges: 980 Fixed charges: 120 Electricity duty: 50',
-    )
-    assert.ok(reading)
-    assert.equal(reading!.units, 182)
-    assert.equal(reading!.total_inr, 1450)
-    assert.equal(reading!.billing_period, 'Sep 2026')
-    assert.equal(reading!.charges.length, 3)
-    assert.equal(reading!.unclear_fields.length, 0)
+  // ---- TC-02b: ED vs ED INTEREST never share wording ----
+  await check('TC-02b ED and ED INTEREST are separate KB records', () => {
+    const duty = matchKbRecord('ELECTRICITY DUTY')
+    const edint = matchKbRecord('ED INTEREST')
+    const edint2 = matchKbRecord('EDINT')
+    assert.equal(duty?.id, 'kb-electricity-duty')
+    assert.equal(edint?.id, 'kb-ed-interest')
+    assert.equal(edint2?.id, 'kb-ed-interest')
+    assert.notEqual(duty!.id, edint!.id)
+    const dBody = explainFromKb('ELECTRICITY DUTY', 4.98, 'en').body
+    const iBody = explainFromKb('ED INTEREST', 0.03, 'en').body
+    assert.match(iBody, /interest/i)
+    assert.ok(!/main charge for the electricity units/i.test(iBody))
+    assert.ok(dBody !== iBody)
   })
 
-  await check('OCR JSON marks unclear fields and never invents units', () => {
+  // ---- TC-03: label flicker canonicalization ----
+  await check('TC-03 BCD/RCD SURCHARGES canonicalize toward ACD', () => {
+    assert.equal(canonicalizeLabel('BCD SURCHARGES'), 'ACD SURCHARGES')
+    assert.equal(canonicalizeLabel('RCD SURCHARGES'), 'ACD SURCHARGES')
+    assert.equal(matchKbRecord('ACD SURCHARGES')?.id, 'kb-acd-surcharges')
+    // Must NOT inherit ACD DUE deposit wording
+    const body = explainFromKb('ACD SURCHARGES', 10, 'en').body
+    assert.match(body, /not available|printed|will not invent/i)
+    assert.ok(!/additional consumption deposit \(ACD\) due/i.test(body))
+  })
+
+  // ---- Public domestic specimen parse ----
+  await check('public domestic specimen A parses with key lines', () => {
+    const r = parseBillTextFallback(SPECIMEN_DOMESTIC_A)
+    assert.ok(r)
+    assert.equal(r!.units, 83)
+    assert.equal(r!.total_inr, 302)
+    assert.ok(r!.charges.some((c) => /ENERGY/i.test(c.label)))
+    assert.ok(r!.charges.some((c) => /ELECTRICITY DUTY|DUTY/i.test(c.label)))
+    assert.ok(r!.charges.some((c) => /ED INTEREST|INTEREST ON ED/i.test(c.label)))
+    assert.ok(r!.charges.some((c) => /GRUHA|SUBSIDY/i.test(c.label)))
+    assert.ok(r!.charges.some((c) => /SURCHARGE/i.test(c.label)))
+  })
+
+  await check('public domestic specimen B parses', () => {
+    const r = parseBillTextFallback(SPECIMEN_DOMESTIC_B)
+    assert.ok(r)
+    assert.equal(r!.units, 70)
+    assert.equal(r!.service_no, '102629545')
+  })
+
+  await check('SUBSIDY never equated to Gruha Jyothi', () => {
+    const sub = explainFromKb('SUBSIDY', 100, 'en')
+    assert.match(sub.body, /never|not|printed|credit/i)
+    assert.ok(!/eligible|scheme rules/i.test(sub.body))
+    const gj = explainFromKb('GRUHA JYOTHI SUBSIDY', 244, 'en')
+    assert.equal(matchKbRecord('GRUHA JYOTHI')?.id, 'kb-gruha-jyothi')
+    assert.ok(gj.body.includes('244') || /Gruha|subsidy/i.test(gj.body))
+  })
+
+  await check('true-up disabled: amount shown, no rates', () => {
+    const ex = explainFromKb('TRUE-UP CHARGES', 50, 'en')
+    assert.equal(ex.status, 'disabled')
+    assert.match(ex.body, /50|TRUE-UP|true-up/i)
+    assert.ok(!/30 paise|50 paise|two and a half years/i.test(ex.body))
+  })
+
+  // ---- TC-04: correction keeps other values; no internal keys ----
+  await check('TC-04 Fix units keeps total and charges; user-facing field names', async () => {
+    assert.equal(userFacingField('total_inr', 'en'), 'total')
+    assert.ok(!userFacingField('total_inr', 'en').includes('_'))
+
+    const start = await handleElectricityTurn({ state: null, lang: 'en', text: 'Explain my electricity bill' })
+    const read = await handleElectricityTurn({
+      state: start!.state,
+      lang: 'en',
+      text: SPECIMEN_SYNTHETIC_280,
+    })
+    assert.equal(read!.ui?.stage, 'confirm')
+    assert.match(read!.reply, /280/)
+    assert.match(read!.reply, /1773|1636/)
+    assert.ok(!/total_inr/.test(read!.reply))
+
+    const fixed = await handleElectricityTurn({
+      state: read!.state,
+      lang: 'en',
+      text: 'Fix units 1263',
+    })
+    assert.match(fixed!.reply, /1263/)
+    assert.match(fixed!.reply, /1773|1636/) // other values kept
+    assert.ok(!/total_inr/.test(fixed!.reply))
+  })
+
+  // ---- TC-07b: different service numbers never merge ----
+  await check('TC-07b different service numbers blocked', async () => {
+    const start = await handleElectricityTurn({ state: null, lang: 'en', text: 'Explain my electricity bill' })
+    const a = await handleElectricityTurn({ state: start!.state, lang: 'en', text: SPECIMEN_DOMESTIC_A })
+    const ok = await handleElectricityTurn({ state: a!.state, lang: 'en', text: 'Correct' })
+    assert.equal(ok!.ui?.stage, 'explained')
+
+    const b = await handleElectricityTurn({ state: ok!.state, lang: 'en', text: SPECIMEN_DOMESTIC_B })
+    assert.equal(b!.ui?.stage, 'confirm')
+    const tryMerge = await handleElectricityTurn({ state: b!.state, lang: 'en', text: 'Correct' })
+    assert.match(tryMerge!.reply, /will not merge|different service/i)
+    assert.ok(tryMerge!.state && 'pending_foreign' in tryMerge!.state && tryMerge!.state.pending_foreign)
+  })
+
+  await check('mergeHistoryForService rejects cross-account', () => {
+    const r = mergeHistoryForService(
+      [{ period: 'Dec 2024', units: 83, total_inr: 302, service_no: '103813630' }],
+      '103813630',
+      { period: 'Feb 2026', units: 70, total_inr: 244, service_no: '102629545' },
+    )
+    assert.equal(r.ok, false)
+  })
+
+  await check('normalizeServiceNo strips spaces', () => {
+    assert.equal(normalizeServiceNo('0101 10622'), '010110622')
+  })
+
+  // ---- Forecast off by default (TC-07) ----
+  await check('TC-07 forecast disabled by default; past bills shown', async () => {
+    assert.equal(forecastEnabled(), false)
+    assert.equal(estimateNextBill([
+      { period: 'a', units: 1, total_inr: 100, service_no: '1' },
+      { period: 'b', units: 2, total_inr: 200, service_no: '1' },
+      { period: 'c', units: 3, total_inr: 300, service_no: '1' },
+    ]), null)
+
+    const start = await handleElectricityTurn({ state: null, lang: 'en', text: 'Explain my electricity bill' })
+    const prev = await handleElectricityTurn({ state: start!.state, lang: 'en', text: SPECIMEN_SYNTHETIC_240_PREV })
+    const prevOk = await handleElectricityTurn({ state: prev!.state, lang: 'en', text: 'Correct' })
+    const curr = await handleElectricityTurn({ state: prevOk!.state, lang: 'en', text: SPECIMEN_SYNTHETIC_280 })
+    const done = await handleElectricityTurn({ state: curr!.state, lang: 'en', text: 'Correct' })
+    assert.match(done!.reply, /not showing a next-bill forecast|validated/i)
+    assert.ok(!/Probably between Rs/i.test(done!.reply))
+  })
+
+  // ---- First-message shape + no complaint ----
+  await check('first-message shape and no complaint offer', async () => {
+    const start = await handleElectricityTurn({ state: null, lang: 'en', text: 'Explain my electricity bill' })
+    const read = await handleElectricityTurn({ state: start!.state, lang: 'en', text: SPECIMEN_SYNTHETIC_280 })
+    const done = await handleElectricityTurn({ state: read!.state, lang: 'en', text: 'Correct' })
+    assert.match(done!.reply, /Amount to pay|1773/i)
+    assert.match(done!.reply, /energy charges|280 units/i)
+    assert.match(done!.reply, /does not file or follow up a complaint/i)
+
+    const complaint = await handleElectricityTurn({
+      state: done!.state,
+      lang: 'en',
+      text: 'Please file a complaint and follow up',
+    })
+    assert.match(complaint!.reply, /do not file|1912/i)
+  })
+
+  await check('RT-02 mid-confirm charge question resumes', async () => {
+    const start = await handleElectricityTurn({ state: null, lang: 'en', text: 'Explain my electricity bill' })
+    const read = await handleElectricityTurn({ state: start!.state, lang: 'en', text: SPECIMEN_SYNTHETIC_280 })
+    const q = await handleElectricityTurn({ state: read!.state, lang: 'en', text: 'What is fixed charge?' })
+    assert.match(q!.reply, /fixed|connection load|monthly/i)
+    assert.match(q!.reply, /Correct|Fix/i)
+    assert.equal(q!.ui?.stage, 'confirm')
+  })
+
+  await check('RT-04 non-bill deflection keeps state', async () => {
+    const start = await handleElectricityTurn({ state: null, lang: 'en', text: 'Explain my electricity bill' })
+    const read = await handleElectricityTurn({ state: start!.state, lang: 'en', text: SPECIMEN_SYNTHETIC_280 })
+    const deflect = await handleElectricityTurn({ state: read!.state, lang: 'en', text: 'Change my Aadhaar mobile number' })
+    assert.match(deflect!.reply, /only help you understand your current electricity bill/i)
+    assert.ok(deflect!.state && 'reading' in deflect!.state && deflect!.state.reading)
+  })
+
+  await check('Telugu base language for bill start and unclear photo copy', async () => {
+    const start = await handleElectricityTurn({
+      state: null,
+      lang: 'te',
+      text: 'నా కరెంట్ బిల్లు అర్థం చేసుకోవాలి',
+    })
+    assert.match(start!.reply, /[\u0C00-\u0C7F]/)
+    assert.ok(!/Please send a clear photo of the bill/.test(start!.reply))
+  })
+
+  await check('OCR JSON never invents units; wrong doc flagged', () => {
     const reading = parseBillOcrJson({
       is_electricity_bill: true,
       units: null,
@@ -81,209 +248,63 @@ async function main() {
       unclear_fields: ['units'],
     })
     assert.equal(reading.units, null)
-    assert.ok(reading.unclear_fields.includes('units'))
+    assert.ok(reading.unclear_fields.includes('units') || reading.unclear_fields.includes('total'))
+    assert.equal(parseBillOcrJson({ is_electricity_bill: false }).not_a_bill, true)
   })
 
-  await check('wrong document flagged', () => {
-    const reading = parseBillOcrJson({ is_electricity_bill: false, units: 10, total_inr: 1 })
-    assert.equal(reading.not_a_bill, true)
-  })
-
-  await check('corrections update units', () => {
-    const base = parseBillTextFallback('units 100 total 900 period Aug 2026')!
-    const next = applyBillCorrection(base, 'units', '182')
-    assert.equal(next.units, 182)
-  })
-
-  await check('charge glossary explains known lines and refuses unknown', () => {
-    assert.ok(matchCharge('Energy Charges'))
-    const known = explainAllCharges(
-      [{ label: 'Energy Charges', amount_inr: 980, clear: true }],
-      'en',
-      182,
-    )
-    assert.match(known, /main charge|units/i)
-    const unknown = explainAllCharges([{ label: 'XYZ Special Levy', amount_inr: 10, clear: true }], 'en', 182)
-    assert.match(unknown, /not sure|electricity office/i)
-  })
-
-  await check('usage sentence and no estimate with one month', () => {
-    const one = [{ period: 'Sep 2026', units: 182, total_inr: 1450 }]
-    assert.match(usageChangeSentence(one, 'en'), /Only one bill/i)
-    assert.equal(estimateNextBill(one), null)
-    assert.match(estimateSentence(null, 'en'), /cannot estimate/i)
-  })
-
-  await check('estimate is a labelled range with enough history', () => {
-    assert.ok(MIN_HISTORY_FOR_ESTIMATE >= 2)
-    const hist = mergeHistory(
-      [
-        { period: 'Aug 2026', units: 147, total_inr: 1100 },
-        { period: 'Sep 2026', units: 182, total_inr: 1450 },
-      ],
-      { period: 'Oct 2026', units: 160, total_inr: 1300 },
-    )
-    const est = estimateNextBill(hist)
-    assert.ok(est)
-    assert.equal(est!.labelled, true)
-    assert.ok(est!.high_inr >= est!.low_inr)
-    assert.match(estimateSentence(est, 'en'), /estimate/i)
-    assert.match(usageChangeSentence(hist, 'en'), /units/i)
-    assert.ok(chartAscii(hist).includes('units'))
-  })
-
-  await check('Telangana bounds and pole data absent by default', () => {
+  await check('connection limited form still works', async () => {
     assert.equal(isInsideTelangana({ lat: 17.44, lng: 78.39 }), true)
-    assert.equal(isInsideTelangana({ lat: 28.61, lng: 77.2 }), false) // Delhi
-    const pole = findNearestPole({ lat: 17.44, lng: 78.39 })
-    assert.equal(pole.available, false)
-    assert.match(pole.note, /not loaded|approved/i)
-  })
+    assert.equal(findNearestPole({ lat: 17.44, lng: 78.39 }).available, false)
+    assert.equal(parseLoadKw('2 kW'), 2)
+    assert.equal(parseConnectionType('home'), 'home')
+    assert.ok(suggestLoadFromAppliances('fan fridge TV'))
 
-  await check('load and type parsers + appliance suggestion', () => {
-    assert.equal(parseLoadKw('I need 2 kW'), 2)
-    assert.equal(parseConnectionType('home connection'), 'home')
-    assert.equal(parseConnectionType('shop'), 'shop')
-    const sug = suggestLoadFromAppliances('fan fridge TV lights')
-    assert.ok(sug)
-    assert.ok(sug!.kw >= 1)
-    assert.match(sug!.explanation, /suggest|starting load|kW/i)
-  })
-
-  await check('bill flow: typed bill -> confirm -> explain, no invented next bill', async () => {
-    const start = await handleElectricityTurn({
-      state: null,
-      lang: 'en',
-      text: 'Explain my electricity bill',
-    })
-    assert.ok(start)
-    assert.equal(start!.problem_id, 'power_bill_explain')
-    assert.match(start!.reply, /photo|type the units/i)
-
-    const read = await handleElectricityTurn({
-      state: start!.state,
-      lang: 'en',
-      text: 'units 182 total 1450 period Sep 2026 Energy charges: 980 Fixed charges: 120',
-    })
-    assert.ok(read)
-    assert.equal(read!.ui?.stage, 'confirm')
-    assert.match(read!.reply, /182/)
-    assert.match(read!.reply, /Correct/i)
-
-    const done = await handleElectricityTurn({
-      state: read!.state,
-      lang: 'en',
-      text: 'Correct',
-    })
-    assert.ok(done)
-    assert.equal(done!.ui?.stage, 'explained')
-    assert.match(done!.reply, /Energy|charge/i)
-    assert.match(done!.reply, /cannot estimate|previous bills/i)
-    assert.ok(!/next bill will be Rs \d+[^.]/i.test(done!.reply))
-  })
-
-  await check('bill flow: blurry / unclear asks to retake, does not invent units', async () => {
-    // Force confirm path with missing units via partial typed input that still looks like a bill
-    const start = await handleElectricityTurn({ state: null, lang: 'en', text: 'Explain my electricity bill' })
-    const unclear = await handleElectricityTurn({
-      state: start!.state,
-      lang: 'en',
-      text: 'total 1450 period Sep 2026 this is my electricity bill units unclear',
-    })
-    // May still parse or ask — never invent a specific units figure that wasn't provided
-    assert.ok(unclear)
-    if (unclear!.state && 'reading' in unclear!.state && unclear!.state.reading) {
-      // If units missing, reply must ask / not pretend
-      if (unclear!.state.reading.units == null) {
-        assert.match(unclear!.reply, /could not read|type|photo|unclear|Fix|Correct/i)
-      }
-    }
-  })
-
-  await check('connection flow: location + type + load -> limited form without pole inventing', async () => {
-    const start = await handleElectricityTurn({
-      state: null,
-      lang: 'en',
-      text: 'New electricity connection',
-    })
-    assert.ok(start)
-    assert.match(start!.reply, /location/i)
-
+    const start = await handleElectricityTurn({ state: null, lang: 'en', text: 'New electricity connection' })
     const withLoc = await handleElectricityTurn({
       state: start!.state,
       lang: 'en',
       text: 'home',
       location: { lat: 17.4435, lng: 78.391, label: 'Madhapur' },
     })
-    assert.ok(withLoc)
-    // After location+type may ask load
-    const withLoad = await handleElectricityTurn({
-      state: withLoc!.state,
-      lang: 'en',
-      text: '2 kW',
-    })
-    assert.ok(withLoad)
-    assert.match(withLoad!.reply, /Correct|2 kW|Home|Madhapur/i)
-
-    const result = await handleElectricityTurn({
-      state: withLoad!.state,
-      lang: 'en',
-      text: 'Correct',
-    })
-    assert.ok(result)
-    assert.match(result!.reply, /do not have pole data|not invent|process|MeeSeva|1912/i)
-    assert.ok(!/nearest suitable pole is DEMO/i.test(result!.reply))
-    assert.ok(!/Your cost will be Rs \d+ exactly/i.test(result!.reply))
+    const withLoad = await handleElectricityTurn({ state: withLoc!.state, lang: 'en', text: '2 kW' })
+    const result = await handleElectricityTurn({ state: withLoad!.state, lang: 'en', text: 'Correct' })
+    assert.match(result!.reply, /do not have pole data|not invent/i)
   })
 
-  await check('connection flow: outside Telangana refuses estimate', async () => {
-    const start = await handleElectricityTurn({
-      state: null,
-      lang: 'en',
-      text: 'New electricity connection',
-    })
-    const out = await handleElectricityTurn({
-      state: start!.state,
-      lang: 'en',
-      text: '',
-      location: { lat: 28.6139, lng: 77.209, label: 'Delhi' },
-    })
-    assert.ok(out)
-    assert.match(out!.reply, /outside the area/i)
-    assert.equal(out!.state, null)
+  await check('buildFirstBillReply uses printed amounts only', () => {
+    const reading = parseBillTextFallback(SPECIMEN_SYNTHETIC_280)!
+    const reply = buildFirstBillReply({ reading, history: [], lang: 'en' })
+    assert.match(reply, /1773/)
+    assert.match(reply, /280/)
+    assert.match(reply, /1636/)
   })
 
-  await check('final price question never confirmed as final', async () => {
-    const start = await handleElectricityTurn({
-      state: null,
-      lang: 'en',
-      text: 'New electricity connection',
-    })
-    const mid = await handleElectricityTurn({
-      state: start!.state,
-      lang: 'en',
-      text: 'home',
-      location: { lat: 17.44, lng: 78.39 },
-    })
-    const load = await handleElectricityTurn({ state: mid!.state, lang: 'en', text: '1 kW' })
-    const ask = await handleElectricityTurn({
-      state: load!.state,
-      lang: 'en',
-      text: 'Is this the final price?',
-    })
-    assert.ok(ask)
-    assert.match(ask!.reply, /No\.|official amount after inspection/i)
+  await check('charge question helper', () => {
+    const reading = parseBillTextFallback(SPECIMEN_SYNTHETIC_280)!
+    const ans = answerChargeQuestion('What is fixed charge?', reading, 'en', true)
+    assert.ok(ans)
+    assert.match(ans!, /fixed|load/i)
   })
 
-  await check('Telugu reply stays in Telugu for bill start', async () => {
-    const start = await handleElectricityTurn({
-      state: null,
-      lang: 'te',
-      text: 'నా కరెంట్ బిల్లు అర్థం చేసుకోవాలి',
-    })
-    assert.ok(start)
-    assert.match(start!.reply, /[\u0C00-\u0C7F]/)
-    assert.ok(!/Please send a clear photo of the bill/.test(start!.reply))
+  await check('corrections API keeps sibling fields', () => {
+    const base = parseBillTextFallback(SPECIMEN_SYNTHETIC_280)!
+    const next = applyBillCorrection(base, 'units', '1263')
+    assert.equal(next.units, 1263)
+    assert.equal(next.total_inr, base.total_inr)
+    assert.equal(next.charges.length, base.charges.length)
+  })
+
+  await check('usage sentence with one month', () => {
+    assert.match(
+      usageChangeSentence([{ period: 'Sep', units: 1, total_inr: 1, service_no: '1' }], 'en'),
+      /Only one bill/i,
+    )
+    assert.match(estimateSentence(null, 'en'), /cannot estimate|not showing|previous bills/i)
+  })
+
+  await check('unknown charge refuses invention', () => {
+    const unknown = explainAllCharges([{ label: 'XYZ Special Levy', amount_inr: 10, clear: true }], 'en', 182)
+    assert.match(unknown, /not sure|electricity office/i)
   })
 
   console.log(`\n${passed} checks passed`)

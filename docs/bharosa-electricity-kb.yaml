@@ -1,0 +1,101 @@
+# Bharosa electricity-bill knowledge base
+# Mirror of runtime src/modules/bharosa/electricity/kb.ts
+# Draft aligned to manager package 17 Nov 2026. Status gates explanation.
+# Sources: see each record. True-up remains disabled until TGERC order text is read.
+
+meta:
+  version: '2026-11-17'
+  discoms: [TGSPDCL, TGNPDCL]
+  note: >-
+    Editing a fact here should land in kb.ts (runtime). Prompt text holds no charge table.
+
+statuses:
+  official: Explain freely within applicability
+  secondary: Name + printed amount; do not quote unverified rates until order re-verify
+  partial: Name only
+  unverified: Show printed label+amount; say meaning unknown
+  disabled: Show printed line; no rates/duration/exemptions
+  structural: Layout/totals; use freely
+
+records:
+  - id: kb-energy-charges
+    match_labels: [ENERGY CHARGES, ENERGY CHARGE, CURRENT CHARGES]
+    status: official
+  - id: kb-fixed-charges
+    match_labels: [FIXED CHARGES, FIXED CHARGE]
+    status: official
+    lumpable: true
+  - id: kb-customer-charges
+    match_labels: [CUSTOMER CHARGES, CUST CHARGES, CUST. CHARGES, CUST.]
+    status: secondary
+    lumpable: true
+  - id: kb-electricity-duty
+    match_labels: [ELECTRICITY DUTY, ELECTRICI DUTY, ED]
+    status: secondary
+    lumpable: true
+  - id: kb-ed-interest
+    match_labels: [ED INTEREST, EDINT, INTEREST ON ED]
+    status: secondary
+    attention: true
+  - id: kb-fca-fsa
+    match_labels: [FCA, FSA, FSA/FCA CHARGES]
+    status: official
+    lumpable: true
+  - id: kb-true-up
+    match_labels: [TRUE-UP CHARGES, TRUE UP CHARGES, TRUEUP]
+    status: disabled
+    attention: true
+  - id: kb-dps
+    match_labels: [DPS, DELAYED PAYMENT SURCHARGE]
+    status: official
+    attention: true
+  - id: kb-surcharge
+    match_labels: [SURCHARGE]
+    status: unverified
+    attention: true
+  - id: kb-arrears
+    match_labels: [ARREARS, PREVIOUS BALANCE]
+    status: structural
+    attention: true
+  - id: kb-int-on-sd
+    match_labels: [INT. ON SD, INTEREST ON CD]
+    status: secondary
+  - id: kb-acd-due
+    match_labels: [ACD DUE, ACD]
+    status: partial
+    attention: true
+  - id: kb-acd-surcharges
+    match_labels: [ACD SURCHARGES, ACD SURCHARGE]
+    status: unverified
+    attention: true
+  - id: kb-int-on-acd
+    match_labels: [INT. ON ACD, INTEREST ON ACD]
+    status: unverified
+    attention: true
+  - id: kb-gruha-jyothi
+    match_labels: [GRUHA JYOTHI, GRUHA JYOTHI SUBSIDY, GJ SUBSIDY]
+    status: official
+    attention: true
+  - id: kb-subsidy
+    match_labels: [SUBSIDY]
+    status: structural
+    attention: true
+  - id: kb-totals
+    match_labels: [BILL AMOUNT, NET, NET BILL AMOUNT, TOTAL, TOTAL DUE]
+    status: structural
+  - id: kb-loss-gain
+    match_labels: [LOSS/GAIN, LOSS GAIN]
+    status: structural
+  - id: kb-addl-charges
+    match_labels: [ADDL. CHARGES, ADDITIONAL CHARGES]
+    status: unverified
+    attention: true
+  - id: kb-dc-amt-gst
+    match_labels: [DC AMT + GST, DC AMT]
+    status: unverified
+    attention: true
+
+gates:
+  forecast: ELECTRICITY_BILL_FORECAST_ENABLED=1 required; off by default (TC-07)
+  true_up: disabled until TGERC order 5 Oct 2026 text is read
+  domestic_rate_table: not used to invent rates for commercial CAT-II

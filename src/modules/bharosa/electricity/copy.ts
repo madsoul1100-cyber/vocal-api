@@ -17,12 +17,27 @@ export const ECOPY = {
         ? 'यह बिजली बिल नहीं लगता। कृपया बिल की फोटो भेजें।'
         : 'That does not look like an electricity bill. Please send a photo of your bill.',
 
+  /** Unreadable bill photo — distinct from not-a-bill (manager §5). */
+  unclearPhoto: (lang: L) =>
+    lang === 'te'
+      ? 'ఫోటో కొంచెం అస్పష్టంగా ఉంది, నంబర్లు చదవలేకపోతున్నాను. పగటిపూట వెలుతురులో, బిల్లు అంతా కనిపించేలా నిటారుగా మళ్లీ ఫోటో పంపండి. ఊహించి చెప్పను.'
+      : lang === 'hi'
+        ? 'फोटो थोड़ी धुँधली है, अंक नहीं पढ़ पा रही। दिन की रोशनी में, बिल पूरा दिखे और सीधा हो — फिर भेजें। अनुमान से नहीं लिखूँगी।'
+        : 'The photo is a bit unclear and I cannot read the numbers. Please retake it upright in daylight so the whole bill is visible. I will not guess.',
+
   unclear: (lang: L, fields: string[]) =>
     lang === 'te'
       ? `కొన్ని అంకెలు స్పష్టంగా చదవలేకపోయాను (${fields.join(', ')}). ఫోటో మళ్లీ పంపండి లేదా సంఖ్య టైప్ చేయండి. నేను ఊహించను.`
       : lang === 'hi'
         ? `कुछ अंक साफ़ नहीं पढ़ सके (${fields.join(', ')})। फोटो फिर भेजें या संख्या टाइप करें। मैं अनुमान से नहीं लिखूँगी।`
         : `I could not read some numbers clearly (${fields.join(', ')}). Please send the photo again or type the number. I will not guess.`,
+
+  differentService: (lang: L, existing: string, incoming: string) =>
+    lang === 'te'
+      ? `ఈ బిల్లు సర్వీస్ నం ${incoming} — మునుపటి చరిత్ర ${existing} కి చెందినది. వేరు కనెక్షన్ల బిల్లులు కలపను. ఈ కొత్త కనెక్షన్‌తో కొత్త చరిత్ర మొదలుపెట్టాలా? *New connection history* అని చెప్పండి, లేదా మునుపటిదే కొనసాగించాలంటే సరియైన బిల్లు పంపండి.`
+      : lang === 'hi'
+        ? `यह बिल सर्विस नं ${incoming} का है — पिछला इतिहास ${existing} का है। अलग कनेक्शन मिलाऊँगी नहीं। नए कनेक्शन से इतिहास शुरू करें तो *New connection history* लिखें, या सही बिल भेजें।`
+        : `This bill is for service ${incoming}, but your history is for ${existing}. I will not merge bills across different service numbers. Reply *New connection history* to start fresh for this connection, or send a bill for the same service.`,
 
   confirmPrompt: (lang: L) =>
     lang === 'te'
